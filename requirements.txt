@@ -1,0 +1,31 @@
+# jarvis - dependencias diretas, versoes fixas (D14c).
+# So o que o Technology Scout decidiu em docs/forja/TECHNOLOGY.md (D36-D39).
+# Instalar no ambiente virtual do proprio repositorio, nunca global (D14a/D14f):
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install -U pip
+#   .venv\Scripts\python -m pip install -r requirements.txt
+# O lock completo e resolvido esta em requirements.lock.txt.
+
+# Wheels CUDA 12.8 do PyTorch: as wheels de Windows do PyPI sao CPU-only e as
+# builds CUDA antigas nao tem kernels para a arquitetura Blackwell (sm_120).
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# Base / orquestracao: captura, VAD, wake word e STT (D36, TECHNOLOGY.md S1/S5)
+RealtimeSTT==0.3.104
+
+# Transcricao local no GPU (D39, S3). Vem como dependencia do RealtimeSTT,
+# fixada aqui por ser o motor que o portao do ambiente testa.
+faster-whisper==1.1.1
+
+# Palavra de ativacao "hey jarvis" (D38, S2)
+openwakeword==0.6.0
+
+# Voz de resposta local (D37, S4). O extra [piper] nao existe no RealtimeTTS
+# 0.4.9 (o pip so avisa); o motor vem do pacote piper-tts abaixo.
+RealtimeTTS==0.4.9
+piper-tts==1.8.0
+
+# Dependencia do RealtimeSTT/openwakeword, fixada na build CUDA 12.8 para a
+# GPU Blackwell e para o CTranslate2 encontrar cuDNN/cuBLAS dentro do venv.
+torch==2.9.1+cu128
+torchaudio==2.9.1+cu128
