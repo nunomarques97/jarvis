@@ -1,0 +1,67 @@
+# Este repositório vai ser público. Nada aqui dentro pode levar conversas,
+# áudio, transcrições, segredos ou caminhos privados do Sponsor.
+
+# Conversas, sessões e estado das ferramentas de IA
+.claude/
+.claude/**
+docs/forja/
+forja/
+**/HANDOVER.md
+**/SPONSOR-QUEUE.md
+*transcript*
+*conversa*
+*conversation*
+
+# Áudio e transcrições (é a matéria-prima deste projeto e é privada)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.webm
+*.m4a
+recordings/
+audio/
+transcripts/
+captures/
+
+# Credenciais
+.env
+.env.*
+*.key
+*.pem
+*.jks
+*.keystore
+*token*
+*secret*
+credentials.json
+google-services.json
+
+# Modelos e caches pesados
+models/
+*.bin
+*.onnx
+*.gguf
+*.pt
+*.safetensors
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+dist/
+build/
+
+# Sistema e logs
+.DS_Store
+Thumbs.db
+*.log
+logs/
+tmp/

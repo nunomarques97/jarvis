@@ -24,6 +24,15 @@ Mais tarde, quando o programa de trading existir: "prepara a trade" produz uma p
 - Nenhuma ordem de compra ou venda por voz, nem agora nem depois: a arquitetura do crypto-radar (EX-1) proíbe uma IA a executar ordens, e a voz não é autorização para gastar dinheiro.
 - Nada é instalado no crypto-radar nem em nenhum outro projeto do Sponsor a partir daqui.
 
+## Repositório público
+
+Este repositório vai para o GitHub em público. Por isso:
+
+- Nada de conversas, transcrições, áudio ou estado das ferramentas de IA em commits: `.claude/`, `docs/forja/`, gravações e transcrições estão no `.gitignore`.
+- Nada de segredos, tokens, `.env` ou caminhos privados do Sponsor dentro do código ou da documentação. Configuração pessoal fica em ficheiros ignorados, com um `.example` versionado.
+- Nenhum `git push` sem o Sponsor autorizar nesse momento, e nunca um force push.
+- Antes de cada commit, verificar que nenhum ficheiro de credenciais ou de áudio entrou no staging.
+
 ## Hardware
 
 Windows 11, RTX 5060 Ti com 16 GB de VRAM, i5-14400F, 32 GB de RAM, Ollama local já instalado.
