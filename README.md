@@ -1,0 +1,29 @@
+# jarvis — controlo por voz das sessões do Claude Code
+
+Assistente de voz local que ouve a palavra de ativação "hey jarvis", transcreve o pedido no PC do Sponsor e o entrega a uma sessão do Claude Code, respondendo em voz alta. Substitui escrever prompts nos projetos do Sponsor (crypto-radar, tollwise, chamora-landing e os que vierem).
+
+## O que o Sponsor quer dizer em voz alta
+
+- "Hey jarvis, abre o VS Code no crypto-radar."
+- "Hey jarvis, pede o status da última sessão do crypto-radar."
+- "Hey jarvis, lê-me o relatório do último run."
+- "Hey jarvis, lança o run X no projeto Y."
+
+Mais tarde, quando o programa de trading existir: "prepara a trade" produz uma proposta com números; a confirmação é sempre escrita pelo Sponsor, nunca por voz.
+
+## Fases
+
+**Fase 1 — escolher a base (time box: 1 hora de pesquisa).** Comparar projetos open source de assistente de voz com critérios explícitos: funciona offline no Windows com GPU NVIDIA, palavra de ativação, transcrição local, voz de resposta local, licença permissiva, projeto vivo, $0, e facilidade de ligar a um processo externo em vez de a uma API paga. Decisão escrita com as razões e as alternativas rejeitadas. Se nenhum servir, dizê-lo e propor o mínimo escrito de raiz.
+
+**Fase 2 — clonar e adaptar.** Instalar a base escolhida, ligá-la ao Claude Code (entregar o texto a uma sessão existente é preferível a abrir uma nova em cada frase), tratar os comandos locais sem gastar tokens (abrir pastas, abrir o VS Code, dizer as horas), e deixar o Sponsor a falar com o Claude pela primeira vez.
+
+## Regras
+
+- Tudo local e a $0: sem cloud paga, sem chaves de API, sem enviar áudio para fora do PC.
+- Português europeu nos comandos; se o reconhecimento falhar, medir e propor inglês em vez de adivinhar.
+- Nenhuma ordem de compra ou venda por voz, nem agora nem depois: a arquitetura do crypto-radar (EX-1) proíbe uma IA a executar ordens, e a voz não é autorização para gastar dinheiro.
+- Nada é instalado no crypto-radar nem em nenhum outro projeto do Sponsor a partir daqui.
+
+## Hardware
+
+Windows 11, RTX 5060 Ti com 16 GB de VRAM, i5-14400F, 32 GB de RAM, Ollama local já instalado.
