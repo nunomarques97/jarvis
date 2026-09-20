@@ -71,6 +71,7 @@ from jarvis.config import (  # noqa: E402
     ConfigError,
     carregar_config,
 )
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 from jarvis.router import encaminhar  # noqa: E402
 
 PASTA_SCRIPTS = Path(__file__).resolve().parent
@@ -835,6 +836,7 @@ def construir_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    forcar_consola_utf8()
     args = construir_parser().parse_args(argv)
 
     print("=== jarvis - medir_voz (amostra sintetica pt-PT, D7/D34) ===")

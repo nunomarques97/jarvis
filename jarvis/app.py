@@ -83,6 +83,7 @@ from jarvis.audio_util import (
     registar_dlls_do_torch,
 )
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
+from jarvis.consola import forcar_consola_utf8
 from jarvis.router import ResultadoRouter, encaminhar
 
 # --- Constantes do envelope (nada configuravel por texto vindo de fora) -----
@@ -1026,6 +1027,7 @@ def construir_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    forcar_consola_utf8()
     args = construir_parser().parse_args(argv)
 
     if args.autoteste:

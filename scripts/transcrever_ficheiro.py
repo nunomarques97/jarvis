@@ -54,6 +54,7 @@ from jarvis.audio_util import (  # noqa: E402
     PASTA_MODELOS_FASTER_WHISPER,
     registar_dlls_do_torch,
 )
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 MODELO_PREFERIDO = "medium"
 MODELO_FALLBACK = "small"
@@ -300,6 +301,7 @@ def prompt_dos_argumentos(args: argparse.Namespace) -> str | None:
 
 
 def main() -> int:
+    forcar_consola_utf8()
     parser = construir_parser()
     args = parser.parse_args()
 

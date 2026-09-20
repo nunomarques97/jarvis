@@ -64,6 +64,7 @@ from jarvis.audio_util import (  # noqa: E402
     reamostrar_pcm16,
 )
 from jarvis.canal_claude import verificar_executavel_seguro  # noqa: E402
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 NOME_DA_VOZ = "pt_PT-tugao-medium"
 MODELO_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx"
@@ -399,6 +400,7 @@ def _autoteste() -> int:
 
 
 def main() -> int:
+    forcar_consola_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("texto", nargs="?", help="frase a sintetizar em portugues europeu")
     parser.add_argument(

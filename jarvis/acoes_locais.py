@@ -76,6 +76,7 @@ if str(RAIZ) not in sys.path:
 
 from jarvis.canal_claude import EXTENSOES_QUE_PASSAM_PELO_SHELL, verificar_executavel_seguro  # noqa: E402
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, Projeto, carregar_config  # noqa: E402
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 from jarvis.router import ResultadoRouter  # noqa: E402
 
 #: Nomes de accao que a lista branca da D4 conhece e que esta task implementa
@@ -456,6 +457,7 @@ def _resposta(resultado: ResultadoAcao, *, sem_voz: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    forcar_consola_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--config",

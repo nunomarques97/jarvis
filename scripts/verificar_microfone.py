@@ -49,6 +49,7 @@ from jarvis.audio_util import (  # noqa: E402
     nivel_rms,
     pico_pcm16,
 )
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 VARIAVEL_NOME_MICROFONE = "JARVIS_NOME_MICROFONE"
 SEGUNDOS_DE_CAPTURA_PADRAO = 3.0
@@ -281,6 +282,7 @@ def _autoteste() -> int:
 
 
 def main() -> int:
+    forcar_consola_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--dispositivo",

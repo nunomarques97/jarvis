@@ -17,6 +17,11 @@ import traceback
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
+if str(RAIZ) not in sys.path:
+    sys.path.insert(0, str(RAIZ))
+
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
+
 PASTA_MODELOS = RAIZ / "models" / "faster-whisper"
 MODELO = "small"
 TAXA_AMOSTRAGEM = 16_000
@@ -49,6 +54,7 @@ def registar_dlls_do_torch() -> list[str]:
 
 
 def main() -> int:
+    forcar_consola_utf8()
     import numpy as np
     import torch
 

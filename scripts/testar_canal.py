@@ -70,6 +70,7 @@ from jarvis.canal_claude import (  # noqa: E402
     localizar_cli,
     titulo_da_janela_configurado,
 )
+from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 PASTA_DE_PROVA = RAIZ / "docs" / "forja" / "evidence"
 
@@ -594,6 +595,7 @@ def escrever_prova(
 
 
 def main(argv: list[str] | None = None) -> int:
+    forcar_consola_utf8()
     analisador = argparse.ArgumentParser(description="Escada do canal para o Claude Code")
     analisador.add_argument("--frase", default=FRASE_DE_TESTE)
     analisador.add_argument("--timeout", type=float, default=TIMEOUT_POR_DEGRAU_S)
