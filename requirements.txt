@@ -20,9 +20,10 @@ faster-whisper==1.1.1
 # Palavra de ativacao "hey jarvis" (D38, S2)
 openwakeword==0.6.0
 
-# Voz de resposta local (D37, S4). O extra [piper] nao existe no RealtimeTTS
-# 0.4.9 (o pip so avisa); o motor vem do pacote piper-tts abaixo.
-RealtimeTTS==0.4.9
+# Voz de resposta local (D47, S4 — corrige a D37: a 0.4.9 nao tinha PiperEngine
+# nenhum). A partir da 0.7.0 o extra [piper] traz o motor real, que fala com o
+# piper.exe do proprio pacote piper-tts por baixo.
+RealtimeTTS[piper]==0.8.5
 piper-tts==1.8.0
 
 # Dependencia do RealtimeSTT/openwakeword, fixada na build CUDA 12.8 para a
