@@ -6,6 +6,8 @@
 .claude/**
 docs/forja/
 forja/
+# CLAUDE.md tem o bloco Forja com caminhos absolutos do disco do Sponsor (D1/D10/D45)
+/CLAUDE.md
 **/HANDOVER.md
 **/SPONSOR-QUEUE.md
 *transcript*
