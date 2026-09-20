@@ -522,9 +522,15 @@ class Jarvis:
             "claude": "texto para o Claude Code",
             "nada": "nada",
         }[resultado.tipo]
+        # D62: o que a limpeza do residuo da palavra de ativacao tirou do
+        # inicio da frase, explicavel ao Sponsor numa frase deste log.
+        residuo = (
+            f"'{resultado.residuo_removido}'" if resultado.residuo_removido else "nenhum"
+        )
         registo.marcar(
             3,
             f"decisao={resultado.tipo} -> {alvo} | confianca={'nao medida' if not resultado.confianca_verificada else 'verificada'}"
+            f" | residuo da wake word removido: {residuo}"
             f" | motivo: {resultado.motivo}",
         )
         return resultado

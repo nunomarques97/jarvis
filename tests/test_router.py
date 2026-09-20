@@ -331,5 +331,85 @@ class TestProibicaoPermanenteDeOrdensFinanceiras(BaseRouter):
         self.assertEqual(resultado.argumento, str(CAMINHO_BOLSA))
 
 
+class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
+    """D62: residuo da wake word tirado do INICIO, antes do encaminhamento.
+
+    Casos e citacoes de linha vindos de logs/jarvis-2026-09-20.log (a janela
+    do teste real, 10:09-10:20 do dia 20 set 2026) e da propria D62
+    (docs/forja/DECISIONS.md) onde nao ha uma linha de log para citar.
+    """
+
+    def test_jarvis_colado_ao_inicio_vira_acao_local_das_horas(self) -> None:
+        # O proprio exemplo da D62 (docs/forja/DECISIONS.md): "jarvis, que
+        # horas sao" falha onde "que horas sao" passa — sem "hey", para
+        # provar que o residuo de uma so palavra tambem e removido (nao ha
+        # linha de log para este caso: e o exemplo escrito na decisao).
+        resultado = encaminhar("Jarvis, que horas sao?", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "horas")
+        self.assertEqual(resultado.residuo_removido, "jarvis")
+
+    def test_hey_jarvis_colado_ao_inicio_vira_acao_local_das_horas(self) -> None:
+        # logs/jarvis-2026-09-20.log linha 138 e 613 ("diz: 'hey jarvis, que
+        # horas sao?'" — o guiao de arranque exibido ao Sponsor nesta janela
+        # do teste real, a mesma frase que a wake word cola a transcricao).
+        resultado = encaminhar("hey jarvis, que horas sao", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "horas")
+        self.assertEqual(resultado.residuo_removido, "hey jarvis")
+
+    def test_jorvis_que_oracao_vai_para_claude_e_nao_executa_nada(self) -> None:
+        # logs/jarvis-2026-09-20.log linha 647: a transcricao real do teste do
+        # Sponsor saiu 'Jorvis, que oração!' em vez de 'Jarvis, que horas
+        # são!'. PROIBIDO o dicionario de enganos (D62/D4/D5/D9): 'jorvis' e
+        # um residuo conhecido da wake word e sai do inicio, mas o que sobra —
+        # 'que oracao' — NUNCA e mapeado para 'que horas sao'. Tem de seguir
+        # como texto para o Claude Code, sem executar accao nenhuma.
+        resultado = encaminhar("Jorvis, que oração!", self.config)
+        self.assertEqual(resultado.tipo, "claude")
+        self.assertIsNone(resultado.nome_acao)
+        self.assertIsNone(resultado.argumento)
+        self.assertEqual(resultado.texto, "Jorvis, que oração!")
+        self.assertEqual(resultado.residuo_removido, "jorvis")
+
+    def test_hei_jarvis_e_ei_jarvis_tambem_sao_residuo_conhecido(self) -> None:
+        # Variantes da lista fechada da D62 que nao vieram do log mas estao
+        # nomeadas no criterio de aceitacao da task.
+        resultado_hei = encaminhar("hei jarvis, que horas sao", self.config)
+        self.assertEqual(resultado_hei.tipo, "local")
+        self.assertEqual(resultado_hei.nome_acao, "horas_e_data")
+        self.assertEqual(resultado_hei.residuo_removido, "hei jarvis")
+
+        resultado_ei = encaminhar("ei jarvis, que horas sao", self.config)
+        self.assertEqual(resultado_ei.tipo, "local")
+        self.assertEqual(resultado_ei.nome_acao, "horas_e_data")
+        self.assertEqual(resultado_ei.residuo_removido, "ei jarvis")
+
+    def test_limpeza_nao_come_o_meio_nem_o_fim_da_frase(self) -> None:
+        # A limpeza e so do INICIO: um projeto chamado exatamente "jarvis" no
+        # MEIO ou no FIM de um comando continua a ser reconhecido tal e qual,
+        # e uma frase so entregue ao Claude Code por mencionar "jarvis" a meio
+        # continua inteira, sem nada cortado.
+        caminho_jarvis = Path("D:/caminho/para/jarvis")
+        config_com_projeto_jarvis = Config(
+            microfone="Microfone Ficticio de Teste",
+            projetos=(Projeto(nome="jarvis", caminho=caminho_jarvis),),
+        )
+        resultado_pasta = encaminhar("abre a pasta do jarvis", config_com_projeto_jarvis)
+        self.assertEqual(resultado_pasta.tipo, "local")
+        self.assertEqual(resultado_pasta.nome_acao, "abrir_pasta")
+        self.assertEqual(resultado_pasta.argumento, str(caminho_jarvis))
+        self.assertIsNone(resultado_pasta.residuo_removido)
+
+        resultado_meio = encaminhar(
+            "diz ao claude que o jarvis esta bem", self.config
+        )
+        self.assertEqual(resultado_meio.tipo, "claude")
+        self.assertEqual(resultado_meio.texto, "diz ao claude que o jarvis esta bem")
+        self.assertIsNone(resultado_meio.residuo_removido)
+
+
 if __name__ == "__main__":
     unittest.main()

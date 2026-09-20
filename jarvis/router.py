@@ -27,6 +27,24 @@ A lista branca fechada da D4, por esta ordem de deteccao:
   (d) calar / cala-te;
   (e) adormecer e acordar o jarvis.
 
+LIMPEZA DO RESIDUO DA PALAVRA DE ATIVACAO (D62, causa-raiz do defeito 1):
+o microfone continua aberto depois da deteccao da wake word, por isso o audio
+dela entra muitas vezes na janela transcrita e cola-se ao INICIO da frase
+("jarvis, que horas sao" em vez de "que horas sao"). Antes de qualquer outra
+coisa, `encaminhar()` tira do inicio da frase normalizada um residuo dessa
+palavra, a partir da lista FECHADA e pequena `RESIDUOS_PALAVRA_DE_ATIVACAO`
+(nunca aproximacao/fuzzy — essa fica para a D62.3, fora desta task). So o
+INICIO: nunca toca no meio nem no fim da frase, e nunca esvazia a frase (um
+residuo que seria a frase toda fica tal e qual, porque nesse caso a guarda da
+D5 ja trata o caso como "nada", nunca como comando). O que foi removido fica
+em `ResultadoRouter.residuo_removido`, para o log da etapa 3 (jarvis/app.py)
+poder explicar ao Sponsor, numa frase, porque e que "jarvis, que horas sao"
+virou a mesma accao que "que horas sao". PROIBIDO o dicionario de enganos: uma
+transcricao que nao e um residuo conhecido da wake word colado a um comando
+da lista branca NUNCA vira essa accao por adivinhacao — "jorvis, que oracao"
+fica fora da lista branca e segue como texto para o Claude Code, exactamente
+como antes desta limpeza (D4/D5/D9, inaceitavel n.1 do PRODUCT-PROFILE).
+
 COMO A LISTA BRANCA E FECHADA (corrige o bloqueador 1 da revisao da T4 a1):
 cada padrao e casado com `re.fullmatch` contra a frase NORMALIZADA INTEIRA,
 nunca com `search`. Uma frase que apenas contenha o gatilho ("diz ao claude
@@ -107,6 +125,21 @@ COMPRIMENTO_MINIMO_CARACTERES = 4
 #: encaminhar(); um resultado com confianca_verificada=False significa que a
 #: metade "confianca" da guarda da D5 nao correu naquela frase.
 CONFIANCA_MINIMA = 0.35
+
+#: Lista FECHADA e pequena das variantes escritas do residuo da palavra de
+#: ativacao (D62), depois de `_normalizar()` (minusculas, sem acentos, sem
+#: pontuacao). So o que esta aqui e o que a medicao das 20 frases mostrou que
+#: aparece de facto (D62) conta como residuo — nada de aproximacao/fuzzy.
+#: Ordem: variantes de duas palavras primeiro, para que "hey jarvis" nao pare
+#: a meio em "hey" sozinho; "jorvis" e a grafia que o log real mostrou (linha
+#: 647 de logs/jarvis-2026-09-20.log, "Jorvis, que oração!").
+RESIDUOS_PALAVRA_DE_ATIVACAO: tuple[str, ...] = (
+    "hey jarvis",
+    "hei jarvis",
+    "ei jarvis",
+    "jorvis",
+    "jarvis",
+)
 
 #: Correspondencias EXATAS (depois de normalizar) que o Whisper produz
 #: tipicamente sobre silencio/ruido de fundo em vez de nao dizer nada — a D51
@@ -327,6 +360,27 @@ def _normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", sem_acentos).strip()
 
 
+def _remover_residuo_wake_word(normalizado: str) -> tuple[str, str | None]:
+    """Tira do INICIO da frase normalizada um residuo conhecido da wake word.
+
+    So a lista FECHADA `RESIDUOS_PALAVRA_DE_ATIVACAO` conta (D62): nada de
+    aproximacao/fuzzy (D62.3, fora desta task). Remove no maximo um residuo,
+    uma unica vez — a wake word so acontece uma vez por frase. Nunca esvazia
+    a frase: se o residuo fosse a frase toda, nao se remove nada (a guarda de
+    tokens da D5, mais acima em `encaminhar()`, ja trata isso como "nada").
+    Devolve (frase_sem_residuo, o_que_foi_removido_ou_None).
+    """
+    palavras = normalizado.split()
+    for residuo in RESIDUOS_PALAVRA_DE_ATIVACAO:
+        palavras_do_residuo = residuo.split()
+        n = len(palavras_do_residuo)
+        if len(palavras) <= n:
+            continue  # sobraria frase vazia: nunca se remove
+        if palavras[:n] == palavras_do_residuo:
+            return " ".join(palavras[n:]), residuo
+    return normalizado, None
+
+
 def _tirar_um_grupo(palavras: list[str], grupos: tuple[tuple[str, ...], ...], *, inicio: bool) -> list[str] | None:
     """Retira UM grupo de cortesia do inicio ou do fim, ou devolve None."""
     for grupo in grupos:
@@ -441,6 +495,12 @@ class ResultadoRouter:
     #: da D5. False significa que essa metade da guarda nao correu (ver
     #: CONFIANCA_MINIMA) — o log da T6 tem de o registar.
     confianca_verificada: bool = False
+    #: O residuo da palavra de ativacao removido do INICIO da frase (D62), tal
+    #: e qual esta em `RESIDUOS_PALAVRA_DE_ATIVACAO` (ex.: "hey jarvis",
+    #: "jorvis"), ou None quando nenhum residuo conhecido foi encontrado. Fica
+    #: aqui para o log da etapa 3 (jarvis/app.py) poder explicar ao Sponsor,
+    #: numa frase, o que foi tirado antes do encaminhamento.
+    residuo_removido: str | None = None
 
 
 def _acao_da_lista_branca(variante: str) -> tuple[str, str | None] | tuple[None, None]:
@@ -508,12 +568,20 @@ def encaminhar(
             confianca_verificada=confianca_verificada,
         )
 
+    # --- Limpeza do residuo da palavra de ativacao (D62), ANTES do
+    # encaminhamento: so a lista FECHADA RESIDUOS_PALAVRA_DE_ATIVACAO, so no
+    # INICIO, nunca no meio nem no fim, nunca esvazia a frase (ver a guarda
+    # dentro de `_remover_residuo_wake_word`). O que foi removido viaja em
+    # `residuo_removido` ate ao resultado, para o log da etapa 3 o explicar.
+    normalizado, residuo_removido = _remover_residuo_wake_word(normalizado)
+
     def como_texto(motivo: str) -> ResultadoRouter:
         return ResultadoRouter(
             "claude",
             texto=limpo,
             motivo=motivo,
             confianca_verificada=confianca_verificada,
+            residuo_removido=residuo_removido,
         )
 
     # --- Guardas: uma frase negada ou dirigida a alguem nunca e comando ----
@@ -536,6 +604,7 @@ def encaminhar(
                 argumento=argumento,
                 motivo=f"{nome_acao} (D4), frase inteira casada com a lista branca",
                 confianca_verificada=confianca_verificada,
+                residuo_removido=residuo_removido,
             )
 
         for padrao, acao, etiqueta in (
@@ -558,6 +627,7 @@ def encaminhar(
                 argumento=str(projeto.caminho),
                 motivo=f"{acao} no projeto conhecido '{projeto.nome}' ({etiqueta})",
                 confianca_verificada=confianca_verificada,
+                residuo_removido=residuo_removido,
             )
 
     return como_texto(motivo_da_recusa or _motivo_do_texto(normalizado))
