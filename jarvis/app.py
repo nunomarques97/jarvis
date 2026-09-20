@@ -219,7 +219,16 @@ class LogDaSessao:
         self.caminho = caminho_do_log(quando, pasta)
         self.consola = consola if consola is not None else sys.stdout
         self._relogio_de_parede = relogio_de_parede
-        self._tranca = threading.Lock()
+        # RLock, nao Lock (bloqueador 1 do Security Reviewer, T4/T12): um
+        # SIGINT corre na thread principal entre bytecodes: se cair enquanto
+        # essa mesma thread esta dentro de `_escrever` (a tranca ja detida),
+        # `ao_ctrl_c` -> `Jarvis.calar_agora` -> `voz.calar_agora` volta a
+        # chamar `log.linha`/`_escrever` NA MESMA thread antes de matar o
+        # piper.exe. Com `threading.Lock` isso e um deadlock (a tranca nao
+        # sabe quem e o dono); com `RLock` a mesma thread reentra sem
+        # bloquear. So protege a escrita (consola+ficheiro); nunca fica presa
+        # a espera doutra thread.
+        self._tranca = threading.RLock()
         garantir_pasta(self.caminho.parent)
         self._ficheiro = self.caminho.open("a", encoding="utf-8")
 

@@ -103,7 +103,9 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from jarvis.audio_util import (  # noqa: E402
+    PASTA_EVIDENCIA_FORJA,
     PASTA_MODELOS_PIPER,
+    caminho_evidencia_de_saida,
     caminho_para_mostrar,
     caminho_wav_de_saida,
     garantir_pasta,
@@ -1029,6 +1031,22 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
     o "cala-te" da lista branca (nao definitivo) e o Ctrl+C / saida do
     processo (definitivo, depois do qual nada novo e falado).
     """
+    # Confinamento do --evidencia a docs/forja/evidence/ (bloqueador 2 do
+    # Security Reviewer, T4/T12): validado JA, antes de gastar tempo a
+    # sintetizar seja o que for, para um caminho invalido nunca chegar a
+    # `garantir_pasta`/`write_text` (que criavam pastas e escreviam fora do
+    # repo com os privilegios do Sponsor).
+    try:
+        destino = (
+            caminho_evidencia_de_saida(caminho_pedido)
+            if caminho_pedido
+            else PASTA_EVIDENCIA_FORJA / f"silencio-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
+        )
+    except ValueError as erro:
+        print(f"FALHOU (confinamento do --evidencia, D1/D10): {erro}", file=sys.stderr)
+        return 1
+    garantir_pasta(destino.parent)
+
     print("=== jarvis - prova do silencio imediato (D60) - sem som, sem microfone ===")
     # O "antes": o mesmo pedido de paragem sem o wrapper da S12, para o numero
     # da fasquia ter com o que ser comparado.
@@ -1050,13 +1068,6 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
     (RAIZ / "audio" / "_prova_silencio_depois.wav").unlink(missing_ok=True)
 
     agora = datetime.datetime.now()
-    destino = Path(caminho_pedido) if caminho_pedido else (
-        RAIZ / "docs" / "forja" / "evidence" / f"silencio-{agora:%Y%m%d-%H%M%S}.md"
-    )
-    if not destino.is_absolute():
-        destino = RAIZ / destino
-    garantir_pasta(destino.parent)
-
     partes: list[str] = []
     partes.append("# Evidencia de tempo do silencio imediato (T4, D60)\n")
     partes.append(
@@ -1182,7 +1193,12 @@ def main(argv: list[str] | None = None) -> int:
         "--evidencia",
         default=None,
         metavar="FICHEIRO",
-        help="onde escrever a evidencia de --prova-silencio (por omissao: docs/forja/evidence/)",
+        help=(
+            "ficheiro .md a escrever DENTRO de docs/forja/evidence/ (por omissao: "
+            "docs/forja/evidence/silencio-<timestamp>.md). Um caminho relativo conta a partir "
+            "da raiz do repositorio; qualquer caminho fora dessa pasta, ou sem sufixo .md, e "
+            "recusado com codigo 1 e sem escrever nada (D1/D10)"
+        ),
     )
     args = parser.parse_args(argv)
 

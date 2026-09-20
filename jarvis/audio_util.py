@@ -82,6 +82,69 @@ def caminho_wav_de_saida(valor: str | Path, raiz: Path | None = None) -> Path:
     return caminho
 
 
+#: Onde a evidencia de `--prova-silencio` (D60(4)(b), T4/T12) tem de cair: a
+#: unica pasta deste repositorio que fica ao mesmo tempo dentro dele e
+#: apanhada pelo .gitignore para ficheiros `.md` (`.gitignore` so ignora
+#: `docs/forja/` inteira; nenhuma outra regra cobre `.md`).
+PASTA_EVIDENCIA_FORJA = RAIZ / "docs" / "forja" / "evidence"
+
+#: Sufixo obrigatorio de qualquer ficheiro de evidencia escrito por esta
+#: guarda.
+SUFIXO_DE_EVIDENCIA_PERMITIDO = ".md"
+
+
+def caminho_evidencia_de_saida(
+    valor: str | Path,
+    pasta_permitida: Path | None = None,
+    raiz: Path | None = None,
+) -> Path:
+    """Valida um caminho de evidencia vindo de fora (`--evidencia`).
+
+    Mesma forma e mesma intencao de `caminho_wav_de_saida` acima, mas
+    confinada a `docs/forja/evidence/` em vez da raiz inteira do
+    repositorio (mesmo padrao ja em vigor, revisto e aprovado, em
+    `scripts/medir_voz.py::caminho_evidencia_de_saida` para o `--saida`
+    dessa medicao). A evidencia de `--prova-silencio` leva a saida do
+    `tasklist` da maquina do Sponsor e, no ramo de erro, caminhos absolutos
+    do disco dele (`piper.exe nao encontrado em 'C:\\Users\\...'`) — o mesmo
+    defeito do `--saida` de `scripts/gerar_wav.py` que gerou a Q4 na fila do
+    Sponsor (D1/D10/D52/D64(A)).
+
+    1. acaba em `.md`;
+    2. fica dentro de `docs/forja/evidence/`. Nao basta "dentro do
+       repositorio": so essa subpasta esta no `.gitignore`, logo
+       `--evidencia notas.md` (que cairia na raiz) ou `--evidencia
+       docs/notas.md` ficariam em pasta VERSIONADA.
+
+    Um caminho relativo resolve-se contra a RAIZ do repositorio (nao contra
+    a pasta permitida): assim `--evidencia docs/notas.md` e recusado em vez
+    de aceite em silencio a escrever noutro sitio que nao o pedido.
+
+    Devolve o caminho absoluto ja normalizado; levanta `ValueError` legivel
+    se alguma das duas falhar. Nao cria nem toca em nada no disco.
+    """
+    pasta = (PASTA_EVIDENCIA_FORJA if pasta_permitida is None else Path(pasta_permitida)).resolve()
+    raiz_para_relativos = (RAIZ if raiz is None else Path(raiz)).resolve()
+    caminho = Path(valor).expanduser()
+    if not caminho.is_absolute():
+        caminho = raiz_para_relativos / caminho
+    caminho = caminho.resolve()
+    if caminho.suffix.lower() != SUFIXO_DE_EVIDENCIA_PERMITIDO:
+        raise ValueError(
+            f"evidencia '{valor}': so se escrevem ficheiros {SUFIXO_DE_EVIDENCIA_PERMITIDO} "
+            "(este ficheiro pode levar a saida do tasklist e caminhos absolutos da maquina "
+            "do Sponsor, D1/D10)"
+        )
+    if not caminho.is_relative_to(pasta):
+        raise ValueError(
+            f"evidencia '{valor}' cai fora de '{pasta}' (resolvida para {caminho}); a "
+            "evidencia do silencio imediato so pode ser escrita na unica pasta deste "
+            "repositorio que o .gitignore apanha para ficheiros .md (docs/forja/evidence/) "
+            "— D1/D10"
+        )
+    return caminho
+
+
 def caminho_para_mostrar(caminho: Path) -> Path:
     """O caminho como se escreve num log: relativo a raiz do repositorio.
 
