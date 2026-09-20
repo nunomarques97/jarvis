@@ -184,17 +184,27 @@ PADRAO_FINANCEIRO = re.compile(
 # --- Guardas que mandam sempre para o Claude Code ---------------------------
 
 #: Negacao em qualquer ponto da frase: "nao abras o vs code no exemplo-um" nao
-#: e uma ordem de abrir. Uma frase negada nunca vira acao local (D4).
-PADRAO_NEGACAO = re.compile(r"\b(nao|nunca|jamais|nem)\b")
+#: e uma ordem de abrir. Uma frase negada nunca vira acao local (D4). D58a:
+#: as MESMAS regras valem em ingles — "do not"/"never"/"not" (a forma
+#: contraida "don't" chega aqui ja normalizada para "don t" por `_normalizar`,
+#: por isso as formas contraidas entram com o espaco literal).
+PADRAO_NEGACAO = re.compile(
+    r"\b(nao|nunca|jamais|nem"
+    r"|not|never"
+    r"|don\s+t|do\s+not|doesn\s+t|didn\s+t|won\s+t|can\s+t|isn\s+t"
+    r")\b"
+)
 
 #: Destinatario explicito: a frase e para ser ENTREGUE a alguem ("diz ao
-#: claude...", "pergunta...", "manda...", "escreve..."), logo e texto, nunca
-#: um comando local. "diz-me as horas" e excecao (o destinatario e o proprio
-#: jarvis), por isso o lookahead deixa passar "me"/"nos".
+#: claude...", "pergunta...", "manda...", "escreve...", "tell claude...",
+#: "ask claude..."), logo e texto, nunca um comando local. "diz-me as horas" /
+#: "tell me the time" sao excecao (o destinatario e o proprio jarvis), por
+#: isso o lookahead deixa passar "me"/"nos"/"us" (D58a).
 PADRAO_DESTINATARIO = re.compile(
     r"\b(diz|diga|digas|dizer|pergunta|pergunte|perguntar|manda|mande|mandar"
     r"|escreve|escreva|escrever|pede|peca|pedir|envia|envie|enviar"
-    r"|responde|responda|responder|avisa|avise|comunica)\b(?!\s+(me|nos)\b)"
+    r"|responde|responda|responder|avisa|avise|comunica"
+    r"|tell|ask|send|write|message)\b(?!\s+(me|nos|us)\b)"
 )
 
 # --- Lista branca fechada da D4 (todos casados com re.fullmatch) ------------
@@ -273,6 +283,130 @@ PADRAO_ABRIR_PASTA = re.compile(
     r"\s+(?P<projeto>[a-z0-9][a-z0-9\s]*)"
 )
 
+# --- Lista branca fechada da D4, formulacoes inglesas (D58a) ----------------
+#
+# MESMAS CINCO ACOES, traduzidas — zero acoes novas (D63). Nenhum verbo de
+# compra/venda entra aqui (D12/D52/D64: nem "buy", nem "sell", nem "order",
+# nem "trade", nem "broker", nem "wallet") e nenhum nome real de projeto
+# (D10/D64): o grupo `projeto` continua a capturar so a cauda do comando, tal
+# e qual a versao portuguesa, comparada com os mesmos nomes da configuracao.
+#
+# Prefixo tolerado de "tell me" nas perguntas de horas e data — o equivalente
+# ingles de `_DIZ_ME`. "tell me the time" NAO e dirigido ao Claude Code porque
+# o destinatario e o proprio jarvis (a guarda `PADRAO_DESTINATARIO` ja deixa
+# passar "tell" seguido de "me"/"us", ver acima).
+_TELL_ME_EN = r"(?:tell\s+me\s+)?"
+
+PADRAO_HORAS_EN = re.compile(
+    _TELL_ME_EN
+    + r"(?:"
+    r"what\s+time\s+is\s+it(?:\s+now)?"
+    r"|what\s+s\s+the\s+time"
+    r"|do\s+you\s+know\s+what\s+time\s+it\s+is"
+    r"|the\s+time"
+    r")"
+)
+
+PADRAO_DATA_EN = re.compile(
+    _TELL_ME_EN
+    + r"(?:"
+    r"what\s+day\s+is\s+it(?:\s+today)?"
+    r"|what\s+s\s+today\s+s\s+date"
+    r"|what\s+s\s+the\s+date(?:\s+today)?"
+    r"|the\s+date"
+    r")"
+)
+
+PADRAO_CALAR_EN = re.compile(
+    r"(?:"
+    r"be\s+quiet"
+    r"|stay\s+quiet"
+    r"|quiet"
+    r"|silence"
+    r"|stop\s+talking"
+    r"|stop\s+listening"
+    r"|shush"
+    r")"
+)
+
+PADRAO_ADORMECER_EN = re.compile(
+    r"(?:"
+    r"go\s+to\s+sleep"
+    r"|go\s+to\s+rest"
+    r"|sleep"
+    r"|enter\s+standby(?:\s+mode)?"
+    r"|standby\s+mode"
+    r"|hibernate"
+    r")"
+)
+
+PADRAO_ACORDAR_EN = re.compile(
+    r"(?:"
+    r"wake\s+up"
+    r"|wake"
+    r"|exit\s+standby(?:\s+mode)?"
+    r"|back\s+to\s+work"
+    r")"
+)
+
+#: Mesma logica do `PADRAO_ABRIR_VSCODE` portugues: o grupo `projeto` captura
+#: so a cauda do comando. "run"/"launch"/"start" sao o equivalente ingles das
+#: sinonimas portuguesas "arranca"/"lanca"/"inicia" — mesma accao, mais
+#: nenhuma.
+PADRAO_ABRIR_VSCODE_EN = re.compile(
+    r"(?:open|launch|start|run)"
+    r"\s+(?:up\s+)?"
+    r"(?:vs\s?code|vscode|visual\s?studio\s?code|the\s+editor)"
+    r"\s+(?:in\s+|for\s+)?(?:the\s+|project\s+)?"
+    r"(?P<projeto>[a-z0-9][a-z0-9\s]*)"
+)
+
+#: Ao contrario do portugues ("abre a pasta DO <projeto>"), a ordem natural em
+#: ingles poe o projeto ANTES da palavra "folder" ("open the <projeto>
+#: folder"): o grupo `projeto` e o mesmo fragmento de sempre, so a posicao no
+#: padrao muda. O quantificador preguicoso (`*?`) e o que permite ao grupo
+#: parar mesmo antes de " folder"/" directory" em vez de os engolir.
+PADRAO_ABRIR_PASTA_EN = re.compile(
+    r"(?:open|show)"
+    r"\s+(?:up\s+)?"
+    r"(?:the\s+)?"
+    r"(?P<projeto>[a-z0-9][a-z0-9\s]*?)"
+    r"\s+(?:folder|directory)"
+)
+
+#: Tabelas das accoes SEM projeto (horas/data/calar/adormecer/acordar), uma
+#: por lingua — usadas por `_acoes_bare_que_batem` para implementar a regra
+#: das duas listas da D58(b) sem depender de nenhuma deteccao de lingua: a
+#: MESMA frase normalizada e casada contra as duas tabelas, nunca so uma.
+_ACOES_BARE_PT: tuple[tuple[re.Pattern[str], str, str | None], ...] = (
+    (PADRAO_HORAS, "horas_e_data", "horas"),
+    (PADRAO_DATA, "horas_e_data", "data"),
+    (PADRAO_CALAR, "calar", None),
+    (PADRAO_ADORMECER, "adormecer", None),
+    (PADRAO_ACORDAR, "acordar", None),
+)
+
+_ACOES_BARE_EN: tuple[tuple[re.Pattern[str], str, str | None], ...] = (
+    (PADRAO_HORAS_EN, "horas_e_data", "horas"),
+    (PADRAO_DATA_EN, "horas_e_data", "data"),
+    (PADRAO_CALAR_EN, "calar", None),
+    (PADRAO_ADORMECER_EN, "adormecer", None),
+    (PADRAO_ACORDAR_EN, "acordar", None),
+)
+
+#: As accoes COM projeto (abrir vscode / abrir pasta), PT e EN juntas: cada
+#: par (padrao, nome_acao) e tentado por ordem contra cada variante; como as
+#: duas linguas exigem verbos/estrutura diferentes no INICIO e/ou no FIM da
+#: frase inteira (fullmatch), a mesma variante nunca pode casar por acidente
+#: com o padrao das duas linguas ao mesmo tempo — nao ha colisao possivel
+#: para verificar aqui (ao contrario das accoes sem projeto, ver acima).
+_ACOES_COM_PROJETO: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (PADRAO_ABRIR_VSCODE, "abrir_vscode", "D4.b"),
+    (PADRAO_ABRIR_VSCODE_EN, "abrir_vscode", "D58a"),
+    (PADRAO_ABRIR_PASTA, "abrir_pasta", "D4.c"),
+    (PADRAO_ABRIR_PASTA_EN, "abrir_pasta", "D58a"),
+)
+
 #: Palavras de ligacao que podem aparecer antes do nome do projeto no
 #: fragmento capturado ("... no projeto exemplo-um"). Sao retiradas uma a uma,
 #: e o fragmento completo e sempre tentado primeiro — um projeto chamado
@@ -307,7 +441,8 @@ PALAVRAS_DE_LIGACAO = frozenset(
 
 #: Cortesias de fronteira toleradas a volta de um comando. Sao retiradas uma
 #: de cada vez, gerando variantes tentadas por ordem (a frase tal e qual
-#: primeiro), nunca no meio da frase.
+#: primeiro), nunca no meio da frase. D58a: as mesmas variantes inglesas
+#: ("please", "hi", "hello", "thanks"/"thank you") tambem sao toleradas.
 CORTESIAS_INICIAIS: tuple[tuple[str, ...], ...] = (
     ("se", "faz", "favor"),
     ("faz", "favor"),
@@ -324,6 +459,9 @@ CORTESIAS_INICIAIS: tuple[tuple[str, ...], ...] = (
     ("entao",),
     ("agora",),
     ("ja",),
+    ("please",),
+    ("hi",),
+    ("hello",),
 )
 
 CORTESIAS_FINAIS: tuple[tuple[str, ...], ...] = (
@@ -337,6 +475,9 @@ CORTESIAS_FINAIS: tuple[tuple[str, ...], ...] = (
     ("jarvis",),
     ("agora",),
     ("ja",),
+    ("please",),
+    ("thanks",),
+    ("thank", "you"),
 )
 
 #: Comparacao de nomes de projeto, palavra a palavra. Uma palavra com menos do
@@ -503,19 +644,40 @@ class ResultadoRouter:
     residuo_removido: str | None = None
 
 
-def _acao_da_lista_branca(variante: str) -> tuple[str, str | None] | tuple[None, None]:
-    """(nome_acao, argumento) para os comandos SEM projeto, ou (None, None)."""
-    if PADRAO_HORAS.fullmatch(variante):
-        return "horas_e_data", "horas"
-    if PADRAO_DATA.fullmatch(variante):
-        return "horas_e_data", "data"
-    if PADRAO_CALAR.fullmatch(variante):
-        return "calar", None
-    if PADRAO_ADORMECER.fullmatch(variante):
-        return "adormecer", None
-    if PADRAO_ACORDAR.fullmatch(variante):
-        return "acordar", None
-    return None, None
+def _acoes_que_batem(
+    variante: str, tabela: tuple[tuple[re.Pattern[str], str, str | None], ...]
+) -> list[tuple[str, str | None]]:
+    """(nome_acao, argumento) de cada padrao da tabela que faz fullmatch.
+
+    Funcao pura, sem estado: usada tanto pela tabela portuguesa como pela
+    inglesa (e por testes que a chamam com tabelas propositadamente
+    construidas para verificar o mecanismo — nao ha frase real que colida
+    entre as duas listas de producao, ver `_acoes_bare_que_batem`).
+    """
+    return [
+        (nome_acao, argumento)
+        for padrao, nome_acao, argumento in tabela
+        if padrao.fullmatch(variante)
+    ]
+
+
+def _acoes_bare_que_batem(variante: str) -> list[tuple[str, str | None]]:
+    """(nome_acao, argumento) distintos que a variante bate nas DUAS listas.
+
+    D58(b), regra das duas listas, sem depender de nenhuma deteccao de
+    lingua: a frase e casada contra `_ACOES_BARE_PT` e `_ACOES_BARE_EN`. O
+    chamador (`encaminhar()`) decide: zero resultados -> tenta outra coisa;
+    um resultado distinto -> essa accao executa-se (batesse so numa lista ou
+    nas duas, para a MESMA accao, tanto faz); mais do que um resultado
+    distinto -> ambiguo, vai para o Claude Code como texto (nunca se escolhe
+    a mais provavel).
+    """
+    encontradas: list[tuple[str, str | None]] = []
+    for tabela in (_ACOES_BARE_PT, _ACOES_BARE_EN):
+        for par in _acoes_que_batem(variante, tabela):
+            if par not in encontradas:
+                encontradas.append(par)
+    return encontradas
 
 
 def _motivo_do_texto(normalizado: str) -> str:
@@ -590,27 +752,37 @@ def encaminhar(
     if PADRAO_DESTINATARIO.search(normalizado):
         return como_texto("frase dirigida a um destinatario: e texto, nunca acao local (D4)")
 
-    # --- Lista branca FECHADA da D4: fullmatch contra a frase inteira ------
-    # Uma recusa por projeto desconhecido nao interrompe a procura: outra
-    # variante (por exemplo sem a cortesia final) ainda pode ser um comando
-    # valido. O primeiro motivo de recusa guarda-se para o log.
+    # --- Lista branca FECHADA da D4/D58a: fullmatch contra a frase inteira,
+    # casada contra AS DUAS listas (PT e EN), sem nenhuma deteccao de lingua
+    # (D58b). Uma recusa por projeto desconhecido nao interrompe a procura:
+    # outra variante (por exemplo sem a cortesia final) ainda pode ser um
+    # comando valido. O primeiro motivo de recusa guarda-se para o log.
     motivo_da_recusa = ""
     for variante in _variantes_sem_cortesias(normalizado):
-        nome_acao, argumento = _acao_da_lista_branca(variante)
-        if nome_acao is not None:
+        candidatos = _acoes_bare_que_batem(variante)
+        if len(candidatos) == 1:
+            nome_acao, argumento = candidatos[0]
             return ResultadoRouter(
                 "local",
                 nome_acao=nome_acao,
                 argumento=argumento,
-                motivo=f"{nome_acao} (D4), frase inteira casada com a lista branca",
+                motivo=f"{nome_acao} (D4/D58b), frase inteira casada com a lista branca",
                 confianca_verificada=confianca_verificada,
                 residuo_removido=residuo_removido,
             )
+        if len(candidatos) > 1:
+            # D58(b), ultimo caso: a variante bate em ACOES DIFERENTES das
+            # duas listas — nunca se escolhe a mais provavel, vai como texto.
+            resumo = ", ".join(
+                f"{nome_acao}" + (f" ({argumento})" if argumento else "")
+                for nome_acao, argumento in candidatos
+            )
+            return como_texto(
+                f"frase bate em acoes diferentes das duas listas brancas ({resumo}): "
+                "ambiguo, nunca se escolhe a mais provavel (D58b)"
+            )
 
-        for padrao, acao, etiqueta in (
-            (PADRAO_ABRIR_VSCODE, "abrir_vscode", "D4.b"),
-            (PADRAO_ABRIR_PASTA, "abrir_pasta", "D4.c"),
-        ):
+        for padrao, acao, etiqueta in _ACOES_COM_PROJETO:
             casou = padrao.fullmatch(variante)
             if casou is None:
                 continue

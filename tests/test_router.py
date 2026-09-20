@@ -17,7 +17,12 @@ O que estes testes protegem, alem do caminho feliz:
   * o nome do projeto nao e adivinhado — "exemplo dos", "exemplo doido" e
     "exemplo-dois-privado" nao sao "exemplo-dois" (D4: nunca "o mais
     parecido");
-  * as guardas da D5 e a leitura da D12 fixada pela D52.
+  * as guardas da D5 e a leitura da D12 fixada pela D52;
+  * D58a/D58b (T7): as MESMAS cinco acoes reconhecidas em ingles, e a regra
+    das duas listas brancas (PT+EN) a funcionar sem nenhuma deteccao de
+    lingua — `TestListaBrancaInglesa` cobre as 20 intencoes de
+    `tests/voz/frases-en.md`, `TestRegraDasDuasListasD58b` cobre o mecanismo
+    de desempate entre as duas listas.
 
 Corre com:
 
@@ -26,9 +31,12 @@ Corre com:
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from jarvis import router
 from jarvis.config import Config, Projeto
 from jarvis.router import encaminhar
 
@@ -409,6 +417,225 @@ class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
         self.assertEqual(resultado_meio.tipo, "claude")
         self.assertEqual(resultado_meio.texto, "diz ao claude que o jarvis esta bem")
         self.assertIsNone(resultado_meio.residuo_removido)
+
+
+class TestListaBrancaInglesa(BaseRouter):
+    """D58a: as MESMAS cinco acoes da D4, reconhecidas em ingles.
+
+    As 20 frases desta classe sao as 20 intencoes de `tests/voz/frases-en.md`
+    (mesma numeracao, mesmos marcadores `<projeto-1>`/`<projeto-2>`
+    substituidos pelos projetos ficticios "exemplo-um"/"exemplo-dois" da
+    `_config_ficticia()`, D10). Zero acoes novas: as dez `local` sao as
+    mesmas cinco acoes da D4 e as dez `claude` reproduzem os mesmos motivos
+    ja testados em portugues (negacao, destinatario explicito, projeto
+    desconhecido, vocabulario financeiro generico, gatilho a meio da frase).
+    """
+
+    # --- as 10 que viram acao local -----------------------------------
+
+    def test_01_what_time_is_it_vira_horas(self) -> None:
+        resultado = encaminhar("what time is it", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "horas")
+
+    def test_02_what_day_is_it_today_vira_data(self) -> None:
+        resultado = encaminhar("what day is it today", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "data")
+
+    def test_03_open_vs_code_in_the_projeto_um_vira_abrir_vscode(self) -> None:
+        resultado = encaminhar("open vs code in the exemplo-um", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "abrir_vscode")
+        self.assertEqual(resultado.argumento, str(CAMINHO_UM))
+
+    def test_04_open_the_projeto_dois_folder_vira_abrir_pasta(self) -> None:
+        resultado = encaminhar("open the exemplo-dois folder", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "abrir_pasta")
+        self.assertEqual(resultado.argumento, str(CAMINHO_DOIS))
+
+    def test_05_be_quiet_vira_calar(self) -> None:
+        resultado = encaminhar("be quiet", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "calar")
+
+    def test_06_go_to_sleep_vira_adormecer(self) -> None:
+        resultado = encaminhar("go to sleep", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "adormecer")
+
+    def test_07_wake_up_vira_acordar(self) -> None:
+        resultado = encaminhar("wake up", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "acordar")
+
+    def test_08_tell_me_the_time_vira_horas(self) -> None:
+        # "tell" e destinatario explicito, EXCETO quando seguido de "me": o
+        # destinatario e o proprio jarvis, tal como "diz-me as horas" em pt.
+        resultado = encaminhar("tell me the time", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "horas")
+
+    def test_09_open_vs_code_in_project_projeto_dois_vira_abrir_vscode(self) -> None:
+        resultado = encaminhar("open vs code in project exemplo-dois", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "abrir_vscode")
+        self.assertEqual(resultado.argumento, str(CAMINHO_DOIS))
+
+    def test_10_whats_todays_date_vira_data(self) -> None:
+        # `_normalizar()` tira a pontuacao: "what's today's date" fica
+        # "what s today s date" (o apostrofo vira espaco, nunca desaparece).
+        resultado = encaminhar("what's today's date", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "data")
+
+    # --- as 10 que tem de ir para o Claude Code -------------------------
+
+    def test_11_tell_claude_com_gatilho_no_meio_vai_para_claude(self) -> None:
+        # Destinatario explicito ("tell claude", nao "tell me") E gatilho a
+        # meio da frase (D4 fechada): as duas razoes mandam para o Claude.
+        self.assertVaiParaClaude(
+            "tell claude to open a ticket about vs code in the exemplo-um"
+        )
+
+    def test_12_negacao_dont_open_vs_code_vai_para_claude(self) -> None:
+        # "don't" fica "don t" depois de `_normalizar()` tirar o apostrofo;
+        # a guarda da negacao tem de reconhecer a forma contraida na mesma.
+        self.assertVaiParaClaude("don't open vs code in the exemplo-dois")
+
+    def test_13_open_vs_code_sem_projeto_e_ambiguo_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude("open vs code")
+
+    def test_14_projeto_desconhecido_ghost_project_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude("open the folder for the ghost project")
+
+    def test_15_vocabulario_financeiro_generico_vai_para_claude(self) -> None:
+        # "invest"/"stocks", nunca "buy"/"sell"/"order"/"trade" (D64/D52: a
+        # lista branca inglesa nao tem nenhum verbo de compra/venda).
+        self.assertVaiParaClaude("invest some money in stocks for me right now")
+
+    def test_16_pergunta_comum_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude("do you think it will rain tomorrow")
+
+    def test_17_pedido_de_trabalho_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude(
+            "run the tests for the exemplo-um and tell me what failed"
+        )
+
+    def test_18_pedido_geral_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude(
+            "write a summary of what changed in the exemplo-dois today"
+        )
+
+    def test_19_ask_claude_destinatario_explicito_nao_vira_horas_e_data(self) -> None:
+        self.assertVaiParaClaude("ask claude what day the report is due")
+
+    def test_20_mencao_a_abrir_a_pasta_no_meio_da_frase_vai_para_claude(self) -> None:
+        self.assertVaiParaClaude(
+            "when you finish opening the folder for the exemplo-um send me a summary"
+        )
+
+
+class TestCortesiasEResiduoAceitamVariantesInglesas(BaseRouter):
+    """D58a: as cortesias de fronteira e a limpeza do residuo da wake word
+    (T6/D62) tambem aceitam as variantes inglesas, nao so as portuguesas."""
+
+    def test_hey_jarvis_com_frase_inglesa_remove_o_mesmo_residuo(self) -> None:
+        # "hey jarvis" ja e a variante que o prefixo da medicao da D53 usa
+        # para as duas linguas; aqui confirma-se que o residuo removido e o
+        # mesmo quando o resto da frase e ingles.
+        resultado = encaminhar("hey jarvis, what time is it", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.residuo_removido, "hey jarvis")
+
+    def test_please_no_inicio_e_no_fim_sao_cortesia_tolerada(self) -> None:
+        inicio = encaminhar("please, what time is it", self.config)
+        self.assertEqual(inicio.tipo, "local")
+        self.assertEqual(inicio.nome_acao, "horas_e_data")
+
+        fim = encaminhar("what time is it, please", self.config)
+        self.assertEqual(fim.tipo, "local")
+        self.assertEqual(fim.nome_acao, "horas_e_data")
+
+    def test_hi_e_hello_sao_cortesia_inicial_tolerada(self) -> None:
+        resultado = encaminhar("hi jarvis, what time is it", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+
+    def test_negacao_inglesa_nao_contraida_tambem_bloqueia(self) -> None:
+        # A propria D58a nomeia "do not", "never" e "not" — testados aqui a
+        # par de "don't" (ja coberta no teste 12 da amostra inglesa).
+        self.assertVaiParaClaude("do not open vs code in the exemplo-um")
+        self.assertVaiParaClaude("never open vs code in the exemplo-um")
+
+
+class TestRegraDasDuasListasD58b(BaseRouter):
+    """D58(b): a frase e casada contra AS DUAS listas brancas, sem nenhuma
+    deteccao de lingua.
+
+    As 20 frases de `TestListaBrancaInglesa` ja provam as duas primeiras
+    alineas na pratica: "casa numa so lista" (cada uma das 10 frases `local`
+    so bate na lista inglesa; os testes portugueses existentes so batem na
+    portuguesa). A terceira alinea — "casa em duas acoes diferentes, vai
+    para o Claude Code" — nao tem NENHUMA frase real disponivel para a
+    provocar: o vocabulario das duas listas de producao e deliberadamente
+    disjunto (nenhuma palavra da lista fechada portuguesa e tambem uma
+    palavra da lista fechada inglesa para outra accao, e vice-versa) — e essa
+    separacao e uma propriedade de seguranca do desenho, nao um acaso. Por
+    isso as duas classes seguintes isolam o MECANISMO com uma tabela extra
+    sintetica, injetada so durante o teste (`mock.patch.object`), para provar
+    que `encaminhar()` nunca escolhe "a mais provavel" se uma colisao destas
+    alguma vez passar a existir (p.ex. com uma sexta accao futura).
+    """
+
+    def test_bater_nas_duas_listas_para_a_mesma_accao_executa(self) -> None:
+        # Alinea do meio da D58(b): "casa nas duas para a MESMA accao,
+        # executa-se". Tabela sintetica: a mesma frase portuguesa "que horas
+        # sao" tambem aparece (deliberadamente, so para este teste) na
+        # tabela inglesa, mapeada para a MESMA accao/argumento.
+        tabela_en_com_duplicado = router._ACOES_BARE_EN + (
+            (re.compile(r"que\s+horas\s+sao"), "horas_e_data", "horas"),
+        )
+        with mock.patch.object(router, "_ACOES_BARE_EN", tabela_en_com_duplicado):
+            resultado = encaminhar("que horas sao", self.config)
+        self.assertEqual(resultado.tipo, "local")
+        self.assertEqual(resultado.nome_acao, "horas_e_data")
+        self.assertEqual(resultado.argumento, "horas")
+
+    def test_bater_em_duas_listas_para_accoes_diferentes_vai_para_claude(self) -> None:
+        # Alinea final da D58(b): "casa em DUAS acoes diferentes, vai para o
+        # Claude Code como texto (nunca se escolhe a mais provavel)". Tabela
+        # sintetica: "cala-te" (que so devia bater 'calar', em portugues) e
+        # forcado a bater tambem 'acordar' pela tabela inglesa injetada.
+        tabela_en_colisao = router._ACOES_BARE_EN + (
+            (re.compile(r"cala\s+te"), "acordar", None),
+        )
+        with mock.patch.object(router, "_ACOES_BARE_EN", tabela_en_colisao):
+            resultado = encaminhar("cala-te", self.config)
+        self.assertEqual(resultado.tipo, "claude")
+        self.assertIsNone(resultado.nome_acao)
+        self.assertIsNone(resultado.argumento)
+        self.assertEqual(resultado.texto, "cala-te")
+        self.assertIn("D58b", resultado.motivo)
+
+    def test_acoes_bare_que_batem_e_a_funcao_pura_usada_pelo_mecanismo(self) -> None:
+        # Teste direto e sem mock da funcao que implementa a regra: cada uma
+        # das cinco acoes so bate numa lista (a inglesa, aqui), confirmando
+        # que a producao real nunca tem duas listas a bater ao mesmo tempo
+        # para as frases desta amostra.
+        self.assertEqual(
+            router._acoes_bare_que_batem("be quiet"), [("calar", None)]
+        )
+        self.assertEqual(
+            router._acoes_bare_que_batem("cala te"), [("calar", None)]
+        )
+        self.assertEqual(router._acoes_bare_que_batem("uma frase qualquer"), [])
 
 
 if __name__ == "__main__":
