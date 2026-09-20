@@ -24,6 +24,10 @@ audio/
 transcripts/
 captures/
 
+# Configuracao privada (D10): projetos, caminhos e microfone do Sponsor.
+# config.exemplo.toml e o exemplo versionado, com dados ficticios.
+/config.toml
+
 # Credenciais
 .env
 .env.*

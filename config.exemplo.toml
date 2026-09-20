@@ -1,0 +1,19 @@
+# Exemplo VERSIONADO de config.toml (D10). Copia este ficheiro para
+# "config.toml" na raiz do repositorio e substitui os valores pelos teus:
+# nome do microfone tal como aparece no Windows, e um projeto por bloco
+# [[projetos]] com o caminho real no teu disco.
+#
+# config.toml fica de fora do Git (esta no .gitignore). Nunca metas o teu
+# disco pessoal nem nomes de projetos reais neste ficheiro de exemplo: so os
+# dados ficticios abaixo (caminhos do tipo "D:/caminho/para/projeto").
+
+[microfone]
+nome = "Microfone USB Generico"
+
+[[projetos]]
+nome = "exemplo-um"
+caminho = "D:/caminho/para/projeto-um"
+
+[[projetos]]
+nome = "exemplo-dois"
+caminho = "D:/caminho/para/projeto-dois"
