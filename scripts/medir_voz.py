@@ -1,15 +1,19 @@
-r"""Arnes de medicao do portugues europeu com audio SINTETICO (T7, D7/D34).
+r"""Arnes de medicao com audio SINTETICO das quatro combinacoes da D53
+(PT/EN x com/sem prefixo "hey jarvis") (T1/T7, D7/D34/D53/D58).
 
 AVISO OBRIGATORIO (D34), repetido no ficheiro de evidencia e em qualquer
 relatorio que use estes numeros: esta medicao usa audio SINTETICO (a propria
-voz Piper do jarvis, gerada por `scripts/gerar_wav.py` e transcrita de volta
-por `scripts/transcrever_ficheiro.py`). Isto testa a CADEIA — sintese ->
-transcricao -> encaminhador — e serve para apanhar regressoes de codigo. NAO
-mede o reconhecimento da voz do Sponsor e fica PROIBIDO propor a troca para
-ingles com base nestes numeros (a proposta so pode acontecer depois de medir a
-voz humana dele, protocolo completo em tests/voz/frases-pt.md, D7).
+voz Piper pt-PT do jarvis, gerada por `scripts/gerar_wav.py` e transcrita de
+volta por `scripts/transcrever_ficheiro.py` — S11: nao ha voz inglesa neste
+run, por isso a amostra `frases-en.md` tambem sai lida com sotaque pt-PT).
+Isto testa a CADEIA — sintese -> transcricao -> encaminhador — e serve para
+apanhar regressoes de codigo. NAO mede o reconhecimento da voz (nem do
+portugues nem do ingles) do Sponsor e fica PROIBIDO concluir seja o que for
+sobre qual lingua ele deve usar com base nestes numeros (protocolo completo
+em tests/voz/frases-pt.md e tests/voz/frases-en.md, D7/D58).
 
-O QUE ESTE SCRIPT FAZ, para cada uma das 20 frases de tests/voz/frases-pt.md:
+O QUE ESTE SCRIPT FAZ, para cada uma das 20 frases da amostra escolhida
+(`--amostra`, por omissao tests/voz/frases-pt.md):
 
   1. substitui os marcadores <projeto-1>/<projeto-2> pelos nomes REAIS da
      configuracao (config.toml se existir; senao degrada para o exemplo
@@ -44,6 +48,9 @@ Uso:
     .venv\Scripts\python scripts/medir_voz.py
     .venv\Scripts\python scripts/medir_voz.py --device cpu
     .venv\Scripts\python scripts/medir_voz.py --manter-audio
+    .venv\Scripts\python scripts/medir_voz.py --amostra tests/voz/frases-en.md
+    .venv\Scripts\python scripts/medir_voz.py --prefixo "hey jarvis, "
+    .venv\Scripts\python scripts/medir_voz.py --modelo small
 """
 
 from __future__ import annotations
@@ -203,11 +210,21 @@ class Agregados:
     tentativa 1 apanhou a ambiguidade: a macro-media trata as 20 frases por
     igual (uma frase curta mal transcrita pesa tanto como uma longa), o WER de
     corpus pesa cada frase pelo numero de palavras.
+
+    `n_divergentes` (T1, D53): quantas linhas tem o tipo DOCUMENTADO na
+    tabela (`local`/`claude`) diferente do tipo CALCULADO por
+    `encaminhar()` sobre a frase sem prefixo (`tipo_esperado`). Sem isto, uma
+    amostra cujas frases `local` ainda nao tem lista branca (o caso de
+    `frases-en.md` antes da T7/D58) aparece com acerto de intencao alto so
+    por construcao: a intencao OBTIDA tambem bate `claude` contra `claude`
+    assim que a transcricao reproduzir a frase, e isso conta como acerto sem
+    a amostra estar a medir o que diz medir.
     """
 
     n_frases: int
     n_acertos: int
     n_erros: int
+    n_divergentes: int
     acerto_intencao_pct: float
     wer_macro_pct: float
     wer_corpus_pct: float
@@ -502,12 +519,14 @@ def calcular_agregados(linhas: Sequence[LinhaMedida]) -> Agregados:
     n = len(linhas)
     n_acertos = sum(1 for linha in linhas if linha.acertou_intencao)
     n_erros = sum(1 for linha in linhas if linha.erro)
+    n_divergentes = sum(1 for linha in linhas if linha.tipo_documentado != linha.tipo_esperado)
     soma_distancias = sum(linha.wer.distancia_edicao for linha in linhas)
     soma_referencia = sum(linha.wer.n_palavras_referencia for linha in linhas)
     return Agregados(
         n_frases=n,
         n_acertos=n_acertos,
         n_erros=n_erros,
+        n_divergentes=n_divergentes,
         acerto_intencao_pct=(n_acertos / n * 100) if n else 0.0,
         wer_macro_pct=(sum(linha.wer.wer for linha in linhas) / n * 100) if n else 0.0,
         wer_corpus_pct=(soma_distancias / soma_referencia * 100) if soma_referencia else 0.0,
@@ -525,18 +544,36 @@ def medir_uma_frase(
     device: str,
     pasta_audio: Path,
     manter_audio: bool,
+    modelo: str = transcrever_mod.MODELO_PREFERIDO,
+    prefixo: str = "",
 ) -> LinhaMedida:
-    """Sintese -> transcricao -> encaminhador, para UMA frase da amostra."""
+    """Sintese -> transcricao -> encaminhador, para UMA frase da amostra.
+
+    `prefixo` (D53, T1): colado SO ao texto que vai para o Piper ("hey
+    jarvis, " + frase, por exemplo). A intencao ESPERADA continua a ser
+    calculada por `encaminhar()` sobre a frase SEM prefixo — a fonte da
+    verdade nunca muda por causa de um prefixo de sintese; um prefixo com
+    "nao" no meio, por exemplo, nao pode fazer uma frase local passar a
+    `claude` so porque foi colado ao audio. A referencia do WER, essa sim,
+    passa a ser o texto REALMENTE sintetizado (com prefixo, se houver):
+    e o que a transcricao tem de bater para dar WER zero.
+
+    `modelo` (D53, T1): passado a `transcrever(modelo_preferido=...)`; por
+    omissao continua a ser `transcrever_ficheiro.MODELO_PREFERIDO` (D39), o
+    mesmo modelo que corria antes desta task existir.
+    """
     frase_esperada = substituir_marcadores(frase_da_amostra.frase_com_marcadores, nomes_projetos)
 
     esperado = encaminhar(frase_esperada, config)
 
+    texto_sintetizado = f"{prefixo}{frase_esperada}" if prefixo else frase_esperada
+
     garantir_pasta(pasta_audio)
     caminho_wav = pasta_audio / f"{frase_da_amostra.numero:02d}.wav"
     try:
-        _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(frase_esperada, caminho_wav)
+        _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(texto_sintetizado, caminho_wav)
         resultado_transcricao = transcrever_mod.transcrever(
-            caminho_wav, device=device, usar_cache_do_modelo=True
+            caminho_wav, device=device, modelo_preferido=modelo, usar_cache_do_modelo=True
         )
     finally:
         if not manter_audio:
@@ -554,7 +591,7 @@ def medir_uma_frase(
     return LinhaMedida(
         numero=frase_da_amostra.numero,
         tipo_documentado=frase_da_amostra.tipo_documentado,
-        frase_esperada=frase_esperada,
+        frase_esperada=texto_sintetizado,
         transcricao=transcricao,
         tipo_esperado=esperado.tipo,
         nome_acao_esperado=esperado.nome_acao,
@@ -563,7 +600,7 @@ def medir_uma_frase(
         nome_acao_obtido=obtido.nome_acao,
         argumento_obtido=obtido.argumento,
         acertou_intencao=acertou,
-        wer=calcular_wer(frase_esperada, transcricao),
+        wer=calcular_wer(texto_sintetizado, transcricao),
         prompt_estado=resultado_transcricao["prompt_estado"],
         modelo_usado=resultado_transcricao["modelo"],
         device_usado=resultado_transcricao["device"],
@@ -578,17 +615,23 @@ def linha_falhada(
     config: Config,
     nomes_projetos: Sequence[str],
     erro: BaseException,
+    prefixo: str = "",
 ) -> LinhaMedida:
     """A linha que fica na evidencia quando UMA frase rebenta.
 
     Sem isto, uma excecao na frase 19 deitava fora as 18 ja medidas e o proprio
     entregavel (nit 3 do Reviewer). A frase conta como falhada: sem acerto de
     intencao e com WER de 100% (perderam-se todas as palavras da referencia).
+
+    `prefixo` (T1): so afeta o texto mostrado/usado como referencia de WER
+    (`frase_esperada`), pela mesma razao de `medir_uma_frase` — nunca entra
+    no calculo da intencao esperada.
     """
     try:
         frase_esperada = substituir_marcadores(frase_da_amostra.frase_com_marcadores, nomes_projetos)
     except Exception:
         frase_esperada = frase_da_amostra.frase_com_marcadores
+    texto_sintetizado = f"{prefixo}{frase_esperada}" if prefixo else frase_esperada
     try:
         esperado = encaminhar(frase_esperada, config)
         tipo_esperado = esperado.tipo
@@ -601,7 +644,7 @@ def linha_falhada(
     return LinhaMedida(
         numero=frase_da_amostra.numero,
         tipo_documentado=frase_da_amostra.tipo_documentado,
-        frase_esperada=frase_esperada,
+        frase_esperada=texto_sintetizado,
         transcricao="",
         tipo_esperado=tipo_esperado,
         nome_acao_esperado=nome_acao_esperado,
@@ -610,7 +653,7 @@ def linha_falhada(
         nome_acao_obtido=None,
         argumento_obtido=None,
         acertou_intencao=False,
-        wer=calcular_wer(frase_esperada, ""),
+        wer=calcular_wer(texto_sintetizado, ""),
         erro=f"{type(erro).__name__}: {erro}",
     )
 
@@ -626,6 +669,18 @@ AVISO_D34 = (
     "numeros** — essa proposta so pode acontecer depois de medir a voz humana "
     "dele (protocolo completo em `tests/voz/frases-pt.md`, D7), e mesmo ai fica "
     "na fila do Sponsor com o default 'manter portugues'."
+)
+
+#: T1/D53: registado no cabecalho de TODA corrida, PT ou EN — a voz Piper so
+#: existe em pt-PT (S11), por isso mesmo a amostra `frases-en.md` sai lida com
+#: sotaque/prosodia portugueses. Limite do teste da cadeia, nunca uma medida
+#: do ingles do Sponsor (D34/D58).
+AVISO_VOZ_PT_PT = (
+    "**AVISO (S11): toda a sintese desta medição usa a voz Piper pt-PT** "
+    "(`pt_PT-tugao-medium`) — não existe voz inglesa neste run. Mesmo quando a "
+    "amostra é `frases-en.md`, o áudio sintetizado sai com sotaque e prosódia "
+    "portugueses. Isto é um limite do TESTE DA CADEIA (síntese -> transcrição -> "
+    "encaminhador), nunca uma medida de como o Sponsor fala inglês (D34)."
 )
 
 AVISO_PRIVACIDADE = (
@@ -654,21 +709,37 @@ def escrever_evidencia(
     caminho_saida: Path,
     duracao_total_s: float,
     avisos_da_amostra: Sequence[str] = (),
+    caminho_amostra: Path | None = None,
+    modelo: str | None = None,
+    prefixo: str = "",
 ) -> Agregados:
     """Escreve o ficheiro de evidencia e devolve os agregados.
 
     `caminho_saida` TEM de vir de `caminho_evidencia_de_saida` (o `main` so
     escreve caminhos ja validados); aqui repete-se a validacao para que nenhum
     outro chamador consiga escrever fora de `docs/forja/evidence/`.
+
+    `caminho_amostra`/`modelo`/`prefixo` (T1/D53): so para o CABECALHO da
+    evidencia dizer qual das quatro combinacoes (PT/EN x com/sem prefixo)
+    esta corrida mediu; `None`/`""` cai para a amostra pt-PT por omissao e
+    para "nenhum" prefixo, sem quebrar chamadas antigas.
     """
     caminho_saida = caminho_evidencia_de_saida(caminho_saida)
     agregados = calcular_agregados(linhas)
     n = agregados.n_frases
 
+    caminho_amostra_efetivo = caminho_amostra if caminho_amostra is not None else CAMINHO_AMOSTRA_PADRAO
+    try:
+        amostra_para_mostrar = str(caminho_amostra_efetivo.relative_to(RAIZ))
+    except ValueError:
+        amostra_para_mostrar = str(caminho_amostra_efetivo)
+
     partes: list[str] = []
-    partes.append("# Medição sintética do português europeu (T7)")
+    partes.append("# Medição sintética (D53/T1: PT/EN × com/sem prefixo)")
     partes.append("")
     partes.append(AVISO_D34)
+    partes.append("")
+    partes.append(AVISO_VOZ_PT_PT)
     partes.append("")
     partes.append(AVISO_PRIVACIDADE)
     partes.append("")
@@ -677,12 +748,16 @@ def escrever_evidencia(
         f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
         f"(duração total: {duracao_total_s:.1f} s)."
     )
-    partes.append(f"- Amostra: `tests/voz/frases-pt.md` ({n} frases)")
+    partes.append(f"- Amostra: `{amostra_para_mostrar}` ({n} frases)")
     partes.append(f"- Configuração usada: {origem_config}")
     partes.append(f"- Device de transcrição pedido: {device}")
+    partes.append(f"- Modelo de transcrição pedido (--modelo): {modelo or '?'}")
+    partes.append(
+        f"- Prefixo usado (--prefixo): {prefixo!r}" if prefixo else "- Prefixo usado (--prefixo): (nenhum)"
+    )
     if linhas:
         partes.append(
-            f"- Modelo de transcrição: {linhas[0].modelo_usado} "
+            f"- Modelo de transcrição observado: {linhas[0].modelo_usado} "
             f"(device real: {linhas[0].device_usado})"
         )
         partes.append(f"- Estado do initial_prompt (D51): {linhas[0].prompt_estado}")
@@ -735,6 +810,16 @@ def escrever_evidencia(
     partes.append(
         f"- **WER (macro-média — média dos WER das {n} frases, cada frase pesa o mesmo): "
         f"{agregados.wer_macro_pct:.1f}%**"
+    )
+    partes.append(
+        f"- **Linhas divergentes (tipo documentado na tabela != tipo calculado por "
+        f"`encaminhar()` sobre a frase sem prefixo): {agregados.n_divergentes}/{n}** — sem "
+        "este número, uma amostra cujas frases `local` ainda não têm lista branca (ex.: "
+        "`frases-en.md` antes da T7/D58) aparecia com acerto de intenção alto só por "
+        "construção: se a tabela documenta `local` mas o router (com razão) manda a frase "
+        "como `claude`, a intenção OBTIDA também bate `claude` contra `claude` assim que a "
+        "transcrição reproduzir a frase, o que conta como acerto sem medir o que a amostra "
+        "diz medir."
     )
     partes.append(
         f"- **WER de corpus (Σ erros de edição ÷ Σ palavras de referência, frases longas pesam "
@@ -814,7 +899,10 @@ def construir_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--amostra",
         default=str(CAMINHO_AMOSTRA_PADRAO),
-        help="caminho de tests/voz/frases-pt.md",
+        help=(
+            "caminho da amostra de 20 frases (default: tests/voz/frases-pt.md; a amostra "
+            "inglesa da D58 e tests/voz/frases-en.md)"
+        ),
     )
     parser.add_argument(
         "--saida",
@@ -832,6 +920,28 @@ def construir_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="nao apaga os WAV temporarios depois de cada frase (ficam em audio/medir-voz/, fora do Git)",
     )
+    parser.add_argument(
+        "--modelo",
+        default=transcrever_mod.MODELO_PREFERIDO,
+        choices=transcrever_mod.MODELOS_PERMITIDOS,
+        help=(
+            "modelo de transcricao, passado a transcrever(modelo_preferido=...) (default: o "
+            f"mesmo modelo por omissao do transcritor, '{transcrever_mod.MODELO_PREFERIDO}', "
+            "D39 — nao mudado por esta flag). Lista fechada = "
+            "scripts/transcrever_ficheiro.py::MODELOS_PERMITIDOS (D53)"
+        ),
+    )
+    parser.add_argument(
+        "--prefixo",
+        default="",
+        metavar="TEXTO",
+        help=(
+            "texto colado ao INICIO do que e sintetizado (ex.: 'hey jarvis, '); por omissao "
+            "vazio (sem prefixo). A intencao esperada continua a ser calculada por "
+            "jarvis.router.encaminhar() sobre a frase SEM prefixo; a referencia do WER passa a "
+            "ser o texto realmente sintetizado, com prefixo incluido (D53)"
+        ),
+    )
     return parser
 
 
@@ -839,8 +949,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     forcar_consola_utf8()
     args = construir_parser().parse_args(argv)
 
-    print("=== jarvis - medir_voz (amostra sintetica pt-PT, D7/D34) ===")
+    print("=== jarvis - medir_voz (amostra sintetica, PT/EN x com/sem prefixo, D7/D34/D53) ===")
     print(AVISO_D34)
+    print(AVISO_VOZ_PT_PT)
     print()
 
     # O caminho de saida e validado ANTES de sintetizar o que quer que seja:
@@ -869,6 +980,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"configuracao    = {origem_config}")
     print(f"projetos        = {len(nomes_projetos)} projeto(s) da configuracao")
     print(f"frases          = {len(frases)}")
+    print(f"modelo          = {args.modelo}")
+    print(f"prefixo         = {args.prefixo!r}" if args.prefixo else "prefixo         = (nenhum)")
     print(f"evidencia       = {caminho_saida.relative_to(RAIZ)}")
     print()
 
@@ -889,13 +1002,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=args.device,
                 pasta_audio=PASTA_AUDIO_TEMPORARIO,
                 manter_audio=args.manter_audio,
+                modelo=args.modelo,
+                prefixo=args.prefixo,
             )
         except KeyboardInterrupt:
             print("INTERROMPIDO pelo utilizador")
             interrompido = True
             break
         except Exception as erro:  # noqa: BLE001 — uma frase nunca mata a corrida
-            linha = linha_falhada(frase, config, nomes_projetos, erro)
+            linha = linha_falhada(frase, config, nomes_projetos, erro, prefixo=args.prefixo)
             linhas.append(linha)
             print(f"ERRO ({linha.erro}) - continua para a frase seguinte")
             continue
@@ -909,7 +1024,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     agregados = escrever_evidencia(
-        linhas, origem_config, args.device, caminho_saida, duracao_total_s, avisos_da_amostra
+        linhas,
+        origem_config,
+        args.device,
+        caminho_saida,
+        duracao_total_s,
+        avisos_da_amostra,
+        caminho_amostra=Path(args.amostra),
+        modelo=args.modelo,
+        prefixo=args.prefixo,
     )
 
     print()
@@ -917,6 +1040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"acerto de intencao = {agregados.acerto_intencao_pct:.1f}%")
     print(f"WER macro-media    = {agregados.wer_macro_pct:.1f}%")
     print(f"WER de corpus      = {agregados.wer_corpus_pct:.1f}%")
+    print(f"linhas divergentes = {agregados.n_divergentes}/{agregados.n_frases}")
     print(f"evidencia escrita em: {caminho_saida.relative_to(RAIZ)}")
     print()
     print(AVISO_D34)

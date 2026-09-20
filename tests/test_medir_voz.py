@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
@@ -734,6 +735,262 @@ class TestProtocoloD7NoFicheiroVersionado(unittest.TestCase):
         self.assertIn("entre 75% e 90%", texto)
         self.assertIn("< 75%", texto)
         self.assertIn("manter portugues", texto)
+
+
+class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
+    """T1/D53: o `--prefixo` so entra no texto SINTETIZADO e na referencia do
+    WER, nunca no calculo da intencao esperada; o `--modelo` chega ao
+    transcritor tal e qual. `gerar_wav`/`transcrever` sao substituidos por
+    duplos que so REGISTAM o que recebem — nenhum GPU, Piper ou disco de
+    audio real e tocado (mesma garantia do resto deste ficheiro)."""
+
+    def setUp(self) -> None:
+        from jarvis.config import Config, Projeto
+
+        self.config = Config(
+            microfone="Microfone de Teste",
+            projetos=(Projeto(nome="exemplo-um", caminho=Path("D:/caminho/para/exemplo-um")),),
+        )
+        self.frase = medir_voz.FraseDaAmostra(
+            numero=1,
+            tipo_documentado="local",
+            frase_com_marcadores="que horas são",
+            intencao_documentada="horas_e_data (horas)",
+        )
+
+    def _medir_com_duplos(self, *, modelo: str, prefixo: str, texto_transcrito: str):
+        chamadas_gerar_wav: list[str] = []
+        chamadas_transcrever: list[dict] = []
+
+        def gerar_wav_falso(texto, saida):
+            chamadas_gerar_wav.append(texto)
+            return saida, 1.23, 999
+
+        def transcrever_falso(caminho, device="cuda", modelo_preferido="medium", **kwargs):
+            chamadas_transcrever.append({"device": device, "modelo_preferido": modelo_preferido})
+            return {
+                "texto": texto_transcrito,
+                "modelo": modelo_preferido,
+                "device": device,
+                "latencia_ms": 10.0,
+                "latencia_transcricao_ms": 5.0,
+                "prompt_estado": "desligado",
+            }
+
+        with tempfile.TemporaryDirectory() as pasta, mock.patch.object(
+            medir_voz.gerar_wav_mod, "gerar_wav", gerar_wav_falso
+        ), mock.patch.object(medir_voz.transcrever_mod, "transcrever", transcrever_falso):
+            linha = medir_voz.medir_uma_frase(
+                self.frase,
+                self.config,
+                ["exemplo-um"],
+                device="cpu",
+                pasta_audio=Path(pasta),
+                manter_audio=False,
+                modelo=modelo,
+                prefixo=prefixo,
+            )
+        return linha, chamadas_gerar_wav, chamadas_transcrever
+
+    def test_prefixo_entra_no_audio_e_na_referencia_do_wer_mas_nao_na_intencao_esperada(
+        self,
+    ) -> None:
+        # Prefixo malicioso de proposito: se ele vazasse para o calculo da
+        # intencao esperada, "que horas são" deixava de ser "local" — uma
+        # negacao manda SEMPRE para "claude" (D4/router.PADRAO_NEGACAO).
+        # Provar que isso nao acontece e a garantia central desta task.
+        linha, chamadas_gerar_wav, _ = self._medir_com_duplos(
+            modelo="medium", prefixo="não ", texto_transcrito="não que horas são"
+        )
+        # O audio recebeu o prefixo colado a frase.
+        self.assertEqual(chamadas_gerar_wav, ["não que horas são"])
+        # A intencao esperada continua a ser a da frase SEM prefixo.
+        self.assertEqual(linha.tipo_esperado, "local")
+        self.assertEqual(linha.nome_acao_esperado, "horas_e_data")
+        self.assertEqual(linha.argumento_esperado, "horas")
+        # A referencia do WER e o texto REALMENTE sintetizado (com prefixo):
+        # a transcricao fingida bate-lhe exatamente, WER zero.
+        self.assertEqual(linha.frase_esperada, "não que horas são")
+        self.assertEqual(linha.wer.wer, 0.0)
+
+    def test_sem_prefixo_o_comportamento_fica_exatamente_como_antes(self) -> None:
+        linha, chamadas_gerar_wav, _ = self._medir_com_duplos(
+            modelo="medium", prefixo="", texto_transcrito="que horas são"
+        )
+        self.assertEqual(chamadas_gerar_wav, ["que horas são"])
+        self.assertEqual(linha.frase_esperada, "que horas são")
+        self.assertEqual(linha.tipo_esperado, "local")
+
+    def test_modelo_chega_ao_transcritor(self) -> None:
+        _, _, chamadas_transcrever = self._medir_com_duplos(
+            modelo="small", prefixo="", texto_transcrito="que horas são"
+        )
+        self.assertEqual(len(chamadas_transcrever), 1)
+        self.assertEqual(chamadas_transcrever[0]["modelo_preferido"], "small")
+        self.assertEqual(chamadas_transcrever[0]["device"], "cpu")
+
+
+class TestParserModeloEPrefixo(unittest.TestCase):
+    """T1/D53: as duas flags novas existem, com os defaults certos, e o
+    `--modelo` usa a lista fechada do transcritor (nao aceita um repo
+    qualquer do Hugging Face, mesma garantia do autoteste da T6)."""
+
+    def test_defaults_nao_mudam_o_comportamento_de_hoje(self) -> None:
+        args = medir_voz.construir_parser().parse_args([])
+        self.assertEqual(args.modelo, medir_voz.transcrever_mod.MODELO_PREFERIDO)
+        self.assertEqual(args.prefixo, "")
+
+    def test_valores_explicitos_sao_aceites(self) -> None:
+        args = medir_voz.construir_parser().parse_args(
+            ["--modelo", "small", "--prefixo", "hey jarvis, "]
+        )
+        self.assertEqual(args.modelo, "small")
+        self.assertEqual(args.prefixo, "hey jarvis, ")
+
+    def test_modelo_fora_da_lista_fechada_e_recusado(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                medir_voz.construir_parser().parse_args(["--modelo", "alguem/repo-mau"])
+
+    def test_a_lista_de_escolhas_e_a_mesma_do_transcritor(self) -> None:
+        parser = medir_voz.construir_parser()
+        acao_modelo = next(a for a in parser._actions if a.dest == "modelo")
+        self.assertEqual(list(acao_modelo.choices), medir_voz.transcrever_mod.MODELOS_PERMITIDOS)
+
+    def test_ajuda_mostra_as_duas_flags_novas(self) -> None:
+        ajuda = medir_voz.construir_parser().format_help()
+        self.assertIn("--modelo", ajuda)
+        self.assertIn("--prefixo", ajuda)
+
+
+class TestLinhasDivergentes(unittest.TestCase):
+    """T1/D53: conta as linhas em que o tipo DOCUMENTADO na tabela difere do
+    tipo CALCULADO por `encaminhar()` (`tipo_esperado`) — sem isto, uma
+    amostra cujas frases `local` ainda nao tem lista branca (o caso de
+    `frases-en.md` antes da T7/D58) aparecia com acerto de intencao alto so
+    por construcao."""
+
+    def linha(self, tipo_documentado: str, tipo_esperado: str) -> medir_voz.LinhaMedida:
+        return medir_voz.LinhaMedida(
+            numero=1,
+            tipo_documentado=tipo_documentado,
+            frase_esperada="x",
+            transcricao="x",
+            tipo_esperado=tipo_esperado,
+            nome_acao_esperado=None,
+            argumento_esperado=None,
+            tipo_obtido=tipo_esperado,
+            nome_acao_obtido=None,
+            argumento_obtido=None,
+            acertou_intencao=True,
+            wer=medir_voz.calcular_wer("x", "x"),
+        )
+
+    def test_conta_so_as_linhas_onde_documentado_e_esperado_diferem(self) -> None:
+        linhas = [
+            self.linha("local", "local"),  # concorda: nao diverge
+            self.linha("local", "claude"),  # tabela diz local, encaminhar() diz claude: diverge
+            self.linha("claude", "claude"),  # concorda: nao diverge
+            self.linha("claude", "local"),  # diverge tambem no sentido contrario
+        ]
+        agregados = medir_voz.calcular_agregados(linhas)
+        self.assertEqual(agregados.n_divergentes, 2)
+
+    def test_sem_divergencia_nenhuma_o_contador_fica_a_zero(self) -> None:
+        linhas = [self.linha("local", "local"), self.linha("claude", "claude")]
+        agregados = medir_voz.calcular_agregados(linhas)
+        self.assertEqual(agregados.n_divergentes, 0)
+
+    def test_sem_linhas_o_contador_fica_a_zero(self) -> None:
+        self.assertEqual(medir_voz.calcular_agregados([]).n_divergentes, 0)
+
+    def test_a_linha_divergentes_aparece_na_evidencia_com_o_numero_certo(self) -> None:
+        linhas = [
+            self.linha("local", "local"),
+            self.linha("local", "claude"),
+        ]
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-divergentes-medir-voz.md"
+            medir_voz.escrever_evidencia(linhas, "exemplo", "cpu", caminho, 0.0)
+            escrito = caminho.read_text(encoding="utf-8")
+        self.assertIn("Linhas divergentes", escrito)
+        self.assertIn("1/2", escrito)
+
+
+class TestCabecalhoDaEvidenciaComAmostraModeloEPrefixo(unittest.TestCase):
+    """T1/D53: o cabecalho da evidencia regista amostra, modelo, prefixo
+    usado e o aviso da voz pt-PT (S11), mesmo com a amostra `frases-en.md`."""
+
+    def test_cabecalho_mostra_amostra_modelo_prefixo_e_aviso_da_voz(self) -> None:
+        caminho_en = medir_voz.RAIZ / "tests" / "voz" / "frases-en.md"
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-cabecalho-medir-voz.md"
+            medir_voz.escrever_evidencia(
+                [],
+                "exemplo",
+                "cpu",
+                caminho,
+                0.0,
+                caminho_amostra=caminho_en,
+                modelo="small",
+                prefixo="hey jarvis, ",
+            )
+            escrito = caminho.read_text(encoding="utf-8")
+        self.assertIn("frases-en.md", escrito)
+        self.assertIn("small", escrito)
+        self.assertIn("'hey jarvis, '", escrito)
+        self.assertIn("voz Piper pt-PT", escrito)
+        self.assertIn("S11", escrito)
+
+    def test_sem_prefixo_o_cabecalho_diz_nenhum(self) -> None:
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-cabecalho-sem-prefixo.md"
+            medir_voz.escrever_evidencia([], "exemplo", "cpu", caminho, 0.0, modelo="medium")
+            escrito = caminho.read_text(encoding="utf-8")
+        self.assertIn("Prefixo usado (--prefixo): (nenhum)", escrito)
+
+
+class TestLerAmostraFrasesEmIngles(unittest.TestCase):
+    """T1/D53: `frases-en.md` tem a mesma forma e o mesmo tamanho da amostra
+    pt-PT, e nenhuma palavra proibida de compra/venda em ingles (D64/D52)."""
+
+    CAMINHO = RAIZ / "tests" / "voz" / "frases-en.md"
+
+    def test_tem_vinte_frases_numeradas_de_um_a_vinte_sem_avisos(self) -> None:
+        avisos: list[str] = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            frases = medir_voz.ler_amostra(self.CAMINHO, avisos=avisos)
+        self.assertEqual(len(frases), 20)
+        self.assertEqual([f.numero for f in frases], list(range(1, 21)))
+        self.assertEqual(avisos, [])
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_dez_locais_e_dez_para_o_claude_no_mesmo_padrao_linha_a_linha_da_amostra_pt(
+        self,
+    ) -> None:
+        frases_en = medir_voz.ler_amostra(self.CAMINHO)
+        frases_pt = medir_voz.ler_amostra(medir_voz.CAMINHO_AMOSTRA_PADRAO)
+        self.assertEqual(
+            [f.tipo_documentado for f in frases_en],
+            [f.tipo_documentado for f in frases_pt],
+        )
+
+    def test_nenhuma_palavra_proibida_de_compra_e_venda_em_ingles(self) -> None:
+        # D64/D52: buy/sell/order/trade/broker/wallet nunca aparecem aqui.
+        import re as re_mod
+
+        texto = self.CAMINHO.read_text(encoding="utf-8").lower()
+        for palavra in ("buy", "sell", "order", "trade", "broker", "wallet"):
+            self.assertIsNone(
+                re_mod.search(rf"\b{palavra}\b", texto),
+                msg=f"a palavra proibida {palavra!r} aparece em frases-en.md",
+            )
+
+    def test_nenhum_caminho_do_disco_do_sponsor_na_amostra_em_ingles(self) -> None:
+        texto = self.CAMINHO.read_text(encoding="utf-8")
+        self.assertNotRegex(texto, r"[A-Za-z]:[\\/]")
+        self.assertNotIn("Users", texto)
 
 
 if __name__ == "__main__":
