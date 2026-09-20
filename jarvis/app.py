@@ -761,6 +761,16 @@ def construir_recorder(
         post_speech_silence_duration=0.6,
         min_length_of_recording=0.3,
         pre_recording_buffer_duration=1.0,
+        # T10 (D53 item 2, TECHNOLOGY.md S9): `normalize_audio=True` foi
+        # medido nas quatro combinacoes da D53, nos MESMOS WAV da T9
+        # (docs/forja/evidence/ganho-{pt,en}-{sem,com}-prefixo.md vs
+        # modelo-medium-{pt,en}-{sem,com}-prefixo.md) e NAO melhorou o acerto
+        # de intencao em nenhuma das quatro (identico: 11/20, 10/20, 10/20,
+        # 10/20) — piorou ligeiramente o WER em EN com prefixo e nao mudou o
+        # WER nas outras tres. Pela ordem de corte da D53 item 2 ("se nao
+        # melhorar os numeros, nao entra"), fica DESLIGADO por omissao. O
+        # mecanismo (`normalizar_pico_pcm16`, jarvis/audio_util.py) e o teste
+        # ficam no repositorio, so nao ligados aqui.
     )
     if com_wake_word:
         if not MODELO_WAKE_WORD.is_file():

@@ -188,6 +188,32 @@ def pico_pcm16(dados: bytes) -> int:
     return audioop.max(dados, 2)
 
 
+def normalizar_pico_pcm16(dados: bytes, alvo: float = 0.95) -> bytes:
+    """Normaliza PCM de 16 bits por PICO para `alvo` da escala (audioop, stdlib).
+
+    T10 (TECHNOLOGY.md S9): o mesmo mecanismo e alvo (-0,95 dBFS por omissao)
+    que o RealtimeSTT ja aplica sozinho quando `normalize_audio=True`
+    (`AudioToTextRecorder`, caminho ao vivo de `jarvis/app.py::construir_recorder`):
+    `audio = (audio / pico) * alvo`. Esta funcao existe para os scripts que
+    chamam `faster_whisper.WhisperModel.transcribe()` diretamente e por isso
+    NAO passam pelo RealtimeSTT (`scripts/transcrever_ficheiro.py`) — mesmo
+    alvo, sem inventar um segundo metodo.
+
+    Escala o array inteiro por `alvo * 32767 / pico`, o que por construcao
+    nunca ultrapassa `alvo` da escala (sem precisar de limitador). Guarda
+    contra dividir por zero: silencio digital (pico 0) volta inalterado — nao
+    ha ganho nenhum para aplicar a amostras todas a zero. O comprimento em
+    bytes nunca muda (audioop.mul preserva a contagem de amostras).
+    """
+    pico = pico_pcm16(dados)
+    if pico == 0:
+        return dados
+    import audioop  # stdlib; aviso de depreciacao esperado em 3.12+
+
+    fator = (alvo * 32767) / pico
+    return audioop.mul(dados, 2, fator)
+
+
 # --- Autoteste das partes puras (sem GPU, sem Piper, sem microfone) --------
 
 
@@ -256,6 +282,35 @@ def _autoteste() -> int:
     )
     verificar("pico: maximo negativo conta pelo valor absoluto", pico_pcm16(struct.pack("<2h", 5, -300)), 300)
     verificar("pico: bytes vazios nao rebenta", pico_pcm16(b""), 0)
+
+    # 4e. normalizar_pico_pcm16 (T10, TECHNOLOGY.md S9): silencio digital nao
+    # rebenta nem muda; um sinal baixo sobe o pico para ~0,95 da escala; o
+    # comprimento em bytes nunca muda.
+    silencio_digital = struct.pack("<8h", *([0] * 8))
+    verificar(
+        "normalizar: silencio digital (pico 0) nao rebenta e volta inalterado",
+        normalizar_pico_pcm16(silencio_digital),
+        silencio_digital,
+    )
+    verificar("normalizar: bytes vazios nao rebenta", normalizar_pico_pcm16(b""), b"")
+    sinal_baixo = struct.pack("<4h", 1000, -1000, 500, -500)
+    normalizado = normalizar_pico_pcm16(sinal_baixo)
+    verificar(
+        "normalizar: comprimento em bytes nao muda",
+        len(normalizado),
+        len(sinal_baixo),
+    )
+    pico_depois = pico_pcm16(normalizado)
+    verificar(
+        "normalizar: pico fica em ~0,95 da escala (32767), tolerancia de 1%",
+        abs(pico_depois - round(0.95 * 32767)) <= round(0.01 * 32767),
+        True,
+    )
+    verificar(
+        "normalizar: alvo diferente (0,5) escala para ~metade da escala",
+        abs(pico_pcm16(normalizar_pico_pcm16(sinal_baixo, alvo=0.5)) - round(0.5 * 32767)) <= round(0.01 * 32767),
+        True,
+    )
 
     # 4c. caminho_wav_de_saida: confina a escrita ao repositorio e exige .wav.
     with tempfile.TemporaryDirectory() as pasta:
