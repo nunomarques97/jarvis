@@ -36,3 +36,7 @@ Este repositório vai para o GitHub em público. Por isso:
 ## Hardware
 
 Windows 11, RTX 5060 Ti com 16 GB de VRAM, i5-14400F, 32 GB de RAM, Ollama local já instalado.
+
+## Licença
+
+AGPL-3.0. Copyright (c) 2026 Nuno Marques. Ver [LICENSE](LICENSE).
