@@ -1,0 +1,740 @@
+r"""Testes do arnes de medicao sintetica (scripts/medir_voz.py), unittest da
+biblioteca padrao (sem pytest, mesma convencao de tests/test_router.py e
+tests/test_acoes.py: nao ha decisao do Scout para uma framework de testes fora
+da biblioteca padrao).
+
+NENHUM destes testes toca em GPU, em Piper ou no disco de audio: cobrem so as
+partes puras do arnes — o calculo do WER, a substituicao dos marcadores de
+projeto (<projeto-1>/<projeto-2>, D1/D10) e a leitura da tabela de
+tests/voz/frases-pt.md. A cadeia inteira (sintese + transcricao + encaminhador)
+so se prova a serio com hardware, correndo
+`.venv\Scripts\python scripts/medir_voz.py` (evidencia no relatorio da T7).
+
+Corre com:
+
+    .venv\Scripts\python -m unittest discover -s tests -v
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent.parent
+if str(RAIZ) not in sys.path:
+    sys.path.insert(0, str(RAIZ))
+
+from scripts import medir_voz  # noqa: E402
+
+
+@contextlib.contextmanager
+def pasta_de_evidencia_temporaria():
+    """Redireciona a pasta de evidencia para um tempfile, durante um teste.
+
+    Sem isto os testes que exercitam `escrever_evidencia` escreviam ficheiros
+    dentro do `docs/forja/evidence/` REAL do repositorio (nit 5 do Reviewer,
+    T7 a2): colidem com uma corrida do arnes a decorrer e deixam lixo se o
+    processo for morto a meio. `caminho_evidencia_de_saida` le as duas
+    constantes no momento da chamada, por isso troca-las aqui chega — e a
+    validacao que protege a pasta real continua exatamente a mesma, so aponta
+    para outro sitio enquanto o teste corre.
+    """
+    with tempfile.TemporaryDirectory() as pasta:
+        raiz_falsa = Path(pasta).resolve()
+        evidencia = raiz_falsa / "docs" / "forja" / "evidence"
+        evidencia.mkdir(parents=True)
+        pasta_original = medir_voz.PASTA_EVIDENCIA_PADRAO
+        raiz_original = medir_voz.RAIZ
+        medir_voz.PASTA_EVIDENCIA_PADRAO = evidencia
+        medir_voz.RAIZ = raiz_falsa
+        try:
+            yield evidencia
+        finally:
+            medir_voz.PASTA_EVIDENCIA_PADRAO = pasta_original
+            medir_voz.RAIZ = raiz_original
+
+
+class TestCalcularWer(unittest.TestCase):
+    """WER = distancia de edicao (Levenshtein) ao nivel da palavra / N da
+    referencia. Valores esperados calculados a mao, nao re-derivados da
+    implementacao."""
+
+    def test_frases_identicas_tem_wer_zero(self) -> None:
+        resultado = medir_voz.calcular_wer("que horas são", "que horas são")
+        self.assertEqual(resultado.wer, 0.0)
+        self.assertEqual(resultado.distancia_edicao, 0)
+        self.assertEqual(resultado.n_palavras_referencia, 3)
+
+    def test_uma_substituicao_em_quatro_palavras_da_25_por_cento(self) -> None:
+        # "são" -> "sao": 1 substituicao sobre 4 palavras de referencia = 25%.
+        resultado = medir_voz.calcular_wer("que horas são agora", "que horas sao agora")
+        self.assertEqual(resultado.wer, 0.25)
+        self.assertEqual(resultado.distancia_edicao, 1)
+        self.assertEqual(resultado.n_palavras_referencia, 4)
+
+    def test_uma_insercao_conta_como_um_erro(self) -> None:
+        # hipotese tem uma palavra extra: 1 insercao sobre 2 palavras de ref.
+        resultado = medir_voz.calcular_wer("cala-te", "cala-te agora")
+        self.assertEqual(resultado.distancia_edicao, 1)
+        self.assertEqual(resultado.wer, 0.5)
+
+    def test_uma_delecao_conta_como_um_erro(self) -> None:
+        # hipotese perdeu uma palavra: 1 delecao sobre 3 palavras de ref.
+        resultado = medir_voz.calcular_wer("que horas são", "que são")
+        self.assertEqual(resultado.distancia_edicao, 1)
+        self.assertAlmostEqual(resultado.wer, 1 / 3)
+
+    def test_hipotese_totalmente_diferente_da_a_distancia_do_maior(self) -> None:
+        resultado = medir_voz.calcular_wer("acorda", "obrigado por assistir")
+        self.assertEqual(resultado.n_palavras_referencia, 1)
+        self.assertEqual(resultado.distancia_edicao, 3)  # substitui + 2 insercoes
+        self.assertEqual(resultado.wer, 3.0)
+
+    def test_referencia_vazia_e_hipotese_vazia_e_wer_zero(self) -> None:
+        resultado = medir_voz.calcular_wer("", "")
+        self.assertEqual(resultado.wer, 0.0)
+        self.assertEqual(resultado.n_palavras_referencia, 0)
+
+    def test_referencia_vazia_e_hipotese_com_texto_e_wer_maximo(self) -> None:
+        resultado = medir_voz.calcular_wer("", "obrigado por assistir")
+        self.assertEqual(resultado.wer, 1.0)
+        self.assertEqual(resultado.n_palavras_referencia, 0)
+        self.assertEqual(resultado.n_palavras_hipotese, 3)
+
+    def test_pontuacao_e_maiusculas_sao_ignoradas(self) -> None:
+        # WER compara palavras, nao pontuacao nem caixa: "SÃO?!" == "são".
+        resultado = medir_voz.calcular_wer("QUE HORAS SÃO?!", "que horas são")
+        self.assertEqual(resultado.wer, 0.0)
+
+    def test_frase_do_criterio_da_t7_bate_com_o_valor_calculado_a_mao(self) -> None:
+        # "abre o vs code no exemplo-um" (5 palavras apos normalizar o hifen)
+        # contra uma transcricao com uma palavra a menos e outra trocada.
+        resultado = medir_voz.calcular_wer(
+            "abre o vs code no exemplo-um", "abre vs code no exemplo um"
+        )
+        # referencia: [abre, o, vs, code, no, exemplo, um] (7 palavras, hifen
+        # vira espaco); hipotese: [abre, vs, code, no, exemplo, um] (6
+        # palavras) — falta o "o": 1 delecao.
+        self.assertEqual(resultado.n_palavras_referencia, 7)
+        self.assertEqual(resultado.distancia_edicao, 1)
+        self.assertAlmostEqual(resultado.wer, 1 / 7)
+
+
+class TestSubstituirMarcadores(unittest.TestCase):
+    """<projeto-1>/<projeto-2> (D1/D10): nunca um nome real do Sponsor aqui."""
+
+    def test_substitui_os_dois_marcadores(self) -> None:
+        resultado = medir_voz.substituir_marcadores(
+            "abre o vs code no <projeto-1> e a pasta do <projeto-2>",
+            ["exemplo-um", "exemplo-dois"],
+        )
+        self.assertEqual(resultado, "abre o vs code no exemplo-um e a pasta do exemplo-dois")
+
+    def test_frase_sem_marcadores_fica_igual(self) -> None:
+        resultado = medir_voz.substituir_marcadores("cala-te", ["exemplo-um", "exemplo-dois"])
+        self.assertEqual(resultado, "cala-te")
+
+    def test_um_so_projeto_configurado_reutiliza_o_mesmo_nome(self) -> None:
+        # Degradar (D10), nunca rebentar: com um so projeto, os dois
+        # marcadores usam o mesmo nome em vez de recusar a frase.
+        resultado = medir_voz.substituir_marcadores(
+            "abre o vs code no <projeto-1> e a pasta do <projeto-2>",
+            ["exemplo-unico"],
+        )
+        self.assertEqual(resultado, "abre o vs code no exemplo-unico e a pasta do exemplo-unico")
+
+    def test_sem_projeto_nenhum_e_sem_marcador_na_frase_passa_tal_e_qual(self) -> None:
+        resultado = medir_voz.substituir_marcadores("que horas são", [])
+        self.assertEqual(resultado, "que horas são")
+
+    def test_sem_projeto_nenhum_e_com_marcador_levanta_erro_legivel(self) -> None:
+        with self.assertRaises(medir_voz.AmostraError):
+            medir_voz.substituir_marcadores("abre o vs code no <projeto-1>", [])
+
+
+class TestLerAmostra(unittest.TestCase):
+    """A tabela de tests/voz/frases-pt.md: 20 linhas, 10 locais + 10 claude."""
+
+    def test_a_amostra_versionada_tem_vinte_frases(self) -> None:
+        frases = medir_voz.ler_amostra(medir_voz.CAMINHO_AMOSTRA_PADRAO)
+        self.assertEqual(len(frases), 20)
+        self.assertEqual([f.numero for f in frases], list(range(1, 21)))
+
+    def test_a_amostra_tem_dez_locais_e_dez_para_o_claude(self) -> None:
+        frases = medir_voz.ler_amostra(medir_voz.CAMINHO_AMOSTRA_PADRAO)
+        locais = [f for f in frases if f.tipo_documentado == "local"]
+        claude = [f for f in frases if f.tipo_documentado == "claude"]
+        self.assertEqual(len(locais), 10)
+        self.assertEqual(len(claude), 10)
+
+    def test_nenhuma_frase_da_amostra_versionada_leva_um_caminho_do_disco(self) -> None:
+        # D1/D10: a garantia e por comportamento (D52), nunca por uma lista de
+        # nomes proibidos em codigo — aqui so se verifica a forma (nenhum
+        # caminho absoluto do Windows), nunca um nome especifico de projeto.
+        texto_do_ficheiro = medir_voz.CAMINHO_AMOSTRA_PADRAO.read_text(encoding="utf-8")
+        self.assertNotRegex(texto_do_ficheiro, r"[A-Za-z]:[\\/]")
+        self.assertNotIn("Users", texto_do_ficheiro)
+
+    def test_ficheiro_inexistente_levanta_erro_legivel(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = Path(pasta) / "nao-existe.md"
+            with self.assertRaises(medir_voz.AmostraError):
+                medir_voz.ler_amostra(caminho)
+
+    def test_ficheiro_sem_tabela_levanta_erro_legivel(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = Path(pasta) / "vazio.md"
+            caminho.write_text("# nada aqui, so prosa\n", encoding="utf-8")
+            with self.assertRaises(medir_voz.AmostraError):
+                medir_voz.ler_amostra(caminho)
+
+    def test_le_uma_tabela_minima_corretamente(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = Path(pasta) / "amostra.md"
+            caminho.write_text(
+                "# titulo\n\n"
+                "| nº | tipo | frase (com marcadores) | intenção esperada |\n"
+                "|----|------|--------------------------|--------------------|\n"
+                "| 1 | local | que horas são | horas_e_data (horas) |\n"
+                "| 2 | claude | achas que vai chover | texto (pergunta comum) |\n",
+                encoding="utf-8",
+            )
+            frases = medir_voz.ler_amostra(caminho)
+            self.assertEqual(len(frases), 2)
+            self.assertEqual(frases[0].tipo_documentado, "local")
+            self.assertEqual(frases[0].frase_com_marcadores, "que horas são")
+            self.assertEqual(frases[1].tipo_documentado, "claude")
+
+
+class TestEsperadoUsaOEncaminhadorComoFonteDaVerdade(unittest.TestCase):
+    """A intencao ESPERADA de cada frase e sempre calculada por
+    jarvis.router.encaminhar() sobre a frase escrita, nunca um valor fixado a
+    mao — evita que a amostra fique dessincronizada do router de verdade."""
+
+    def setUp(self) -> None:
+        from jarvis.config import Config, Projeto
+
+        self.config = Config(
+            microfone="Microfone de Teste",
+            projetos=(
+                Projeto(nome="exemplo-um", caminho=Path("D:/caminho/para/exemplo-um")),
+                Projeto(nome="exemplo-dois", caminho=Path("D:/caminho/para/exemplo-dois")),
+            ),
+        )
+
+    def test_cada_frase_da_amostra_produz_uma_intencao_esperada_consistente_com_o_tipo_documentado(
+        self,
+    ) -> None:
+        from jarvis.router import encaminhar
+
+        frases = medir_voz.ler_amostra(medir_voz.CAMINHO_AMOSTRA_PADRAO)
+        nomes_projetos = [p.nome for p in self.config.projetos]
+        for frase in frases:
+            frase_esperada = medir_voz.substituir_marcadores(frase.frase_com_marcadores, nomes_projetos)
+            esperado = encaminhar(frase_esperada, self.config)
+            self.assertEqual(
+                esperado.tipo,
+                frase.tipo_documentado,
+                msg=(
+                    f"frase {frase.numero} ({frase.frase_com_marcadores!r}): a tabela diz "
+                    f"'{frase.tipo_documentado}' mas o router devolveu '{esperado.tipo}' "
+                    f"({esperado.motivo})"
+                ),
+            )
+
+
+class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
+    """Bloqueador 1 do SECURITY-REJECT da tentativa 1: o `--saida` escrevia em
+    qualquer caminho do disco. A evidencia leva os NOMES e os CAMINHOS reais
+    dos projetos do Sponsor e este repositorio vai ser publico (D1/D10), por
+    isso so pode cair em docs/forja/evidence/ e so com sufixo .md."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.raiz = Path(self.tmp.name).resolve()
+        self.pasta = self.raiz / "docs" / "forja" / "evidence"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def validar(self, valor: str) -> Path:
+        return medir_voz.caminho_evidencia_de_saida(valor, self.pasta, self.raiz)
+
+    def recusa(self, valor: str) -> bool:
+        try:
+            self.validar(valor)
+        except ValueError:
+            return True
+        return False
+
+    def test_caminho_relativo_dentro_da_pasta_permitida_e_aceite(self) -> None:
+        self.assertEqual(
+            self.validar("docs/forja/evidence/medicao.md"),
+            self.pasta / "medicao.md",
+        )
+
+    def test_caminho_absoluto_dentro_da_pasta_permitida_e_aceite(self) -> None:
+        alvo = self.pasta / "sub" / "medicao.md"
+        self.assertEqual(self.validar(str(alvo)), alvo)
+
+    def test_sufixo_md_aceite_sem_distinguir_maiusculas(self) -> None:
+        self.assertEqual(
+            self.validar("docs/forja/evidence/M.MD"),
+            self.pasta / "M.MD",
+        )
+
+    def test_pasta_versionada_do_repositorio_e_recusada(self) -> None:
+        # Os tres exemplos do SECURITY-REJECT: caem dentro do repo, mas em
+        # pastas que o .gitignore NAO cobre.
+        self.assertTrue(self.recusa("docs/EVIDENCIA.md"))
+        self.assertTrue(self.recusa("README.md"))
+        self.assertTrue(self.recusa("tests/voz/resultado.md"))
+
+    def test_docs_forja_fora_da_pasta_de_evidencia_e_recusado(self) -> None:
+        self.assertTrue(self.recusa("docs/forja/DECISIONS.md"))
+
+    def test_caminho_fora_do_repositorio_e_recusado(self) -> None:
+        # A sonda exata do Security Reviewer: escrever ao lado da raiz.
+        self.assertTrue(self.recusa(str(self.raiz.parent / "FUGA-T7-probe.md")))
+
+    def test_travessia_com_dois_pontos_e_recusada(self) -> None:
+        self.assertTrue(self.recusa("docs/forja/evidence/../../../fuga.md"))
+
+    def test_sufixo_que_o_gitignore_nao_apanha_e_recusado(self) -> None:
+        self.assertTrue(self.recusa("docs/forja/evidence/notas.txt"))
+        self.assertTrue(self.recusa("docs/forja/evidence/sem-sufixo"))
+
+    def test_nenhuma_recusa_criou_seja_o_que_for_no_disco(self) -> None:
+        for valor in (
+            "README.md",
+            "docs/EVIDENCIA.md",
+            str(self.raiz.parent / "FUGA-T7-probe.md"),
+            "docs/forja/evidence/notas.txt",
+        ):
+            with self.assertRaises(ValueError):
+                self.validar(valor)
+        self.assertEqual(sorted(item.name for item in self.raiz.iterdir()), [])
+
+    def test_a_pasta_por_omissao_e_docs_forja_evidence_do_repositorio(self) -> None:
+        self.assertEqual(
+            medir_voz.PASTA_EVIDENCIA_PADRAO,
+            medir_voz.RAIZ / "docs" / "forja" / "evidence",
+        )
+
+    def test_escrever_evidencia_recusa_um_caminho_fora_da_pasta(self) -> None:
+        # A validacao nao vive so no main(): quem chamar a funcao diretamente
+        # (como a sonda do Security Reviewer fez) tambem e recusado.
+        alvo = medir_voz.RAIZ / "FUGA-T7-probe.md"
+        with self.assertRaises(ValueError):
+            medir_voz.escrever_evidencia([], "exemplo", "cpu", alvo, 0.0)
+        self.assertFalse(alvo.exists())
+
+
+class TestMainRecusaSaidaInvalida(unittest.TestCase):
+    """O codigo de saida e o efeito no disco, nao so a excecao: um `--saida`
+    fora de docs/forja/evidence/ falha com 1 ANTES de sintetizar seja o que
+    for (nao ha GPU nem Piper envolvidos neste teste)."""
+
+    def test_saida_em_ficheiro_versionado_devolve_1_e_nao_toca_no_ficheiro(self) -> None:
+        readme = medir_voz.RAIZ / "README.md"
+        antes = readme.read_bytes()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            codigo = medir_voz.main(["--saida", "README.md"])
+        self.assertEqual(codigo, 1)
+        self.assertIn("FALHOU", stderr.getvalue())
+        self.assertEqual(readme.read_bytes(), antes)
+
+    def test_saida_fora_do_repositorio_devolve_1_e_nao_escreve_nada(self) -> None:
+        # Destino fora do repositorio, mas dentro de um tempfile deste teste:
+        # a versao anterior apontava para `RAIZ.parent`, uma pasta do disco do
+        # Sponsor que este teste nao controla (nit 5 do Reviewer, T7 a2).
+        with tempfile.TemporaryDirectory() as pasta:
+            alvo = Path(pasta).resolve() / "FUGA-T7-probe.md"
+            self.assertFalse(alvo.exists(), "sonda: o ficheiro nao pode existir antes do teste")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                codigo = medir_voz.main(["--saida", str(alvo)])
+            self.assertEqual(codigo, 1)
+            self.assertFalse(alvo.exists())
+
+    def test_saida_sem_sufixo_md_devolve_1(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            codigo = medir_voz.main(["--saida", "docs/forja/evidence/fuga.txt"])
+        self.assertEqual(codigo, 1)
+
+
+class TestCelulasDeTabelaMarkdown(unittest.TestCase):
+    """Nit 2 do Security Reviewer: uma transcricao com `|` deslocava as colunas
+    e falsificava a coluna de acerto que um humano le."""
+
+    def test_pipe_na_transcricao_e_escapado(self) -> None:
+        self.assertEqual(
+            medir_voz.celula_markdown("isto | NAO | sim | 0.0% | lixo"),
+            r"isto \| NAO \| sim \| 0.0% \| lixo",
+        )
+
+    def test_mudancas_de_linha_sao_achatadas(self) -> None:
+        self.assertEqual(medir_voz.celula_markdown("uma\nduas\r\ntres"), "uma duas tres")
+
+    def test_texto_vazio_nao_produz_celula_vazia(self) -> None:
+        self.assertEqual(medir_voz.celula_markdown(""), "—")
+
+    def test_uma_linha_escrita_com_pipes_na_transcricao_continua_a_ter_dez_colunas(self) -> None:
+        # O ataque provado na tentativa 1, agora de ponta a ponta: a linha
+        # escrita tem de continuar a ter as 10 colunas do cabecalho, com o
+        # `acerto` na 7.a e o WER na 8.a (as duas ultimas, duracao do audio e
+        # latencia da transcricao, entraram a fechar o nit 2 do Reviewer).
+        linha = medir_voz.LinhaMedida(
+            numero=1,
+            tipo_documentado="local",
+            frase_esperada="que horas são",
+            transcricao="isto | NAO | sim | 0.0% | lixo",
+            tipo_esperado="local",
+            nome_acao_esperado="horas_e_data",
+            argumento_esperado="horas",
+            tipo_obtido="claude",
+            nome_acao_obtido=None,
+            argumento_obtido=None,
+            acertou_intencao=False,
+            wer=medir_voz.calcular_wer("que horas são", "isto | NAO | sim | 0.0% | lixo"),
+            duracao_audio_s=1.25,
+            latencia_transcricao_ms=432.0,
+            latencia_total_ms=5432.0,
+        )
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-colunas-medir-voz.md"
+            medir_voz.escrever_evidencia([linha], "exemplo", "cpu", caminho, 0.0)
+            escrito = caminho.read_text(encoding="utf-8")
+        linha_da_frase = [
+            bruta
+            for bruta in escrito.splitlines()
+            if bruta.startswith("| 1 ")
+        ]
+        self.assertEqual(len(linha_da_frase), 1)
+        celulas = medir_voz.dividir_celulas(linha_da_frase[0])
+        self.assertEqual(len(celulas), 10)
+        self.assertEqual(celulas[0], "1")
+        self.assertEqual(celulas[3], "isto | NAO | sim | 0.0% | lixo")
+        self.assertEqual(celulas[6], "NAO")
+        self.assertTrue(celulas[7].endswith("%"))
+        # Nit 2 do Reviewer: a duracao do audio e a latencia SO da transcricao
+        # (nao o total com o carregamento) chegam mesmo ao ficheiro.
+        self.assertEqual(celulas[8], "1.25")
+        self.assertEqual(celulas[9], "432")
+
+    def test_dividir_celulas_ignora_prosa(self) -> None:
+        self.assertIsNone(medir_voz.dividir_celulas("isto nao e uma tabela"))
+
+    def test_dividir_celulas_desescapa_os_pipes(self) -> None:
+        self.assertEqual(
+            medir_voz.dividir_celulas(r"| a \| b | c |"),
+            ["a | b", "c"],
+        )
+
+
+class TestAvisosDaAmostra(unittest.TestCase):
+    """Nit 4 do Security Reviewer: uma linha mal formada desaparecia em silencio."""
+
+    def escrever_amostra(self, pasta: str, corpo: str) -> Path:
+        caminho = Path(pasta) / "amostra.md"
+        caminho.write_text(
+            "| nº | tipo | frase (com marcadores) | intenção esperada |\n"
+            "|----|------|--------------------------|--------------------|\n" + corpo,
+            encoding="utf-8",
+        )
+        return caminho
+
+    def test_linha_com_tipo_errado_e_avisada_e_nao_medida(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_amostra(
+                pasta,
+                "| 1 | local | que horas são | horas_e_data (horas) |\n"
+                "| 2 | lokal | cala-te | calar |\n",
+            )
+            avisos: list[str] = []
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                frases = medir_voz.ler_amostra(caminho, avisos=avisos)
+            self.assertEqual(len(frases), 1)
+            self.assertTrue(avisos, "uma linha ignorada tem de produzir um aviso")
+            self.assertIn("linha 4", " ".join(avisos))
+            self.assertIn("AVISO", stderr.getvalue())
+
+    def test_linha_com_colunas_a_mais_e_avisada(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_amostra(
+                pasta,
+                "| 1 | local | que horas são | horas_e_data (horas) |\n"
+                "| 2 | local | frase | com | colunas a mais |\n",
+            )
+            avisos: list[str] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                frases = medir_voz.ler_amostra(caminho, avisos=avisos)
+            self.assertEqual(len(frases), 1)
+            self.assertTrue(avisos)
+
+    def test_linha_de_celulas_todas_vazias_e_avisada_e_nao_passa_por_separador(self) -> None:
+        # Nit 6 do Reviewer (T7 a2): `| | | |` nao tem celula nenhuma com
+        # texto, logo o `all(...)` do teste de separador dava True por vacuidade
+        # e a linha sumia sem entrar na contagem de avisos.
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_amostra(
+                pasta,
+                "| 1 | local | que horas são | horas_e_data (horas) |\n"
+                "| | | | |\n",
+            )
+            avisos: list[str] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                frases = medir_voz.ler_amostra(caminho, avisos=avisos)
+            self.assertEqual(len(frases), 1)
+            self.assertTrue(avisos, "a linha vazia tem de ser avisada")
+            self.assertIn("1 linha(s) de tabela que NAO foram medidas", avisos[0])
+            self.assertIn("linha 4", " ".join(avisos))
+
+    def test_a_linha_separadora_do_cabecalho_continua_a_passar_em_silencio(self) -> None:
+        # O contrario do teste anterior: `|----|----|` tem celulas com texto e
+        # continua a ser ignorada sem aviso nenhum.
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_amostra(
+                pasta, "| 1 | local | que horas são | horas_e_data (horas) |\n"
+            )
+            avisos: list[str] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                frases = medir_voz.ler_amostra(caminho, avisos=avisos)
+            self.assertEqual(len(frases), 1)
+            self.assertEqual(avisos, [])
+
+    def test_a_amostra_versionada_nao_produz_nenhum_aviso(self) -> None:
+        avisos: list[str] = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            frases = medir_voz.ler_amostra(medir_voz.CAMINHO_AMOSTRA_PADRAO, avisos=avisos)
+        self.assertEqual(len(frases), 20)
+        self.assertEqual(avisos, [])
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_frase_com_pipe_escapado_e_lida_de_volta_inteira(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_amostra(
+                pasta, r"| 1 | claude | diz a \| ao claude | texto |" + "\n"
+            )
+            with contextlib.redirect_stderr(io.StringIO()):
+                frases = medir_voz.ler_amostra(caminho)
+            self.assertEqual(len(frases), 1)
+            self.assertEqual(frases[0].frase_com_marcadores, "diz a | ao claude")
+            self.assertEqual(frases[0].intencao_documentada, "texto")
+
+
+class TestAgregados(unittest.TestCase):
+    """Nit 2 do Reviewer: macro-media e WER de corpus sao numeros diferentes e
+    o ficheiro tem de dizer qual e qual. Valores calculados a mao."""
+
+    def linha(self, numero: int, referencia: str, hipotese: str, acertou: bool) -> medir_voz.LinhaMedida:
+        return medir_voz.LinhaMedida(
+            numero=numero,
+            tipo_documentado="local",
+            frase_esperada=referencia,
+            transcricao=hipotese,
+            tipo_esperado="local",
+            nome_acao_esperado="x",
+            argumento_esperado=None,
+            tipo_obtido="local" if acertou else "claude",
+            nome_acao_obtido="x" if acertou else None,
+            argumento_obtido=None,
+            acertou_intencao=acertou,
+            wer=medir_voz.calcular_wer(referencia, hipotese),
+        )
+
+    def test_macro_media_e_corpus_sao_calculados_como_a_definicao_diz(self) -> None:
+        # Frase A: 2 palavras de referencia, 1 erro -> WER 50%.
+        # Frase B: 8 palavras de referencia, 1 erro -> WER 12.5%.
+        # macro = (50 + 12.5) / 2 = 31.25%; corpus = 2 erros / 10 palavras = 20%.
+        a = self.linha(1, "abre pasta", "abre casa", False)
+        b = self.linha(2, "um dois tres quatro cinco seis sete oito", "um dois tres quatro cinco seis sete nove", True)
+        self.assertEqual(a.wer.distancia_edicao, 1)
+        self.assertEqual(b.wer.distancia_edicao, 1)
+        agregados = medir_voz.calcular_agregados([a, b])
+        self.assertEqual(agregados.n_frases, 2)
+        self.assertEqual(agregados.n_acertos, 1)
+        self.assertAlmostEqual(agregados.acerto_intencao_pct, 50.0)
+        self.assertAlmostEqual(agregados.wer_macro_pct, 31.25)
+        self.assertAlmostEqual(agregados.wer_corpus_pct, 20.0)
+
+    def test_uma_referencia_vazia_conta_como_insercoes_no_wer_de_corpus(self) -> None:
+        # Nit 7 do Reviewer (T7 a2): fixado de proposito, nao por acidente.
+        # Frase A: 2 palavras de referencia, 1 erro. Frase B: referencia vazia
+        # e 3 palavras de hipotese = 3 insercoes, nenhuma palavra no
+        # denominador. corpus = (1 + 3) / 2 = 200%; macro = (50 + 100) / 2 = 75%.
+        a = self.linha(1, "abre pasta", "abre casa", False)
+        b = self.linha(2, "", "lixo a mais", False)
+        self.assertEqual(b.wer.n_palavras_referencia, 0)
+        self.assertEqual(b.wer.distancia_edicao, 3)
+        agregados = medir_voz.calcular_agregados([a, b])
+        self.assertAlmostEqual(agregados.wer_macro_pct, 75.0)
+        self.assertAlmostEqual(agregados.wer_corpus_pct, 200.0)
+
+    def test_sem_linhas_nenhum_agregado_rebenta(self) -> None:
+        agregados = medir_voz.calcular_agregados([])
+        self.assertEqual(agregados.n_frases, 0)
+        self.assertEqual(agregados.acerto_intencao_pct, 0.0)
+        self.assertEqual(agregados.wer_corpus_pct, 0.0)
+
+
+class TestFalhaDeUmaFraseNaoDeitaForaAMedicao(unittest.TestCase):
+    """Nit 3 do Reviewer: uma excecao na frase 19 deitava fora as 18 anteriores
+    e o proprio entregavel."""
+
+    def setUp(self) -> None:
+        from jarvis.config import Config, Projeto
+
+        self.config = Config(
+            microfone="Microfone de Teste",
+            projetos=(Projeto(nome="exemplo-um", caminho=Path("D:/caminho/para/exemplo-um")),),
+        )
+
+    def test_linha_falhada_conta_como_falha_com_wer_de_cem_por_cento(self) -> None:
+        frase = medir_voz.FraseDaAmostra(
+            numero=19,
+            tipo_documentado="local",
+            frase_com_marcadores="que horas são",
+            intencao_documentada="horas_e_data (horas)",
+        )
+        linha = medir_voz.linha_falhada(frase, self.config, ["exemplo-um"], RuntimeError("GPU foi-se"))
+        self.assertFalse(linha.acertou_intencao)
+        self.assertEqual(linha.wer.wer, 1.0)
+        self.assertEqual(linha.wer.n_palavras_referencia, 3)
+        self.assertIn("GPU foi-se", linha.erro or "")
+        # A intencao ESPERADA continua a ser calculada pelo router, mesmo na falha.
+        self.assertEqual(linha.tipo_esperado, "local")
+        self.assertEqual(linha.nome_acao_esperado, "horas_e_data")
+
+    def test_evidencia_escrita_com_uma_frase_falhada_diz_o_erro_e_conta_os_agregados(self) -> None:
+        frase_ok = medir_voz.FraseDaAmostra(19, "local", "que horas são", "horas_e_data (horas)")
+        boa = medir_voz.LinhaMedida(
+            numero=1,
+            tipo_documentado="local",
+            frase_esperada="que horas são",
+            transcricao="que horas são",
+            tipo_esperado="local",
+            nome_acao_esperado="horas_e_data",
+            argumento_esperado="horas",
+            tipo_obtido="local",
+            nome_acao_obtido="horas_e_data",
+            argumento_obtido="horas",
+            acertou_intencao=True,
+            wer=medir_voz.calcular_wer("que horas são", "que horas são"),
+        )
+        ma = medir_voz.linha_falhada(frase_ok, self.config, ["exemplo-um"], RuntimeError("GPU foi-se"))
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-falha-medir-voz.md"
+            agregados = medir_voz.escrever_evidencia([boa, ma], "exemplo", "cpu", caminho, 1.0)
+            escrito = caminho.read_text(encoding="utf-8")
+        self.assertEqual(agregados.n_erros, 1)
+        self.assertEqual(agregados.n_acertos, 1)
+        self.assertAlmostEqual(agregados.acerto_intencao_pct, 50.0)
+        self.assertIn("GPU foi-se", escrito)
+        self.assertIn("Frases que rebentaram a meio: 1", escrito)
+
+
+class TestAvisosObrigatoriosNaEvidencia(unittest.TestCase):
+    """D34 (audio sintetico, nao mede a voz do Sponsor, proibido propor ingles)
+    e nit 5 do Security Reviewer (dados privados com um config.toml real)."""
+
+    def test_o_ficheiro_gerado_diz_as_tres_coisas_da_d34_e_avisa_da_privacidade(self) -> None:
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-avisos-medir-voz.md"
+            medir_voz.escrever_evidencia([], "exemplo", "cpu", caminho, 0.0)
+            escrito = caminho.read_text(encoding="utf-8")
+        self.assertIn("AUDIO SINTETICO", escrito)
+        self.assertIn("NAO mede o reconhecimento da voz do Sponsor", escrito)
+        self.assertIn("proibido propor a troca para ingles", escrito)
+        # Nit 5: quem copiar excertos daqui para um ficheiro versionado tem de
+        # ser avisado de que isto pode levar nomes e caminhos reais (D1/D10).
+        self.assertIn("dados privados do Sponsor", escrito)
+        self.assertIn("`.gitignore`", escrito)
+        # E o limiar da D7 escrito com a conjuncao exata, nao suavizado.
+        self.assertIn("WER <= 15%", escrito)
+
+
+class TestLatenciaEPisoDoAcertoNaEvidencia(unittest.TestCase):
+    """Nits 2 e 3 do Reviewer (T7 a2): a latencia media-se e nunca chegava ao
+    ficheiro, e o piso por construcao do acerto de intencao nao estava escrito
+    onde quem le os agregados o ve."""
+
+    def linha(self, numero: int, tipo: str, acertou: bool) -> "medir_voz.LinhaMedida":
+        if tipo == "claude":
+            esperado_acao, esperado_arg = None, None
+        else:
+            esperado_acao, esperado_arg = "horas_e_data", "horas"
+        return medir_voz.LinhaMedida(
+            numero=numero,
+            tipo_documentado=tipo,
+            frase_esperada="que horas são",
+            transcricao="que horas são",
+            tipo_esperado=tipo,
+            nome_acao_esperado=esperado_acao,
+            argumento_esperado=esperado_arg,
+            tipo_obtido=tipo,
+            nome_acao_obtido=esperado_acao,
+            argumento_obtido=esperado_arg,
+            acertou_intencao=acertou,
+            wer=medir_voz.calcular_wer("que horas são", "que horas são"),
+            duracao_audio_s=2.0,
+            latencia_transcricao_ms=100.0 * numero,
+            latencia_total_ms=1000.0 * numero,
+        )
+
+    def escrever(self, linhas: list) -> str:
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-latencia-medir-voz.md"
+            medir_voz.escrever_evidencia(linhas, "exemplo", "cpu", caminho, 3.0)
+            return caminho.read_text(encoding="utf-8")
+
+    def test_a_latencia_da_transcricao_e_a_duracao_do_audio_chegam_ao_ficheiro(self) -> None:
+        escrito = self.escrever([self.linha(1, "local", True), self.linha(3, "local", True)])
+        # mediana de 100 e 300 ms = 200; maximo = 300; audio total = 4,0 s.
+        self.assertIn("mediana 200 ms", escrito)
+        self.assertIn("máximo 300 ms", escrito)
+        self.assertIn("4.0 s de áudio", escrito)
+        # E o total (carregamento incluido) sai rotulado como outra coisa.
+        self.assertIn("carregamento do modelo + transcrição", escrito)
+        self.assertIn("3000 ms na pior frase", escrito)
+
+    def test_o_piso_por_construcao_do_acerto_e_escrito_com_o_numero_de_frases(self) -> None:
+        linhas = [self.linha(1, "local", True)] + [
+            self.linha(n, "claude", True) for n in range(2, 5)
+        ]
+        escrito = self.escrever(linhas)
+        self.assertIn("Piso por construção do acerto de intenção", escrito)
+        self.assertIn("3 das 4 frases", escrito)
+        self.assertIn("`claude: —`", escrito)
+
+    def test_sem_frases_do_claude_nao_se_escreve_o_aviso_do_piso(self) -> None:
+        escrito = self.escrever([self.linha(1, "local", True)])
+        self.assertNotIn("Piso por construção", escrito)
+
+
+class TestProtocoloD7NoFicheiroVersionado(unittest.TestCase):
+    """Nit 1 do Reviewer: o ficheiro suavizava a D7 («e WER <= 15% como
+    referencia» em vez da conjuncao)."""
+
+    def test_o_limiar_de_noventa_por_cento_usa_a_conjuncao_da_d7(self) -> None:
+        texto = medir_voz.CAMINHO_AMOSTRA_PADRAO.read_text(encoding="utf-8")
+        self.assertIn("acerto de intencao >= 90% E WER <= 15%", texto)
+        self.assertNotIn("como referencia", texto)
+
+    def test_as_outras_duas_bandas_da_d7_continuam_escritas(self) -> None:
+        texto = medir_voz.CAMINHO_AMOSTRA_PADRAO.read_text(encoding="utf-8")
+        self.assertIn("entre 75% e 90%", texto)
+        self.assertIn("< 75%", texto)
+        self.assertIn("manter portugues", texto)
+
+
+if __name__ == "__main__":
+    unittest.main()

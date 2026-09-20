@@ -112,15 +112,47 @@ def tipo_de_computo(device: str) -> str:
     return "float16" if device == "cuda" else "int8"
 
 
-def carregar_modelo(nome: str, device: str):
+#: Modelos ja carregados neste processo, por (nome, device). So e consultado
+#: quando quem chama pede `usar_cache=True`: o comportamento por omissao fica
+#: exatamente como estava (um carregamento por chamada), porque e nele que a
+#: T3/T6 mediram a latencia de carregamento. Quem corre a mesma transcricao
+#: dezenas de vezes seguidas no mesmo processo — o arnes da T7, 20 frases —
+#: paga hoje ~5 s de carregamento por frase sem nenhum ganho.
+_MODELOS_EM_CACHE: dict[tuple[str, str], object] = {}
+
+
+def limpar_cache_de_modelos() -> int:
+    """Esvazia a cache de modelos e devolve quantos estavam la dentro.
+
+    Enquanto a cache tiver um modelo, ele ocupa VRAM ate o processo acabar
+    (nit 8 do Reviewer, T7 a2). Num CLI que termina a seguir isso e inofensivo;
+    num processo longo (a T4/T6, se alguma vez ligarem `usar_cache_do_modelo`)
+    passa a ser a diferenca entre libertar o GPU e nao o libertar. Tambem e o
+    que os testes usam para nao deixar estado de um teste no seguinte.
+    """
+    quantos = len(_MODELOS_EM_CACHE)
+    _MODELOS_EM_CACHE.clear()
+    return quantos
+
+
+def carregar_modelo(nome: str, device: str, usar_cache: bool = False):
+    chave = (nome, device)
+    if usar_cache:
+        em_cache = _MODELOS_EM_CACHE.get(chave)
+        if em_cache is not None:
+            return em_cache
+
     import faster_whisper
 
-    return faster_whisper.WhisperModel(
+    modelo = faster_whisper.WhisperModel(
         nome,
         device=device,
         compute_type=tipo_de_computo(device),
         download_root=str(PASTA_MODELOS_FASTER_WHISPER),
     )
+    if usar_cache:
+        _MODELOS_EM_CACHE[chave] = modelo
+    return modelo
 
 
 def device_real_do_modelo(modelo, device_pedido: str) -> str:
@@ -135,12 +167,18 @@ def transcrever(
     modelo_preferido: str = MODELO_PREFERIDO,
     modelo_fallback: str = MODELO_FALLBACK,
     initial_prompt: str | None = None,
+    usar_cache_do_modelo: bool = False,
 ) -> dict:
     """Carrega o modelo (com fallback) e transcreve `caminho`. Devolve um resumo em dict.
 
     `initial_prompt=None` por omissao (D51): sem polarizacao de vocabulario a
     menos que quem chama a peca. Quem a quiser passa
     `initial_prompt=PROMPT_VOCABULARIO_PADRAO` explicitamente.
+
+    `usar_cache_do_modelo=False` por omissao (comportamento inalterado: um
+    carregamento por chamada, que e o que a T3/T6 mediram). A `True`, o modelo
+    fica em cache por (nome, device) durante o processo — e o que o arnes da T7
+    usa para nao pagar 20 carregamentos do `medium` numa corrida de 20 frases.
 
     `condition_on_previous_text=False` de proposito: cada ficheiro desta task e
     uma frase isolada, nao uma sessao continua, e deixar isto a True so
@@ -162,7 +200,7 @@ def transcrever(
     inicio_do_modelo_usado = t0
     fim_do_carregamento = t0
     try:
-        modelo = carregar_modelo(modelo_preferido, device)
+        modelo = carregar_modelo(modelo_preferido, device, usar_cache=usar_cache_do_modelo)
         fim_do_carregamento = time.perf_counter()
         segmentos, info = modelo.transcribe(
             str(caminho),
@@ -181,7 +219,7 @@ def transcrever(
         modelo_usado = modelo_fallback
         inicio_do_modelo_usado = time.perf_counter()
         try:
-            modelo = carregar_modelo(modelo_fallback, device)
+            modelo = carregar_modelo(modelo_fallback, device, usar_cache=usar_cache_do_modelo)
             fim_do_carregamento = time.perf_counter()
             segmentos, info = modelo.transcribe(
                 str(caminho),
