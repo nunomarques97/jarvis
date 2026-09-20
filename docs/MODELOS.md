@@ -49,6 +49,7 @@ no layout `huggingface_hub` (`models--Systran--faster-whisper-<tamanho>/`).
 | `small` (fallback) | `models/faster-whisper/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120/model.bin` | `https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin` | `3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671` |
 | `medium` (preferido) | `models/faster-whisper/models--Systran--faster-whisper-medium/snapshots/08e178d48790749d25932bbc082711ddcfdfbc4f/model.bin` | `https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin` | `9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae` |
 | `large-v3` (não usado — ver nota) | `models/faster-whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin` | `https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/model.bin` | `69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1` |
+| `large-v3-turbo` (medido na T9, não adotado — ver nota) | `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/model.bin` | `https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/main/model.bin` | `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da` |
 
 **Nota sobre o `large-v3` (2,88 GB de pesos; a pasta `models/faster-whisper/blobs`
 inteira ocupa 4,8 GB).** Nenhum código deste repositório o carrega: a D39 só
@@ -75,6 +76,44 @@ snapshot inclui também `config.json`, `tokenizer.json` e `vocabulary.txt` —
 ficheiros pequenos, não-executáveis, do mesmo download; não têm hash listado
 aqui porque não afetam a integridade do modelo em si (o Hugging Face já
 verifica o conteúdo do repositório pelo próprio Git/LFS no lado do servidor).
+
+**Nota sobre o `large-v3-turbo` (T9, S8/D65; 1,51 GB de pesos).** Repositório de
+origem `mobiuslabsgmbh/faster-whisper-large-v3-turbo` (licença MIT, conversão
+CTranslate2 do `openai/whisper-large-v3-turbo`), já listado em
+`faster_whisper.utils._MODELS` da versão instalada — nenhuma dependência nova.
+Descarregado com o comando exato da S8:
+
+```
+.venv\Scripts\python -c "import faster_whisper; faster_whisper.WhisperModel('large-v3-turbo', device='cuda', compute_type='float16', download_root='models/faster-whisper')"
+```
+
+**Está nas duas listas fechadas** (`MODELOS_STT_PERMITIDOS` em `jarvis/app.py`,
+`MODELOS_PERMITIDOS` em `scripts/transcrever_ficheiro.py`) para poder ser
+medido, mas **NÃO é o modelo por omissão**: o preferido continua a ser o
+`medium`. A decisão saiu dos números da D53, não do gosto — A/B controlado sobre
+os MESMOS WAV (D66, ponto 7), `language='pt'` fixo nas duas pernas, quatro
+combinações da D53, evidência em `docs/forja/evidence/modelo-{medium,turbo}-*.md`:
+
+| combinação | acerto de intenção `medium` | acerto de intenção `large-v3-turbo` |
+|---|---|---|
+| PT sem prefixo | **11/20 (55,0%)** | 10/20 (50,0%) |
+| PT com prefixo | 10/20 (50,0%) | 10/20 (50,0%) |
+| EN sem prefixo | 10/20 (50,0%) | 10/20 (50,0%) |
+| EN com prefixo | 10/20 (50,0%) | 10/20 (50,0%) |
+
+A regra de adoção exigia acerto **igual ou melhor nas quatro** combinações. Falha
+em PT sem prefixo por uma linha, e é justamente a linha que mais custa: a frase
+4, «abre a pasta do jarvis», que o `medium` transcreve «Abre a pasta dos Javis.»
+(a lista branca ainda a apanha) e o `turbo` transcreve «Hava a pasta do Javis.»
+(vai como texto para o Claude Code) — ou seja, o turbo perde a **única** ação
+local que essa combinação acertava. Latência e VRAM passavam folgadamente
+(p50 335-397 ms contra 424-576 ms do `medium`; p95 390-745 ms contra 614-1956 ms;
+pico de 4503 MiB usados no GPU inteiro, ~2,4 GB do processo, com 11548 MiB ainda
+livres), mas a ordem de corte da D53 item 3 põe o acerto primeiro. Segundo
+precedente, depois do `large-v3` simples, de que **maior não é melhor** nesta
+amostra de frases curtas isoladas.
+
+Não foi preciso a válvula `int8_float16` da S8: a VRAM nunca apertou.
 
 ## Palavra de ativação — openWakeWord (D38, TECHNOLOGY.md S2)
 

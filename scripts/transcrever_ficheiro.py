@@ -69,7 +69,10 @@ MODELO_FALLBACK = "small"
 #: qualquer `repo/id` do Hugging Face: `--modelo alguem/repo-mau` descarregava
 #: pesos arbitrarios para models/, fora do registo da D14e e da decisao do
 #: Scout (D39/TECHNOLOGY.md S3), e mandava-os ao parser binario do CTranslate2.
-MODELOS_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3"]
+#: `large-v3-turbo` acrescentado na T9 (S8/D65) para ser medido pelo arnes
+#: (`medir_voz.py --modelo` usa esta lista como `choices`); estar na lista nao
+#: o torna o preferido — isso decide-se pelos numeros da D53.
+MODELOS_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 
 #: Vocabulario de comandos do jarvis (D4, sem nomes de projetos privados —
 #: D10). NAO e usado por omissao (D51): fica aqui para quem o queira passar

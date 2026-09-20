@@ -129,8 +129,12 @@ SENSIBILIDADE_WAKE_WORD = 0.6
 #: razao de scripts/transcrever_ficheiro.py: sem ela, `--modelo alguem/repo-mau`
 #: mandava o faster-whisper descarregar pesos arbitrarios do Hugging Face para
 #: models/, fora do registo da D14e.
+#:
+#: `large-v3-turbo` entrou na lista na T9 (S8/D65) para poder ser MEDIDO contra
+#: o `medium` nas quatro combinacoes da D53. Entrar na lista fechada nao e
+#: adocao: o default continua a ser decidido pelos numeros (ver docs/MODELOS.md).
 MODELO_STT = "medium"
-MODELOS_STT_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3"]
+MODELOS_STT_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 
 #: D51: o initial_prompt fica DESLIGADO no caminho vivo e o estado do prompt
 #: aparece no log de cada frase. Mesmos rotulos de scripts/transcrever_ficheiro.py.
