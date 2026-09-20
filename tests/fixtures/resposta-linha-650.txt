@@ -1,0 +1,10 @@
+<invoke name="Bash">
+<parameter name="command">git status --short && git diff --stat</parameter>
+<parameter name="description">Check working tree state</parameter>
+</invoke>
+
+
+M jarvis/app.py
+ M jarvis/voz.py
+ M tests/test_app.py
+?? tests/test_voz.py

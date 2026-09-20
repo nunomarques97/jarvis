@@ -44,6 +44,15 @@ quadratico — 22,5 s para 30 000 caracteres, medidos na revisao da tentativa 2,
 espera" do inaceitavel n.4. Com o teto por palavra, nenhum padrao ve nunca um token grande e o
 custo passa a linear no tamanho do texto.
 
+Uma LINHA MAIOR DO QUE ~2000 CARACTERES sai tambem, e sai ANTES de qualquer padrao correr: uma
+linha assim nunca e uma frase falada, e sem este teto uma linha feita de muitas palavras curtas
+(nenhuma acima do teto por palavra) ainda levava os 28 padroes a varrer o texto todo. O teto e
+por LINHA do texto de entrada, NAO pela resposta junta: a juncao das linhas sobreviventes e a
+resposta inteira, e prosa natural limpa de 2500 caracteres em varios paragrafos continua a ser
+falada (e so depois cortada aos 200). Confundir os dois manda prosa limpa para a frase de
+recurso, que e ao mesmo tempo inventar conteudo ("codigo ou dados tecnicos" sobre prosa) e quebrar
+a regra de que o recurso so entra quando nao sobra nada falavel.
+
 NUNCA TRUNCAR PARA DENTRO DO PROIBIDO (D59.2): um pedaco proibido e removido inteiro (a linha, ou
 o bloco tecnico contiguo a que pertence, ou o bloco de tres crases inteiro); a resposta so cai
 para a frase de recurso quando isso esvazia tudo o que havia para dizer. Cortar aos N caracteres
@@ -316,6 +325,15 @@ _CRASE_TRIPLA = "```"
 #: nao caberia numa frase falada e `cortar_no_limite` nem a conseguiria cortar. Verificar isto
 #: ANTES dos padroes e tambem o que mantem o filtro linear (ver o cabecalho do modulo).
 MAXIMO_CARACTERES_POR_PALAVRA = MAXIMO_CARACTERES_FALADOS
+#: Teto por LINHA do texto de entrada (nao por palavra e NAO pela resposta junta), pedido
+#: explicitamente pelo veredicto da tentativa 2 alem do teto por palavra: nenhuma frase falada
+#: tem ~2000 caracteres numa unica linha, e verificar isto PRIMEIRO, antes de qualquer padrao
+#: correr, evita que os 28 padroes cheguem sequer a ver uma linha gigante (o teto por palavra ja
+#: cobre o caso do token unico sem espacos; este cobre a linha inteira, tambem quando tem muitas
+#: palavras curtas separadas por espacos). Aplica-se SO em `_linhas_falaveis`: uma resposta de
+#: prosa natural com varios paragrafos pode passar largamente dos 2000 caracteres somados e
+#: continua falada (corta-se depois aos 200), porque a soma das linhas nao e uma linha.
+MAXIMO_CARACTERES_POR_LINHA = 2000
 
 
 def _tem_palavra_impossivel_de_falar(linha: str) -> bool:
@@ -323,8 +341,25 @@ def _tem_palavra_impossivel_de_falar(linha: str) -> bool:
     return any(len(palavra) > MAXIMO_CARACTERES_POR_PALAVRA for palavra in linha.split())
 
 
+def _linha_longa_demais(linha: str) -> bool:
+    """Uma LINHA do texto de entrada maior do que `MAXIMO_CARACTERES_POR_LINHA`.
+
+    So vale no caminho por linha (`_linhas_falaveis`), nunca sobre o texto ja junto: a juncao
+    das linhas sobreviventes e a RESPOSTA inteira, nao uma linha, e prosa natural limpa de 2500
+    caracteres em varios paragrafos tem de continuar a ser falada (D59.2 e D59.4 — a frase de
+    recurso so entra quando nao sobra nada falavel, e dizer "codigo ou dados tecnicos" sobre
+    prosa seria inventar conteudo). Foi exatamente essa a regressao da tentativa 1 desta retoma.
+    """
+    return len(linha) > MAXIMO_CARACTERES_POR_LINHA
+
+
 def _linha_proibida(linha: str) -> bool:
-    """Uma linha e proibida se casar com QUALQUER categoria de exclusao (D59.1)."""
+    """Uma linha e proibida se casar com QUALQUER categoria de exclusao (D59.1).
+
+    O teste barato do tamanho da maior palavra corre sempre primeiro, antes de qualquer padrao.
+    O teto por LINHA nao esta aqui de proposito: esta funcao e reutilizada por `texto_proibido`
+    sobre o texto JA JUNTO (ver `_linha_longa_demais`).
+    """
     if _tem_palavra_impossivel_de_falar(linha):
         return True
     return any(padrao.search(linha) for padrao in _PADROES_DE_LINHA_PROIBIDA)
@@ -360,6 +395,9 @@ def _linhas_falaveis(texto: str) -> list[str]:
     status, um traceback com o corpo do codigo por baixo, ou um diff com linhas de contexto sem
     marca nenhuma saem inteiros, em vez de deixar passar o meio do bloco tecnico por nao ter, ele
     proprio, nenhuma das marcas da lista.
+
+    E aqui, e so aqui, que vale o teto por LINHA (`_linha_longa_demais`): e este o unico sitio
+    onde "linha" quer mesmo dizer uma linha do texto de entrada.
     """
     faladas: list[str] = []
     dentro_de_bloco_proibido = False
@@ -368,7 +406,7 @@ def _linhas_falaveis(texto: str) -> list[str]:
             dentro_de_bloco_proibido = False
             faladas.append(linha)
             continue
-        if dentro_de_bloco_proibido or _linha_proibida(linha):
+        if dentro_de_bloco_proibido or _linha_longa_demais(linha) or _linha_proibida(linha):
             dentro_de_bloco_proibido = True
             continue
         faladas.append(linha)
