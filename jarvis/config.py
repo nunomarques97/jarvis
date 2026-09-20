@@ -157,11 +157,25 @@ def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) ->
     return resolvido
 
 
-def carregar_config(caminho: str | Path = CAMINHO_CONFIG_PADRAO) -> Config:
+def carregar_config(
+    caminho: str | Path = CAMINHO_CONFIG_PADRAO,
+    *,
+    validar_caminhos: bool = True,
+) -> Config:
     """Le, valida e devolve a configuracao privada.
 
     Levanta ConfigError (nunca uma excecao de baixo nivel do tomllib ou do
     sistema de ficheiros) com uma mensagem que diz exatamente o que corrigir.
+
+    `validar_caminhos=False` salta so a verificacao de que o caminho de CADA
+    projeto existe no disco e e uma pasta (`_resolver_caminho_do_projeto`,
+    D50.7); tudo o resto (TOML, [microfone], [[projetos]], duplicados)
+    continua a validar-se sempre. O default e True e e o que toda a T4 usa: a
+    unica excecao aceite e o modo `--simular` de `jarvis/acoes_locais.py`
+    contra o `config.exemplo.toml` VERSIONADO (D10), cujos caminhos
+    ("D:/caminho/para/...") sao ficticios de proposito e nunca existem em
+    disco nenhum — sem esta valvula essa pre-visualizacao nem carregava.
+    Uma accao que executa mesmo alguma coisa NUNCA passa False aqui.
     """
     caminho = Path(caminho)
     if not caminho.is_file():
@@ -184,7 +198,10 @@ def carregar_config(caminho: str | Path = CAMINHO_CONFIG_PADRAO) -> Config:
         if chave in nomes_vistos:
             raise ConfigError(f"'{caminho}': o projeto '{nome}' esta duplicado em [[projetos]].")
         nomes_vistos.add(chave)
-        resolvido = _resolver_caminho_do_projeto(nome, valor_caminho, caminho)
+        if validar_caminhos:
+            resolvido = _resolver_caminho_do_projeto(nome, valor_caminho, caminho)
+        else:
+            resolvido = Path(valor_caminho).expanduser().resolve(strict=False)
         projetos.append(Projeto(nome=nome, caminho=resolvido))
 
     return Config(microfone=bruto["microfone"]["nome"].strip(), projetos=tuple(projetos))
@@ -330,6 +347,30 @@ def _autoteste() -> int:
             "config valida: encontrar_projeto desconhecido devolve None",
             config.encontrar_projeto("nao-existe"),
             None,
+        )
+
+    # 9. validar_caminhos=False (T5): um caminho ficticio, tipo o do
+    # config.exemplo.toml, continua recusado por omissao mas carrega com a
+    # valvula explicita — e o resto da validacao (TOML, [microfone],
+    # [[projetos]]) continua a valer.
+    with tempfile.TemporaryDirectory() as pasta:
+        caminho = Path(pasta) / "config.toml"
+        fantasma = (Path(pasta) / "fantasma-so-para-este-teste").as_posix()
+        caminho.write_text(
+            '[microfone]\nnome = "Microfone"\n\n'
+            f'[[projetos]]\nnome = "ficticio"\ncaminho = "{fantasma}"\n',
+            encoding="utf-8",
+        )
+        verificar(
+            "validar_caminhos=True (default): caminho ficticio continua recusado",
+            "nao existe no disco" in apanhar(lambda: carregar_config(caminho)),
+            True,
+        )
+        config_sem_validar = carregar_config(caminho, validar_caminhos=False)
+        verificar(
+            "validar_caminhos=False: carrega o mesmo caminho sem tocar no disco",
+            config_sem_validar.projetos[0].caminho,
+            Path(fantasma).resolve(strict=False),
         )
 
     print()
