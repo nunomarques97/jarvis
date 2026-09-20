@@ -93,6 +93,11 @@ from jarvis.audio_util import (
 )
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
 from jarvis.consola import forcar_consola_utf8
+from jarvis.lingua import (
+    LINGUA_FIXA_DO_PRODUTO,
+    decidir_lingua_do_top1,
+    lingua_fixada,
+)
 from jarvis.resposta_falada import (
     FRASE_RECURSO_SEM_CORTE_SEGURO,
     MAXIMO_ABSOLUTO_FALADO,
@@ -722,7 +727,26 @@ def construir_recorder(
     opcoes = dict(
         model=modelo,
         download_root=str(PASTA_MODELOS_FASTER_WHISPER),
-        language="pt",
+        # T8, criterio 6: a lingua volta a ser FIXA aqui.
+        #
+        # A T8 ligou a deteccao automatica neste mesmo sitio (`language=None`,
+        # que e o que o RealtimeSTT traduz para deteccao: ele faz
+        # `language=self.language if self.language else None` antes de chamar o
+        # faster-whisper, audio_recorder.py:200 e :2402) e mediu-a. O A/B
+        # controlado — os MESMOS 20 WAV por combinacao, transcritos com a
+        # lingua fixa e com deteccao — deu o acerto de intencao em portugues a
+        # DESCER (21/40 -> 20/40), e esse e o gatilho automatico do criterio 6
+        # e da ordem de corte da D53 item 4: reverte-se.
+        #
+        # A causa medida: com deteccao, o argmax LIVRE do faster-whisper (~100
+        # linguas) e que descodifica, e caiu fora de {pt, en} em 3 das 20
+        # frases portuguesas sem prefixo — uma delas, uma frase inteira e
+        # limpa, saiu em grego e deixou de ser encaminhada.
+        #
+        # O ingles nao depende disto: o encaminhamento casa sempre contra AS
+        # DUAS listas brancas (T7, D58b), e o mesmo A/B deu ZERO linhas
+        # inglesas a mudar de acerto.
+        language=LINGUA_FIXA_DO_PRODUTO,
         device=device,
         compute_type="float16" if device == "cuda" else "int8",
         use_microphone=use_microphone,
@@ -753,12 +777,62 @@ def construir_recorder(
 
 
 def detalhe_da_transcricao(recorder, texto: str) -> str:
-    """A linha da etapa 2: device real, modelo, prompt (D51) e o texto."""
-    lingua = getattr(recorder, "detected_language", None) or "?"
-    probabilidade = getattr(recorder, "detected_language_probability", 0.0) or 0.0
+    """A linha da etapa 2: device real, modelo, prompt (D51), lingua e o texto.
+
+    LINGUA (T8/D58b, criterio 2): escreve a lingua de CADA frase. Hoje o
+    recorder e construido com a lingua FIXA (criterio 6 da T8: o A/B controlado
+    mostrou o acerto em portugues a descer com a deteccao ligada), e entao a
+    linha diz `lingua=pt FIXA (...)` — sem probabilidade nenhuma, porque nao ha
+    nenhuma medida e escrever `p=0.00 hesitou` daria a entender que uma
+    deteccao correu e falhou.
+
+    Se o recorder for construido sem lingua (`language=None`, a deteccao que a
+    T8 mediu e que volta a ligar-se no dia em que houver numeros que a
+    sustentem), a mesma linha escreve a lingua detetada, a probabilidade e se a
+    deteccao HESITOU (probabilidade nao acima do limiar de 0,5 da S10). Os dois
+    caminhos continuam testados.
+
+    ACHADO da T8, registado aqui porque e onde ele se ve: o RealtimeSTT 0.3.104
+    so expoe o TOP-1 da deteccao (`detected_language` /
+    `detected_language_probability`, `audio_recorder.py:1533-1534`) e deita
+    fora o resto do `info` do faster-whisper — o `all_language_probs` nunca
+    chega ate aqui, nem por `recorder.text()` nem por `recorder.transcribe()`,
+    que tambem devolve so a string. Por isso o caminho vivo aplica o argmax
+    restrito a {pt, en} sobre o unico numero que tem: se o top-1 for uma
+    terceira lingua, ela nao entra na escolha do produto (fica o portugues por
+    omissao, com o motivo escrito). Sem monkeypatch ao RealtimeSTT, como a S10
+    previu no ponto 1 de "Como adotar".
+
+    LINGUA-TERCEIRA (D66, ponto 3): o que o caminho vivo NAO consegue e evitar
+    que essa terceira lingua descodifique o audio — o RealtimeSTT tambem chama
+    o faster-whisper com `language=None`, logo o top-1 que ele devolve E a
+    lingua com que o texto foi descodificado. Quando cai fora de {pt, en}, a
+    linha desta etapa leva a marca `lingua-terceira(<codigo> descodificou)`, na
+    medida exata em que a biblioteca deixa: aqui so ha o top-1, nao ha o
+    `all_language_probs` e nao ha forma de repetir a transcricao. A frase segue
+    o caminho normal, nunca e descartada.
+
+    Nada disto muda o encaminhamento: a frase casa sempre contra as DUAS
+    listas brancas (T7), hesite a deteccao ou nao.
+    """
+    # `recorder.language` e o que foi pedido na construcao (RealtimeSTT guarda
+    # o argumento tal e qual): com ele preenchido nao houve deteccao nenhuma, e
+    # o `detected_language` que a biblioteca escreve nesse caso e so o eco do
+    # que lhe demos, a 1.0 de probabilidade — um numero que ninguem mediu.
+    lingua_pedida = (getattr(recorder, "language", "") or "").strip()
+    if lingua_pedida:
+        deteccao = lingua_fixada(lingua_pedida)
+    else:
+        deteccao = decidir_lingua_do_top1(
+            getattr(recorder, "detected_language", None),
+            getattr(recorder, "detected_language_probability", 0.0),
+        )
+    detalhe_da_lingua = deteccao.para_log()
+    if deteccao.hesitou or deteccao.lingua_terceira:
+        detalhe_da_lingua += f" [{deteccao.motivo}]"
     return (
         f"device={getattr(recorder, 'device', '?')} modelo={getattr(recorder, 'main_model_type', '?')} "
-        f"prompt={ESTADO_PROMPT_DESLIGADO} (D51) lingua={lingua} p={probabilidade:.2f} "
+        f"prompt={ESTADO_PROMPT_DESLIGADO} (D51) {detalhe_da_lingua} "
         f"| texto: {texto!r}"
     )
 

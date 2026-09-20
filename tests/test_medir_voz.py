@@ -386,11 +386,12 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
     def test_texto_vazio_nao_produz_celula_vazia(self) -> None:
         self.assertEqual(medir_voz.celula_markdown(""), "—")
 
-    def test_uma_linha_escrita_com_pipes_na_transcricao_continua_a_ter_dez_colunas(self) -> None:
+    def test_uma_linha_escrita_com_pipes_na_transcricao_continua_a_ter_onze_colunas(self) -> None:
         # O ataque provado na tentativa 1, agora de ponta a ponta: a linha
-        # escrita tem de continuar a ter as 10 colunas do cabecalho, com o
-        # `acerto` na 7.a e o WER na 8.a (as duas ultimas, duracao do audio e
-        # latencia da transcricao, entraram a fechar o nit 2 do Reviewer).
+        # escrita tem de continuar a ter as colunas do cabecalho, com o
+        # `acerto` na 7.a e o WER na 8.a (a duracao do audio e a latencia da
+        # transcricao entraram a fechar o nit 2 do Reviewer; a coluna da
+        # LINGUA detetada entrou na T8/D58b e por isso sao 11 e nao 10).
         linha = medir_voz.LinhaMedida(
             numero=1,
             tipo_documentado="local",
@@ -407,6 +408,8 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
             duracao_audio_s=1.25,
             latencia_transcricao_ms=432.0,
             latencia_total_ms=5432.0,
+            lingua="pt",
+            lingua_probabilidade=0.97,
         )
         with pasta_de_evidencia_temporaria() as pasta:
             caminho = pasta / "teste-colunas-medir-voz.md"
@@ -419,15 +422,17 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
         ]
         self.assertEqual(len(linha_da_frase), 1)
         celulas = medir_voz.dividir_celulas(linha_da_frase[0])
-        self.assertEqual(len(celulas), 10)
+        self.assertEqual(len(celulas), 11)
         self.assertEqual(celulas[0], "1")
         self.assertEqual(celulas[3], "isto | NAO | sim | 0.0% | lixo")
         self.assertEqual(celulas[6], "NAO")
         self.assertTrue(celulas[7].endswith("%"))
+        # T8/D58b: a lingua detetada nesta frase, na sua propria coluna.
+        self.assertEqual(celulas[8], "pt 0.97")
         # Nit 2 do Reviewer: a duracao do audio e a latencia SO da transcricao
         # (nao o total com o carregamento) chegam mesmo ao ficheiro.
-        self.assertEqual(celulas[8], "1.25")
-        self.assertEqual(celulas[9], "432")
+        self.assertEqual(celulas[9], "1.25")
+        self.assertEqual(celulas[10], "432")
 
     def test_dividir_celulas_ignora_prosa(self) -> None:
         self.assertIsNone(medir_voz.dividir_celulas("isto nao e uma tabela"))
@@ -998,6 +1003,410 @@ class TestLerAmostraFrasesEmIngles(unittest.TestCase):
         texto = self.CAMINHO.read_text(encoding="utf-8")
         self.assertNotRegex(texto, r"[A-Za-z]:[\\/]")
         self.assertNotIn("Users", texto)
+
+
+# --- T8/D58b/S10: a lingua e o custo de latencia na evidencia --------------
+
+
+class TestPercentil(unittest.TestCase):
+    """O p95 da D6 e nearest-rank: sai sempre uma frase que existiu mesmo."""
+
+    def test_p50_e_p95_de_uma_lista_conhecida(self) -> None:
+        valores = list(range(1, 21))  # 1..20
+        self.assertEqual(medir_voz.percentil(valores, 0.5), 10)
+        self.assertEqual(medir_voz.percentil(valores, 0.95), 19)
+
+    def test_um_so_valor(self) -> None:
+        self.assertEqual(medir_voz.percentil([432.0], 0.95), 432.0)
+
+    def test_lista_vazia_nao_rebenta(self) -> None:
+        self.assertEqual(medir_voz.percentil([], 0.95), 0.0)
+
+    def test_nao_interpola_entre_duas_frases(self) -> None:
+        # Media de 100 e 200 seria 150; o nearest-rank devolve um dos dois.
+        self.assertIn(medir_voz.percentil([100.0, 200.0], 0.5), (100.0, 200.0))
+
+
+class TestLinguaNaEvidencia(unittest.TestCase):
+    """Criterios 2 e 5 da T8: a lingua de cada frase e os percentis no ficheiro."""
+
+    def linha(self, numero: int, lingua: str, prob: float, hesitou: bool, top1: str, latencia: float):
+        return medir_voz.LinhaMedida(
+            numero=numero,
+            tipo_documentado="local",
+            frase_esperada="que horas sao",
+            transcricao="que horas sao",
+            tipo_esperado="local",
+            nome_acao_esperado="horas_e_data",
+            argumento_esperado="horas",
+            tipo_obtido="local",
+            nome_acao_obtido="horas_e_data",
+            argumento_obtido="horas",
+            acertou_intencao=True,
+            wer=medir_voz.calcular_wer("que horas sao", "que horas sao"),
+            duracao_audio_s=1.0,
+            latencia_transcricao_ms=latencia,
+            latencia_total_ms=latencia + 10,
+            lingua=lingua,
+            lingua_probabilidade=prob,
+            lingua_hesitou=hesitou,
+            prob_pt=prob if lingua == "pt" else 0.02,
+            prob_en=prob if lingua == "en" else 0.02,
+            lingua_top1=top1,
+        )
+
+    def escrever(self, linhas):
+        with pasta_de_evidencia_temporaria() as pasta:
+            caminho = pasta / "teste-lingua-medir-voz.md"
+            medir_voz.escrever_evidencia(linhas, "exemplo", "cpu", caminho, 0.0)
+            return caminho.read_text(encoding="utf-8")
+
+    def test_a_coluna_da_lingua_traz_lingua_e_probabilidade(self) -> None:
+        texto = self.escrever([self.linha(1, "pt", 0.96, False, "pt", 300.0)])
+        self.assertIn("| pt 0.96 |", texto)
+
+    def test_uma_frase_hesitante_diz_que_hesitou(self) -> None:
+        texto = self.escrever([self.linha(1, "en", 0.31, True, "en", 300.0)])
+        self.assertIn("en 0.31 hesitou", texto)
+
+    def test_terceira_lingua_no_topo_marca_a_linha_como_lingua_terceira(self) -> None:
+        texto = self.escrever([self.linha(1, "pt", 0.20, True, "es", 300.0)])
+        self.assertIn("lingua-terceira(es descodificou)", texto)
+
+    def test_o_agregado_conta_as_linhas_lingua_terceira_e_diz_quais(self) -> None:
+        # B1 da tentativa 2 / D66 ponto 3: o ficheiro tem de trazer a CONTAGEM
+        # e os numeros das frases, para se poder reconferir linha a linha.
+        linhas = [
+            self.linha(1, "pt", 0.96, False, "pt", 300.0),
+            self.linha(2, "pt", 0.20, True, "ru", 310.0),
+            self.linha(3, "en", 0.31, True, "pl", 320.0),
+        ]
+        texto = self.escrever(linhas)
+        self.assertIn("**`lingua-terceira`: 2/3 frases** (#2, #3)", texto)
+
+    def test_o_agregado_nao_volta_a_dizer_que_a_terceira_lingua_foi_ignorada(self) -> None:
+        # A afirmacao FALSA que o Reviewer rejeitou na tentativa 1, fixada aqui
+        # para nunca mais voltar: com language=None quem descodifica e o argmax
+        # LIVRE, logo a terceira lingua nao pode ser descrita como ignorada.
+        texto = self.escrever([self.linha(1, "pt", 0.20, True, "ru", 300.0)])
+        self.assertNotIn("foi ignorada", texto)
+        self.assertNotIn("não decidiu nada", texto)
+        self.assertIn("DESCODIFICOU o áudio", texto)
+        self.assertIn("nunca é descartada nem re-transcrita", texto)
+
+    def test_sem_terceira_lingua_a_contagem_e_zero(self) -> None:
+        texto = self.escrever([self.linha(1, "pt", 0.96, False, "pt", 300.0)])
+        self.assertIn("**`lingua-terceira`: 0/1 frases** (nenhuma)", texto)
+
+    def test_o_agregado_conta_as_duas_linguas_e_as_hesitacoes(self) -> None:
+        linhas = [
+            self.linha(1, "pt", 0.96, False, "pt", 300.0),
+            self.linha(2, "pt", 0.91, False, "pt", 320.0),
+            self.linha(3, "en", 0.40, True, "en", 340.0),
+        ]
+        texto = self.escrever(linhas)
+        self.assertIn("pt em 2/3 frases, en em 1, hesitou", texto)
+        self.assertIn("hesitou (probabilidade não acima do limiar) em 1", texto)
+
+    def test_o_agregado_diz_que_a_lingua_nao_escolhe_lista_branca(self) -> None:
+        texto = self.escrever([self.linha(1, "pt", 0.96, False, "pt", 300.0)])
+        self.assertIn("casa sempre contra as DUAS", texto)
+
+    def test_os_percentis_sao_escritos_com_o_orcamento_da_d6(self) -> None:
+        linhas = [self.linha(n, "pt", 0.9, False, "pt", 100.0 * n) for n in range(1, 21)]
+        texto = self.escrever(linhas)
+        # Latencias 100..2000 ms. p50 = mediana = (1000+1100)/2 = 1050 ms (o
+        # mesmo numero da linha "mediana" logo acima, para nao haver duas
+        # medianas diferentes no mesmo ficheiro); p95 = 19.a de 20 = 1900 ms,
+        # nearest-rank.
+        self.assertIn("p50 1050 ms, p95 1900 ms", texto)
+        self.assertIn("p50 DENTRO do orçamento", texto)
+        self.assertIn("p95 DENTRO do orçamento", texto)
+
+    def test_um_p95_fora_do_orcamento_e_escrito_como_fora(self) -> None:
+        linhas = [self.linha(n, "pt", 0.9, False, "pt", 4000.0) for n in range(1, 4)]
+        texto = self.escrever(linhas)
+        self.assertIn("p50 FORA do orçamento", texto)
+        self.assertIn("p95 FORA do orçamento", texto)
+
+    def test_sem_lingua_medida_o_bloco_nao_aparece(self) -> None:
+        # Compatibilidade com um transcritor antigo: a evidencia continua a
+        # sair, so sem a coluna da lingua preenchida.
+        import dataclasses
+
+        linha = dataclasses.replace(self.linha(1, "pt", 0.9, False, "pt", 300.0), lingua="?")
+        texto = self.escrever([linha])
+        self.assertNotIn("Deteção automática de língua", texto)
+        self.assertIn("| — |", texto)
+
+
+class TestLinhaMedidaCarregaALingua(unittest.TestCase):
+    """O dict de `transcrever()` chega mesmo a linha da evidencia."""
+
+    def test_as_chaves_da_lingua_passam_do_transcritor_para_a_linha(self) -> None:
+        from jarvis.config import Config
+
+        config = Config(microfone="Microfone de Teste", projetos=())
+        frase = medir_voz.FraseDaAmostra(
+            numero=1,
+            tipo_documentado="local",
+            frase_com_marcadores="que horas sao",
+            intencao_documentada="horas",
+        )
+
+        def gerar_wav_falso(texto, saida, **kwargs):
+            return saida, 1.0, 999
+
+        def transcrever_falso(caminho, device="cuda", modelo_preferido="medium", **kwargs):
+            return {
+                "texto": "que horas sao",
+                "modelo": modelo_preferido,
+                "device": device,
+                "latencia_ms": 10.0,
+                "latencia_transcricao_ms": 5.0,
+                "prompt_estado": "desligado",
+                "lingua": "en",
+                "lingua_probabilidade": 0.42,
+                "lingua_hesitou": True,
+                "prob_pt": 0.30,
+                "prob_en": 0.42,
+                "lingua_top1": "es",
+            }
+
+        with tempfile.TemporaryDirectory() as pasta, mock.patch.object(
+            medir_voz.gerar_wav_mod, "gerar_wav", gerar_wav_falso
+        ), mock.patch.object(medir_voz.transcrever_mod, "transcrever", transcrever_falso):
+            linha = medir_voz.medir_uma_frase(
+                frase,
+                config,
+                [],
+                device="cpu",
+                pasta_audio=Path(pasta),
+                manter_audio=False,
+            )
+        self.assertEqual(linha.lingua, "en")
+        self.assertAlmostEqual(linha.lingua_probabilidade, 0.42)
+        self.assertTrue(linha.lingua_hesitou)
+        self.assertEqual(linha.lingua_top1, "es")
+        self.assertEqual(
+            medir_voz.coluna_da_lingua(linha), "en 0.42 hesitou lingua-terceira(es descodificou)"
+        )
+
+
+class TestAbControlado(unittest.TestCase):
+    r"""D66, ponto 7: a comparação que decide o critério 6 corre sobre os MESMOS WAV.
+
+    O Piper é estocástico. Na tentativa 1 da T8 duas corridas do MESMO código
+    deram 79 transcrições diferentes em 80 e mudaram a duração do áudio em
+    18–20 de 20 linhas por combinação: comparar dois ficheiros desses muda duas
+    variáveis ao mesmo tempo. Estes testes fixam a máquina que torna o A/B
+    controlado — reutilizar o áudio e fixar a língua — e o que a evidência
+    escreve sobre ela.
+    """
+
+    def frase(self):
+        return medir_voz.FraseDaAmostra(
+            numero=7,
+            tipo_documentado="local",
+            frase_com_marcadores="que horas sao",
+            intencao_documentada="horas",
+        )
+
+    def config(self):
+        from jarvis.config import Config
+
+        return Config(microfone="Microfone de Teste", projetos=())
+
+    def escrever_wav(self, pasta: Path, numero: int, segundos: float = 0.5) -> Path:
+        import wave
+
+        caminho = pasta / f"{numero:02d}.wav"
+        with wave.open(str(caminho), "wb") as ficheiro:
+            ficheiro.setnchannels(1)
+            ficheiro.setsampwidth(2)
+            ficheiro.setframerate(16000)
+            ficheiro.writeframes(b"\x00\x00" * int(16000 * segundos))
+        return caminho
+
+    def test_duracao_do_wav_le_o_cabecalho(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = self.escrever_wav(Path(pasta), 1, 0.75)
+            self.assertAlmostEqual(medir_voz.duracao_do_wav(caminho), 0.75, places=3)
+
+    def test_reutilizar_audio_nao_sintetiza_nada_e_nao_apaga_o_wav(self) -> None:
+        chamadas_ao_piper: list[str] = []
+        kwargs_da_transcricao: list[dict] = []
+
+        def gerar_wav_falso(texto, saida, **kwargs):  # pragma: no cover - nao deve correr
+            chamadas_ao_piper.append(texto)
+            return saida, 1.0, 999
+
+        def transcrever_falso(caminho, **kwargs):
+            kwargs_da_transcricao.append(kwargs)
+            return {
+                "texto": "que horas sao",
+                "modelo": "medium",
+                "device": "cpu",
+                "latencia_ms": 10.0,
+                "latencia_transcricao_ms": 5.0,
+                "prompt_estado": "desligado",
+                "lingua": "pt",
+                "lingua_probabilidade": 0.0,
+                "lingua_hesitou": True,
+            }
+
+        with tempfile.TemporaryDirectory() as pasta, mock.patch.object(
+            medir_voz.gerar_wav_mod, "gerar_wav", gerar_wav_falso
+        ), mock.patch.object(medir_voz.transcrever_mod, "transcrever", transcrever_falso):
+            caminho = self.escrever_wav(Path(pasta), 7, 1.25)
+            linha = medir_voz.medir_uma_frase(
+                self.frase(),
+                self.config(),
+                [],
+                device="cpu",
+                pasta_audio=Path(pasta),
+                manter_audio=False,
+                reutilizar_audio=True,
+                lingua_fixa="pt",
+            )
+            # O WAV sobrevive a corrida: a perna B do A/B tem de poder ler o
+            # mesmo ficheiro que a perna A leu.
+            self.assertTrue(caminho.is_file())
+        self.assertEqual(chamadas_ao_piper, [])
+        self.assertEqual(kwargs_da_transcricao[0]["lingua_fixa"], "pt")
+        # A duracao vem do WAV reutilizado, nao de uma sintese que nao houve.
+        self.assertAlmostEqual(linha.duracao_audio_s, 1.25, places=2)
+
+    def test_sem_reutilizar_a_lingua_do_produto_chega_ao_transcritor(self) -> None:
+        kwargs_da_transcricao: list[dict] = []
+
+        def gerar_wav_falso(texto, saida, **kwargs):
+            saida.write_bytes(b"")
+            return saida, 1.0, 999
+
+        def transcrever_falso(caminho, **kwargs):
+            kwargs_da_transcricao.append(kwargs)
+            return {
+                "texto": "que horas sao",
+                "modelo": "medium",
+                "device": "cpu",
+                "latencia_ms": 10.0,
+                "latencia_transcricao_ms": 5.0,
+                "prompt_estado": "desligado",
+            }
+
+        with tempfile.TemporaryDirectory() as pasta, mock.patch.object(
+            medir_voz.gerar_wav_mod, "gerar_wav", gerar_wav_falso
+        ), mock.patch.object(medir_voz.transcrever_mod, "transcrever", transcrever_falso):
+            medir_voz.medir_uma_frase(
+                self.frase(),
+                self.config(),
+                [],
+                device="cpu",
+                pasta_audio=Path(pasta),
+                manter_audio=False,
+            )
+        # Uma corrida normal mede O PRODUTO, e desde a reversao do criterio 6
+        # o produto transcreve com a lingua fixa. A deteccao pede-se com
+        # `--lingua auto` (perna B do A/B), nunca por omissao.
+        self.assertEqual(
+            kwargs_da_transcricao[0]["lingua_fixa"], medir_voz.LINGUA_FIXA_DO_PRODUTO
+        )
+
+    def test_reutilizar_audio_sem_wav_rebenta_com_mensagem_util(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            with self.assertRaises(FileNotFoundError) as caixa:
+                medir_voz.medir_uma_frase(
+                    self.frase(),
+                    self.config(),
+                    [],
+                    device="cpu",
+                    pasta_audio=Path(pasta),
+                    manter_audio=False,
+                    reutilizar_audio=True,
+                )
+        self.assertIn("--manter-audio", str(caixa.exception))
+
+    def test_a_pasta_de_audio_fica_sempre_dentro_de_audio(self) -> None:
+        base = Path("C:/repo/audio/medir-voz")
+        self.assertEqual(medir_voz.pasta_de_audio_de_saida(None, base), base)
+        self.assertEqual(
+            medir_voz.pasta_de_audio_de_saida("ab-pt-sem", base), base / "ab-pt-sem"
+        )
+        for mau in ("../fora", "a/b", "/absoluto", "..", "C:\\outro"):
+            with self.assertRaises(ValueError, msg=f"'{mau}' devia ser recusado"):
+                medir_voz.pasta_de_audio_de_saida(mau, base)
+
+    def test_o_cabecalho_diz_qual_a_lingua_e_qual_o_conjunto_de_wav(self) -> None:
+        linhas = [
+            medir_voz.LinhaMedida(
+                numero=1,
+                tipo_documentado="local",
+                frase_esperada="que horas sao",
+                transcricao="que horas sao",
+                tipo_esperado="local",
+                nome_acao_esperado="horas_e_data",
+                argumento_esperado="horas",
+                tipo_obtido="local",
+                nome_acao_obtido="horas_e_data",
+                argumento_obtido="horas",
+                acertou_intencao=True,
+                wer=medir_voz.calcular_wer("que horas sao", "que horas sao"),
+                latencia_transcricao_ms=300.0,
+                duracao_audio_s=1.0,
+                lingua="pt",
+                lingua_probabilidade=0.9,
+                lingua_top1="pt",
+            )
+        ]
+        with pasta_de_evidencia_temporaria() as pasta:
+            auto = pasta / "auto.md"
+            medir_voz.escrever_evidencia(
+                linhas,
+                "exemplo",
+                "cpu",
+                auto,
+                0.0,
+                pasta_audio=Path("C:/repo/audio/medir-voz/ab-pt-sem"),
+                audio_guardado=True,
+            )
+            texto_auto = auto.read_text(encoding="utf-8")
+            controlo = pasta / "controlo.md"
+            medir_voz.escrever_evidencia(
+                linhas,
+                "exemplo",
+                "cpu",
+                controlo,
+                0.0,
+                lingua_fixa="pt",
+                pasta_audio=Path("C:/repo/audio/medir-voz/ab-pt-sem"),
+                audio_reutilizado=True,
+            )
+            texto_controlo = controlo.read_text(encoding="utf-8")
+
+        self.assertIn("Língua da transcrição: AUTOMÁTICA", texto_auto)
+        self.assertIn("GUARDADO", texto_auto)
+        self.assertIn("Língua da transcrição: FIXA `language='pt'`", texto_controlo)
+        self.assertIn("Conjunto de WAV: REUTILIZADO", texto_controlo)
+        # A perna de controlo nao pode fingir que mediu a lingua.
+        self.assertIn("Deteção automática de língua: DESLIGADA", texto_controlo)
+        self.assertNotIn("**`lingua-terceira`: ", texto_controlo)
+
+    def test_as_tres_flags_existem_na_linha_de_comandos(self) -> None:
+        args = medir_voz.construir_parser().parse_args(
+            ["--reutilizar-audio", "--lingua", "auto", "--pasta-audio", "ab-pt-sem"]
+        )
+        self.assertTrue(args.reutilizar_audio)
+        self.assertEqual(args.lingua, "auto")
+        self.assertEqual(args.pasta_audio, "ab-pt-sem")
+        # Por omissao uma corrida normal mede O PRODUTO: nao reutiliza audio e
+        # transcreve com a lingua fixa (criterio 6 da T8).
+        omissao = medir_voz.construir_parser().parse_args([])
+        self.assertFalse(omissao.reutilizar_audio)
+        self.assertEqual(omissao.lingua, medir_voz.LINGUA_FIXA_DO_PRODUTO)
+        # `--lingua auto` e o que o codigo traduz para `lingua_fixa=None`.
+        self.assertIsNone(None if args.lingua == "auto" else args.lingua)
+        self.assertIsNone(omissao.pasta_audio)
 
 
 if __name__ == "__main__":

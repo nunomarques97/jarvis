@@ -58,6 +58,24 @@ Uso:
     .venv\Scripts\python scripts/medir_voz.py --prefixo "hey jarvis, "
     .venv\Scripts\python scripts/medir_voz.py --modelo small
     .venv\Scripts\python scripts/medir_voz.py --com-som
+
+A/B CONTROLADO da deteccao de lingua (D66, ponto 7 — emenda ao metodo da D53):
+o Piper e estocastico, por isso duas corridas que sintetizam o audio outra vez
+NAO sao comparaveis entre si (na T8 a1 mudaram 79 das 80 transcricoes entre
+duas corridas do mesmo codigo). Para a comparacao ter uma unica variavel, a
+segunda corrida reutiliza os MESMOS WAV:
+
+    .venv\Scripts\python scripts/medir_voz.py --lingua auto --manter-audio \
+        --pasta-audio ab-pt-sem --saida docs/forja/evidence/lingua-pt-sem-prefixo.md
+    .venv\Scripts\python scripts/medir_voz.py --reutilizar-audio \
+        --pasta-audio ab-pt-sem --saida docs/forja/evidence/lingua-ab-fixo-pt-sem-prefixo.md
+
+A primeira liga a detecao frase a frase da S10 (`language=None`) e guarda os
+WAV; a segunda le exatamente os mesmos ficheiros e transcreve-os com a lingua
+FIXA, que e o que o produto faz (T8, criterio 6). Cada ficheiro de evidencia
+escreve no cabecalho qual das duas foi e que conjunto de WAV usou. Foi esta
+comparacao que mostrou o acerto de intencao em portugues a descer com a
+detecao ligada, e por isso a T8 reverteu para `language="pt"`.
 """
 
 from __future__ import annotations
@@ -65,10 +83,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import importlib.util
+import math
 import re
 import statistics
 import sys
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -86,6 +106,11 @@ from jarvis.config import (  # noqa: E402
     carregar_config,
 )
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
+from jarvis.lingua import (  # noqa: E402
+    LINGUA_FIXA_DO_PRODUTO,
+    LINGUAS_RESTRITAS,
+    MARCA_LINGUA_TERCEIRA,
+)
 from jarvis.router import encaminhar  # noqa: E402
 
 PASTA_SCRIPTS = Path(__file__).resolve().parent
@@ -206,6 +231,28 @@ class LinhaMedida:
     #: so a primeira frase paga o carregamento, por isso este numero NAO e
     #: comparavel com as latencias a frio medidas na T3/T6.
     latencia_total_ms: float = 0.0
+    #: T8/D58b: a lingua que a deteccao automatica escolheu para ESTA frase
+    #: (argmax restrito a {pt, en}), a sua probabilidade, se hesitou e as duas
+    #: probabilidades que a decidiram. Nao entra no acerto de intencao — o
+    #: encaminhamento casa sempre contra as DUAS listas brancas (T7) — mas sem
+    #: isto na evidencia nao ha como comparar a corrida com `language="pt"`
+    #: fixo com a corrida com deteccao automatica.
+    lingua: str = "?"
+    lingua_probabilidade: float = 0.0
+    lingua_hesitou: bool = False
+    prob_pt: float = 0.0
+    prob_en: float = 0.0
+    #: O argmax LIVRE sobre as ~100 linguas do Whisper. Quando nao e `pt` nem
+    #: `en`, nao entra na escolha do PRODUTO (a coluna `lingua` sai do argmax
+    #: RESTRITO), mas foi ELE que DESCODIFICOU o audio: o `language=` da API
+    #: publica do faster-whisper aceita um codigo unico e nao uma lista de
+    #: candidatas (S10/D66, ponto 3). A linha fica marcada `lingua-terceira`.
+    lingua_top1: str | None = None
+    #: False quando esta corrida NAO detetou lingua nenhuma (transcricao com
+    #: `language` fixo, que e o que o produto faz desde a reversao do criterio
+    #: 6 da T8). A coluna da evidencia tem de escrever FIXA em vez de uma
+    #: probabilidade que ninguem mediu.
+    lingua_detetada: bool = True
     erro: str | None = None
 
 
@@ -457,6 +504,33 @@ def caminho_evidencia_de_saida(
     return caminho
 
 
+#: Um nome de subpasta de audio: letras, digitos, `-` e `_`, e mais nada.
+PADRAO_NOME_DE_PASTA = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def pasta_de_audio_de_saida(nome: str | None, base: Path | None = None) -> Path:
+    """Valida o `--pasta-audio` (entrada externa, D48(2)) e devolve a pasta.
+
+    `None` devolve a pasta de sempre (`audio/medir-voz/`), para as corridas que
+    nao fazem A/B nao mudarem de comportamento. Com nome, so um nome SIMPLES e
+    aceite: nem barras, nem `..`, nem caminho absoluto — a pasta tem de cair
+    dentro de `audio/`, a unica que o `.gitignore` cobre para WAV, pela mesma
+    razao de `jarvis/audio_util.py::caminho_wav_de_saida` (o audio da medicao
+    leva as frases do Sponsor lidas em voz alta e o repositorio e publico,
+    D1/D10).
+    """
+    base = PASTA_AUDIO_TEMPORARIO if base is None else Path(base)
+    if nome is None or nome == "":
+        return base
+    if not PADRAO_NOME_DE_PASTA.match(nome) or nome in (".", ".."):
+        raise ValueError(
+            f"--pasta-audio '{nome}': so um nome simples (letras, digitos, '-', '_', '.') e "
+            f"aceite; a pasta e sempre criada dentro de '{base}', que o .gitignore cobre "
+            "(D1/D10)"
+        )
+    return base / nome
+
+
 # --- WER: distancia de edicao ao nivel da palavra, Python puro (stdlib) ----
 
 
@@ -513,6 +587,22 @@ def calcular_wer(referencia: str, hipotese: str) -> ResultadoWer:
     )
 
 
+def percentil(valores: Sequence[float], fracao: float) -> float:
+    """Percentil por nearest-rank (sem interpolacao), para o p95 da D6.
+
+    `statistics.quantiles` precisa de pelo menos dois pontos e interpola; com
+    20 frases a interpolacao inventa um valor entre duas frases reais. O
+    nearest-rank devolve SEMPRE a latencia de uma frase que existiu, que e o
+    que se pode ir confirmar a tabela linha a linha.
+    """
+    if not valores:
+        return 0.0
+    ordenados = sorted(valores)
+    posicao = math.ceil(fracao * len(ordenados))
+    posicao = min(max(posicao, 1), len(ordenados))
+    return ordenados[posicao - 1]
+
+
 def calcular_agregados(linhas: Sequence[LinhaMedida]) -> Agregados:
     """Os tres numeros do fim: acerto de intencao, WER macro e WER de corpus.
 
@@ -543,6 +633,21 @@ def calcular_agregados(linhas: Sequence[LinhaMedida]) -> Agregados:
 # --- A cadeia inteira, frase a frase ----------------------------------------
 
 
+def duracao_do_wav(caminho: Path) -> float:
+    """Duracao em segundos de um WAV ja escrito, lida do cabecalho (stdlib).
+
+    Precisa-se dela quando o audio e REUTILIZADO (D66, ponto 7): nessa corrida
+    nao ha `gerar_wav` para a devolver, e usar a duracao que o faster-whisper
+    reporta seria medir a coluna «áudio (s)» com outra regua do que a corrida
+    com que se vai comparar.
+    """
+    with wave.open(str(caminho), "rb") as ficheiro:
+        taxa = ficheiro.getframerate()
+        if not taxa:
+            return 0.0
+        return ficheiro.getnframes() / float(taxa)
+
+
 def medir_uma_frase(
     frase_da_amostra: FraseDaAmostra,
     config: Config,
@@ -554,6 +659,8 @@ def medir_uma_frase(
     modelo: str = transcrever_mod.MODELO_PREFERIDO,
     prefixo: str = "",
     com_som: bool = False,
+    reutilizar_audio: bool = False,
+    lingua_fixa: str | None = LINGUA_FIXA_DO_PRODUTO,
 ) -> LinhaMedida:
     """Sintese -> transcricao -> encaminhador, para UMA frase da amostra.
 
@@ -573,6 +680,19 @@ def medir_uma_frase(
     `com_som` (D61, T5): False por omissao — nenhum dispositivo de audio e
     aberto, so o WAV temporario e escrito e lido de volta. True toca cada
     frase nas colunas enquanto mede, so quando pedido de forma explicita.
+
+    `reutilizar_audio` + `lingua_fixa` (D66, ponto 7): as duas metades do A/B
+    CONTROLADO. O Piper e estocastico — sintetizar outra vez a mesma frase da
+    outro audio, com outra duracao e outra transcricao —, por isso comparar
+    duas corridas que re-sintetizam muda DUAS variaveis ao mesmo tempo e nao
+    prova nada sobre a lingua. Com `reutilizar_audio=True` a sintese nao
+    acontece: le-se o WAV que ja esta em `pasta_audio` (escrito por uma corrida
+    anterior com `manter_audio=True`) e mede-se a MESMA amostra de audio. Com
+    `lingua_fixa="pt"` a transcricao usa a lingua fixa (o produto, T8
+    criterio 6) e com `lingua_fixa=None` corre a deteccao da S10. As duas
+    juntas dao a unica comparacao em que a lingua e a unica variavel.
+    Se o WAV nao existir, levanta `FileNotFoundError` — e um erro do metodo de
+    medicao, nao uma frase que correu mal, e tem de se ver.
     """
     frase_esperada = substituir_marcadores(frase_da_amostra.frase_com_marcadores, nomes_projetos)
 
@@ -582,15 +702,30 @@ def medir_uma_frase(
 
     garantir_pasta(pasta_audio)
     caminho_wav = pasta_audio / f"{frase_da_amostra.numero:02d}.wav"
-    try:
-        _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(
-            texto_sintetizado, caminho_wav, com_som=com_som
+    if reutilizar_audio and not caminho_wav.is_file():
+        raise FileNotFoundError(
+            f"--reutilizar-audio: falta o WAV da frase {frase_da_amostra.numero} em "
+            f"'{caminho_wav}'. Corre primeiro a mesma combinacao com --manter-audio e a "
+            f"mesma --pasta-audio (D66, ponto 7)."
         )
+    try:
+        if reutilizar_audio:
+            duracao_audio_s = duracao_do_wav(caminho_wav)
+        else:
+            _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(
+                texto_sintetizado, caminho_wav, com_som=com_som
+            )
         resultado_transcricao = transcrever_mod.transcrever(
-            caminho_wav, device=device, modelo_preferido=modelo, usar_cache_do_modelo=True
+            caminho_wav,
+            device=device,
+            modelo_preferido=modelo,
+            usar_cache_do_modelo=True,
+            lingua_fixa=lingua_fixa,
         )
     finally:
-        if not manter_audio:
+        # Reutilizar audio NUNCA apaga o que nao foi esta corrida a escrever:
+        # a perna B do A/B leria um WAV que a perna A ja tinha deitado fora.
+        if not manter_audio and not reutilizar_audio:
             caminho_wav.unlink(missing_ok=True)
 
     transcricao = resultado_transcricao["texto"]
@@ -621,6 +756,16 @@ def medir_uma_frase(
         duracao_audio_s=duracao_audio_s,
         latencia_transcricao_ms=resultado_transcricao["latencia_transcricao_ms"],
         latencia_total_ms=resultado_transcricao["latencia_ms"],
+        # `.get` de proposito: um transcritor mais antigo (ou um duplo de
+        # teste) que nao devolva as chaves da lingua continua a medir tudo o
+        # resto, so fica sem a coluna da lingua.
+        lingua=resultado_transcricao.get("lingua", "?"),
+        lingua_probabilidade=resultado_transcricao.get("lingua_probabilidade", 0.0),
+        lingua_hesitou=bool(resultado_transcricao.get("lingua_hesitou", False)),
+        prob_pt=resultado_transcricao.get("prob_pt", 0.0),
+        prob_en=resultado_transcricao.get("prob_en", 0.0),
+        lingua_top1=resultado_transcricao.get("lingua_top1"),
+        lingua_detetada=bool(resultado_transcricao.get("lingua_detetada", True)),
     )
 
 
@@ -708,6 +853,33 @@ AVISO_PRIVACIDADE = (
 )
 
 
+def linha_com_lingua_terceira(linha: LinhaMedida) -> bool:
+    """True quando o argmax LIVRE desta frase caiu fora de {pt, en} (D66)."""
+    return bool(linha.lingua_top1) and linha.lingua_top1 not in LINGUAS_RESTRITAS
+
+
+def coluna_da_lingua(linha: LinhaMedida) -> str:
+    """A celula da lingua detetada (T8/D58b): lingua, probabilidade, hesitacao.
+
+    Quando o argmax LIVRE caiu fora de {pt, en}, a celula leva a marca
+    `lingua-terceira(<codigo> descodificou)` (D66, ponto 3). A marca diz a
+    verdade inteira e e contavel: a terceira lingua nao entra na escolha do
+    PRODUTO (esta coluna, o log, o encaminhador) mas foi ELA que descodificou
+    o audio desta linha — por isso a transcricao ao lado pode estar noutro
+    alfabeto.
+    """
+    if linha.lingua in ("?", ""):
+        return "—"
+    if not linha.lingua_detetada:
+        return f"{linha.lingua} FIXA (sem deteção)"
+    texto = f"{linha.lingua} {linha.lingua_probabilidade:.2f}"
+    if linha.lingua_hesitou:
+        texto += " hesitou"
+    if linha_com_lingua_terceira(linha):
+        texto += f" {MARCA_LINGUA_TERCEIRA}({linha.lingua_top1} descodificou)"
+    return texto
+
+
 def _acao_para_texto(nome_acao: str | None, argumento: str | None) -> str:
     if nome_acao is None:
         return "—"
@@ -726,6 +898,10 @@ def escrever_evidencia(
     caminho_amostra: Path | None = None,
     modelo: str | None = None,
     prefixo: str = "",
+    lingua_fixa: str | None = None,
+    pasta_audio: Path | None = None,
+    audio_reutilizado: bool = False,
+    audio_guardado: bool = False,
 ) -> Agregados:
     """Escreve o ficheiro de evidencia e devolve os agregados.
 
@@ -737,6 +913,13 @@ def escrever_evidencia(
     evidencia dizer qual das quatro combinacoes (PT/EN x com/sem prefixo)
     esta corrida mediu; `None`/`""` cai para a amostra pt-PT por omissao e
     para "nenhum" prefixo, sem quebrar chamadas antigas.
+
+    `lingua_fixa`/`pasta_audio`/`audio_reutilizado` (D66, ponto 7): o
+    cabecalho tem de dizer COM QUE LINGUA a transcricao correu e SOBRE QUE
+    CONJUNTO DE WAV, senao duas corridas comparaveis a olho podem nao ser
+    comparaveis de facto — foi exatamente o defeito da tentativa 1 da T8, em
+    que o arnes re-sintetizava o audio e a comparacao ficava com duas
+    variaveis a mudar ao mesmo tempo.
     """
     caminho_saida = caminho_evidencia_de_saida(caminho_saida)
     agregados = calcular_agregados(linhas)
@@ -769,6 +952,47 @@ def escrever_evidencia(
     partes.append(
         f"- Prefixo usado (--prefixo): {prefixo!r}" if prefixo else "- Prefixo usado (--prefixo): (nenhum)"
     )
+    # D66, ponto 7: as duas variaveis do A/B controlado, escritas no ficheiro.
+    if lingua_fixa:
+        partes.append(
+            f"- **Língua da transcrição: FIXA `language={lingua_fixa!r}`** (`--lingua {lingua_fixa}`) "
+            f"— é o que o produto faz desde a reversão do critério 6 da T8, e é a perna A do "
+            f"A/B. A deteção automática está desligada nesta corrida."
+        )
+    else:
+        partes.append(
+            "- **Língua da transcrição: AUTOMÁTICA (`language=None`, `--lingua auto`)** — deteção "
+            "frase a frase com argmax restrito a {pt, en} (T8/D58b/S10). **Não é o que o "
+            "produto faz**: o A/B controlado mostrou o acerto de intenção em português a "
+            "descer com a deteção ligada e o critério 6 da T8 reverteu-a. Esta corrida é a "
+            "perna B do A/B — a medição que sustenta essa decisão."
+        )
+    if pasta_audio is not None:
+        try:
+            pasta_para_mostrar = str(pasta_audio.relative_to(RAIZ))
+        except ValueError:
+            pasta_para_mostrar = pasta_audio.name
+        if audio_reutilizado:
+            partes.append(
+                f"- **Conjunto de WAV: REUTILIZADO de `{pasta_para_mostrar}`** "
+                f"(`--reutilizar-audio`) — nada foi sintetizado nesta corrida. É isto que "
+                f"torna o A/B controlado: o áudio é byte a byte o mesmo da corrida com que "
+                f"este ficheiro é comparado, e a única variável que muda é a língua da "
+                f"transcrição (D66, ponto 7)."
+            )
+        elif audio_guardado:
+            partes.append(
+                f"- Conjunto de WAV: sintetizado nesta corrida e GUARDADO em "
+                f"`{pasta_para_mostrar}` (`--manter-audio`), para uma segunda corrida o poder "
+                f"reutilizar com `--reutilizar-audio` e o A/B ficar controlado (D66, ponto 7)."
+            )
+        else:
+            partes.append(
+                f"- Conjunto de WAV: sintetizado nesta corrida em `{pasta_para_mostrar}` e "
+                f"apagado frase a frase. **Uma comparação com outro ficheiro destes não é "
+                f"controlada**: o Piper é estocástico, cada corrida produz áudio diferente "
+                f"(D66, ponto 7)."
+            )
     if linhas:
         partes.append(
             f"- Modelo de transcrição observado: {linhas[0].modelo_usado} "
@@ -787,9 +1011,9 @@ def escrever_evidencia(
     partes.append("")
     partes.append(
         "| nº | tipo | frase esperada | transcrição | intenção esperada | "
-        "intenção obtida | acerto | WER | áudio (s) | transcrição (ms) |"
+        "intenção obtida | acerto | WER | língua (T8) | áudio (s) | transcrição (ms) |"
     )
-    partes.append("|---|---|---|---|---|---|---|---|---|---|")
+    partes.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for linha in linhas:
         intencao_esperada = (
             f"{linha.tipo_esperado}: "
@@ -812,6 +1036,7 @@ def escrever_evidencia(
             f"| {celula_markdown(intencao_esperada)} "
             f"| {celula_markdown(intencao_obtida)} "
             f"| {acerto} | {linha.wer.wer * 100:.1f}% "
+            f"| {celula_markdown(coluna_da_lingua(linha))} "
             f"| {duracao} | {latencia} |"
         )
     partes.append("")
@@ -848,6 +1073,21 @@ def escrever_evidencia(
             f"máximo {max(latencias):.0f} ms, para {duracao_audio_total:.1f} s de áudio "
             f"sintetizado no total."
         )
+        # T8: o custo de latência da deteção automática de língua mede-se aqui,
+        # contra o orçamento escrito na D6 (2,0 s p50 / 3,5 s p95 para uma
+        # frase de ~5 s). As frases desta amostra são bem mais curtas do que 5 s
+        # (ver a coluna «áudio (s)»), por isso este número é uma cota SUPERIOR
+        # confortável: se já passa aqui, passa com margem no caso da D6.
+        partes.append(
+            f"- **Latência da transcrição, percentis (D6: ≤ 2000 ms p50, ≤ 3500 ms p95): "
+            f"p50 {statistics.median(latencias):.0f} ms, p95 "
+            f"{percentil(latencias, 0.95):.0f} ms** — "
+            f"p50 {'DENTRO' if statistics.median(latencias) <= 2000 else 'FORA'} do orçamento, "
+            f"p95 {'DENTRO' if percentil(latencias, 0.95) <= 3500 else 'FORA'} do orçamento. "
+            f"O p95 é nearest-rank (a latência de uma frase que existiu mesmo, sem "
+            f"interpolação): com {len(latencias)} frases é a "
+            f"{math.ceil(0.95 * len(latencias))}ª mais lenta."
+        )
         totais = [linha.latencia_total_ms for linha in linhas if linha.latencia_total_ms]
         if totais:
             partes.append(
@@ -859,6 +1099,68 @@ def escrever_evidencia(
                 f"caminho vivo que a D2/D11/D33 pedem (ali a frase vem do microfone, não de um "
                 f"WAV já pronto)."
             )
+    medidas_com_lingua = [linha for linha in linhas if linha.lingua not in ("?", "")]
+    if medidas_com_lingua:
+        n_pt = sum(1 for linha in medidas_com_lingua if linha.lingua == "pt")
+        n_en = sum(1 for linha in medidas_com_lingua if linha.lingua == "en")
+        n_hesitou = sum(1 for linha in medidas_com_lingua if linha.lingua_hesitou)
+        n_top1_terceira = sum(1 for linha in medidas_com_lingua if linha_com_lingua_terceira(linha))
+        numeros_com_lingua_terceira = [
+            linha.numero for linha in medidas_com_lingua if linha_com_lingua_terceira(linha)
+        ]
+        probabilidades = [linha.lingua_probabilidade for linha in medidas_com_lingua]
+        margens = [abs(linha.prob_pt - linha.prob_en) for linha in medidas_com_lingua]
+        if lingua_fixa:
+            partes.append(
+                f"- **Deteção automática de língua: DESLIGADA nesta corrida.** A transcrição "
+                f"correu com `language={lingua_fixa!r}` fixo — é o que o produto faz desde a "
+                f"reversão do critério 6 da T8, e é a perna A do A/B (D66, ponto 7). Sem "
+                f"`language=None` não há `info.all_language_probs` e não há nada a medir: a "
+                f"coluna «língua (T8)» escreve `{lingua_fixa} FIXA (sem deteção)` em todas as "
+                f"linhas, sem probabilidade nenhuma, porque nenhuma foi medida. Os números "
+                f"desta corrida que contam são o acerto de intenção, o WER e a latência."
+            )
+        else:
+            partes.append(
+                f"- **Deteção automática de língua (T8/D58b, argmax restrito a {{pt, en}}, limiar "
+                f"0,50): pt em {n_pt}/{len(medidas_com_lingua)} frases, en em {n_en}, "
+                f"hesitou (probabilidade não acima do limiar) em {n_hesitou}.** Probabilidade "
+                f"mediana da língua escolhida: {statistics.median(probabilidades):.2f} "
+                f"(mínimo {min(probabilidades):.2f}). Margem mediana |p(pt) − p(en)|: "
+                f"{statistics.median(margens):.2f}."
+            )
+        if lingua_fixa:
+            partes.append(
+                f"- `lingua-terceira`: **não se aplica a esta corrida** — a transcrição foi feita "
+                f"com `language={lingua_fixa!r}` fixo, portanto não houve argmax livre nenhum e "
+                f"nenhuma frase pôde ser descodificada por uma terceira língua."
+            )
+        else:
+            marcadas = (
+                ", ".join(f"#{numero}" for numero in numeros_com_lingua_terceira)
+                if numeros_com_lingua_terceira
+                else "nenhuma"
+            )
+            partes.append(
+                f"- **`lingua-terceira`: {n_top1_terceira}/{len(medidas_com_lingua)} frases** "
+                f"({marcadas}). É o número de frases cujo argmax LIVRE (as ~100 línguas do "
+                f"Whisper) caiu fora de {{pt, en}}. O que isso quer dizer, exatamente (D66, "
+                f"ponto 3): a terceira língua **não entra na escolha do PRODUTO** — nem na "
+                f"coluna «língua (T8)» desta tabela, nem no log, nem em nenhuma decisão do "
+                f"encaminhador, que só vê o argmax RESTRITO a {{pt, en}} — mas foi **ela que "
+                f"DESCODIFICOU o áudio** dessas linhas, porque o parâmetro `language=` da API "
+                f"pública do faster-whisper aceita um código único e não uma lista de candidatas "
+                f"(S10). É por isso que a transcrição dessas linhas pode aparecer noutro "
+                f"alfabeto. A frase segue o caminho normal: **nunca é descartada nem "
+                f"re-transcrita** (D66, ponto 2 — duas das linhas afetadas na T8 tinham como "
+                f"destino CORRETO o Claude Code e continuaram a contar `sim`)."
+            )
+        partes.append(
+            f"- A língua detetada NUNCA escolhe lista branca: o encaminhamento casa sempre "
+            f"contra as DUAS (T7/D58b), por isso nenhuma linha desta tabela falha o acerto de "
+            f"intenção por causa da língua — incluindo as marcadas `lingua-terceira`."
+        )
+
     n_sem_acao_esperada = sum(
         1 for linha in linhas if linha.tipo_esperado == "claude" and linha.nome_acao_esperado is None
     )
@@ -935,6 +1237,40 @@ def construir_parser() -> argparse.ArgumentParser:
         help="nao apaga os WAV temporarios depois de cada frase (ficam em audio/medir-voz/, fora do Git)",
     )
     parser.add_argument(
+        "--pasta-audio",
+        default=None,
+        metavar="NOME",
+        help=(
+            "nome da subpasta de audio/medir-voz/ onde os WAV desta corrida sao escritos ou "
+            "lidos (default: a propria audio/medir-voz/). Serve para cada uma das quatro "
+            "combinacoes da D53 guardar o seu conjunto de WAV sem sobrepor o das outras — os "
+            "ficheiros chamam-se 01.wav..20.wav em todas. So um nome simples e aceite (sem "
+            "barras, sem '..'): a pasta fica sempre dentro de audio/, que o .gitignore cobre"
+        ),
+    )
+    parser.add_argument(
+        "--reutilizar-audio",
+        action="store_true",
+        help=(
+            "NAO sintetiza nada: transcreve os WAV que ja estao na pasta de audio (escritos "
+            "por uma corrida anterior com --manter-audio). E a metade que torna o A/B "
+            "controlado (D66, ponto 7): o Piper e estocastico, por isso duas corridas que "
+            "re-sintetizam nao sao comparaveis entre si"
+        ),
+    )
+    parser.add_argument(
+        "--lingua",
+        default=LINGUA_FIXA_DO_PRODUTO,
+        choices=["pt", "en", "auto"],
+        metavar="{pt,en,auto}",
+        help=(
+            f"lingua com que se transcreve (default: '{LINGUA_FIXA_DO_PRODUTO}', o que o "
+            "produto faz desde a reversao do criterio 6 da T8). 'auto' liga a detecao frase a "
+            "frase da S10 (language=None + argmax restrito a {pt, en}): e a perna B do A/B, e "
+            "foi ela que mostrou o acerto de intencao em portugues a descer"
+        ),
+    )
+    parser.add_argument(
         "--com-som",
         action="store_true",
         help=(
@@ -990,6 +1326,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"FALHOU: {erro}", file=sys.stderr)
         return 1
 
+    # 'auto' e a UNICA forma de pedir `language=None`: quem nao diz nada mede
+    # o produto (lingua fixa), que e o que o criterio 6 da T8 deixou ligado.
+    lingua_fixa = None if args.lingua == "auto" else args.lingua
+
+    try:
+        pasta_audio = pasta_de_audio_de_saida(args.pasta_audio)
+    except ValueError as erro:
+        print(f"FALHOU: {erro}", file=sys.stderr)
+        return 1
+
     avisos_da_amostra: list[str] = []
     try:
         frases = ler_amostra(Path(args.amostra), avisos=avisos_da_amostra)
@@ -1005,6 +1351,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"modelo          = {args.modelo}")
     print(f"prefixo         = {args.prefixo!r}" if args.prefixo else "prefixo         = (nenhum)")
     print(f"com som         = {'sim (D61 opt-in)' if args.com_som else 'nao (so ficheiro, D61)'}")
+    print(
+        "lingua          = "
+        + (
+            f"FIXA {lingua_fixa!r} (o produto, T8 criterio 6; perna A do A/B)"
+            if lingua_fixa
+            else "AUTOMATICA (language=None, argmax restrito a {pt, en}, S10; perna B do A/B)"
+        )
+    )
+    print(
+        f"audio           = "
+        + (
+            f"REUTILIZADO de {pasta_audio.relative_to(RAIZ)} (A/B controlado, D66)"
+            if args.reutilizar_audio
+            else f"sintetizado em {pasta_audio.relative_to(RAIZ)}"
+            + (" e guardado (--manter-audio)" if args.manter_audio else " e apagado no fim")
+        )
+    )
     print(f"evidencia       = {caminho_saida.relative_to(RAIZ)}")
     print()
 
@@ -1023,11 +1386,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config,
                 nomes_projetos,
                 device=args.device,
-                pasta_audio=PASTA_AUDIO_TEMPORARIO,
+                pasta_audio=pasta_audio,
                 manter_audio=args.manter_audio,
                 modelo=args.modelo,
                 prefixo=args.prefixo,
                 com_som=args.com_som,
+                reutilizar_audio=args.reutilizar_audio,
+                lingua_fixa=lingua_fixa,
             )
         except KeyboardInterrupt:
             print("INTERROMPIDO pelo utilizador")
@@ -1057,6 +1422,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         caminho_amostra=Path(args.amostra),
         modelo=args.modelo,
         prefixo=args.prefixo,
+        lingua_fixa=lingua_fixa,
+        pasta_audio=pasta_audio,
+        audio_reutilizado=args.reutilizar_audio,
+        audio_guardado=args.manter_audio,
     )
 
     print()

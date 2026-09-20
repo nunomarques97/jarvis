@@ -36,9 +36,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from jarvis.acoes_locais import AcaoError, ResultadoAcao
 from jarvis.app import (
@@ -52,6 +54,8 @@ from jarvis.app import (
     caminho_do_log,
     carregar_config_tolerante,
     chunks_de_silencio,
+    construir_recorder,
+    detalhe_da_transcricao,
     formatar_etapa,
     frames_do_wav,
     instalar_silenciador_no_processo_filho,
@@ -59,6 +63,7 @@ from jarvis.app import (
     silenciar_ruido_do_shutdown,
 )
 from jarvis.audio_util import escrever_wav_pcm16
+from jarvis.lingua import LINGUA_FIXA_DO_PRODUTO
 from jarvis.config import Config, Projeto
 from jarvis.voz import ResultadoFala
 
@@ -631,6 +636,134 @@ class TestConfiguracaoEmFalta(unittest.TestCase):
             teste.frase("Abre o VS Code no exemplo-um")
             self.assertEqual(teste.accoes, ["abrir_vscode"])
             self.assertEqual(teste.canais_abertos, 0)
+
+
+# --- T8/D58b/S10: lingua no caminho VIVO -----------------------------------
+
+
+class RecorderFalso:
+    """So os atributos que `detalhe_da_transcricao` le do RealtimeSTT."""
+
+    def __init__(self, lingua, probabilidade) -> None:
+        self.device = "cuda"
+        self.main_model_type = "medium"
+        self.detected_language = lingua
+        self.detected_language_probability = probabilidade
+
+
+class TestLinguaNoLogDaFrase(unittest.TestCase):
+    """Criterio 2 da T8: cada frase do log diz lingua, probabilidade e hesitacao.
+
+    ACHADO da T8 provado aqui: o RealtimeSTT 0.3.104 so expoe o TOP-1
+    (`detected_language`/`detected_language_probability`), por isso o caminho
+    vivo aplica o argmax restrito ao unico numero que tem — e uma terceira
+    lingua no topo continua a nao decidir nada.
+    """
+
+    def test_portugues_decidido(self) -> None:
+        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.98), "que horas sao")
+        self.assertIn("lingua=pt", detalhe)
+        self.assertIn("p=0.98", detalhe)
+        self.assertIn("decidida", detalhe)
+        self.assertIn("texto: 'que horas sao'", detalhe)
+
+    def test_ingles_decidido(self) -> None:
+        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.87), "what time is it")
+        self.assertIn("lingua=en", detalhe)
+        self.assertIn("decidida", detalhe)
+
+    def test_probabilidade_baixa_escreve_que_hesitou_e_porque(self) -> None:
+        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.32), "what time is it")
+        self.assertIn("lingua=en", detalhe)
+        self.assertIn("hesitou", detalhe)
+        self.assertIn("limiar", detalhe)
+
+    def test_terceira_lingua_no_topo_nao_decide_e_fica_marcada_no_log(self) -> None:
+        # D66, ponto 3 (B1 da tentativa 2): a lingua do PRODUTO continua a ser
+        # `pt`, mas a linha de log tem de dizer que foi o espanhol a
+        # descodificar — e o caminho vivo tambem corre com language=None.
+        detalhe = detalhe_da_transcricao(RecorderFalso("es", 0.80), "que horas sao")
+        self.assertIn("lingua=pt", detalhe)
+        self.assertIn("hesitou", detalhe)
+        self.assertIn("lingua-terceira(es descodificou)", detalhe)
+        self.assertIn("descodificou o audio", detalhe)
+        self.assertNotIn("ignorado", detalhe)
+
+    def test_uma_frase_normal_nao_leva_marca_de_lingua_terceira(self) -> None:
+        # Sem isto a marca nao valia nada: tem de aparecer so quando acontece.
+        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.97), "que horas sao")
+        self.assertNotIn("lingua-terceira", detalhe)
+
+    def test_sem_lingua_nenhuma_continua_a_escrever_a_linha(self) -> None:
+        detalhe = detalhe_da_transcricao(RecorderFalso(None, None), "lixo")
+        self.assertIn("lingua=pt", detalhe)
+        self.assertIn("hesitou", detalhe)
+
+    def test_o_resto_da_linha_nao_mudou(self) -> None:
+        # O formato do log e o entregavel (D2/D11): device, modelo e prompt
+        # continuam onde estavam.
+        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.9), "x")
+        self.assertIn("device=cuda", detalhe)
+        self.assertIn("modelo=medium", detalhe)
+        self.assertIn("prompt=desligado (D51)", detalhe)
+
+
+class TestRecorderPedeDeteccaoDeLingua(unittest.TestCase):
+    """Criterio 6 da T8 no caminho vivo: a lingua do recorder e a do produto.
+
+    A T8 ligou aqui a deteccao (`language=None`) e mediu-a; o A/B controlado
+    deu o acerto de intencao em portugues a descer (21/40 -> 20/40) e o gatilho
+    automatico do criterio 6 / D53 item 4 mandou reverter. O que este teste
+    trava e a REVERSAO: o recorder pede a lingua do produto e nao um `None`
+    solto — e pede-a pela constante, para nao haver dois sitios a dizer qual e.
+    """
+
+    def _opcoes_do_recorder(self, **kwargs) -> dict:
+        capturadas: dict = {}
+
+        class AudioToTextRecorderFalso:
+            def __init__(self, **opcoes):
+                capturadas.update(opcoes)
+
+        modulo = types.ModuleType("RealtimeSTT")
+        modulo.AudioToTextRecorder = AudioToTextRecorderFalso  # type: ignore[attr-defined]
+        with mock.patch.dict(sys.modules, {"RealtimeSTT": modulo}):
+            construir_recorder(
+                use_microphone=False, com_wake_word=False, device="cpu", **kwargs
+            )
+        return capturadas
+
+    def test_language_e_a_lingua_fixa_do_produto(self) -> None:
+        opcoes = self._opcoes_do_recorder()
+        self.assertEqual(opcoes["language"], LINGUA_FIXA_DO_PRODUTO)
+        self.assertEqual(opcoes["language"], "pt")
+
+    def test_com_a_lingua_fixa_a_linha_do_log_e_curta_e_nao_inventa_numeros(self) -> None:
+        # Como o recorder do produto: `language` preenchido (nao houve deteccao
+        # nenhuma) e o `detected_language` a 1.0 e so o eco do que lhe demos.
+        recorder = RecorderFalso(LINGUA_FIXA_DO_PRODUTO, 1.0)
+        recorder.language = LINGUA_FIXA_DO_PRODUTO
+        detalhe = detalhe_da_transcricao(recorder, "que horas sao")
+        self.assertIn("lingua=pt FIXA (sem deteccao, T8 criterio 6)", detalhe)
+        self.assertNotIn("p=1.00", detalhe)
+        self.assertNotIn("hesitou", detalhe)
+        # A justificacao inteira da reversao (~190 caracteres) nao se repete
+        # em cada frase: fica em `lingua_fixada().motivo` e no comentario da
+        # constante. Aqui basta a etiqueta.
+        self.assertNotIn("A/B controlado", detalhe)
+        self.assertIn("texto: 'que horas sao'", detalhe)
+
+    def test_o_mecanismo_de_deteccao_continua_ligavel_e_testado(self) -> None:
+        # A reversao desligou a deteccao no produto, nao a apagou (D66/T9):
+        # com um recorder sem lingua, o caminho vivo volta a ler o top-1.
+        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.93), "x")
+        self.assertIn("lingua=en p=0.93 decidida", detalhe)
+
+    def test_o_resto_da_configuracao_nao_mudou(self) -> None:
+        opcoes = self._opcoes_do_recorder()
+        self.assertIs(opcoes["use_microphone"], False)
+        self.assertEqual(opcoes["beam_size"], 5)
+        self.assertIsNone(opcoes["initial_prompt"])  # D51
 
 
 if __name__ == "__main__":

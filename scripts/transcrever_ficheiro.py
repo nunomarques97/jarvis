@@ -55,6 +55,11 @@ from jarvis.audio_util import (  # noqa: E402
     registar_dlls_do_torch,
 )
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
+from jarvis.lingua import (  # noqa: E402
+    LINGUA_FIXA_DO_PRODUTO,
+    decidir_lingua,
+    lingua_fixada,
+)
 
 MODELO_PREFERIDO = "medium"
 MODELO_FALLBACK = "small"
@@ -169,6 +174,7 @@ def transcrever(
     modelo_fallback: str = MODELO_FALLBACK,
     initial_prompt: str | None = None,
     usar_cache_do_modelo: bool = False,
+    lingua_fixa: str | None = LINGUA_FIXA_DO_PRODUTO,
 ) -> dict:
     """Carrega o modelo (com fallback) e transcreve `caminho`. Devolve um resumo em dict.
 
@@ -180,6 +186,27 @@ def transcrever(
     carregamento por chamada, que e o que a T3/T6 mediram). A `True`, o modelo
     fica em cache por (nome, device) durante o processo — e o que o arnes da T7
     usa para nao pagar 20 carregamentos do `medium` numa corrida de 20 frases.
+
+    `lingua_fixa="pt"` POR OMISSAO (T8, criterio 6). A T8 ligou a deteccao
+    automatica (`lingua_fixa=None` -> `language=None`, TECHNOLOGY.md S10) e
+    mediu-a com um A/B controlado sobre os MESMOS WAV: o acerto de intencao em
+    portugues DESCEU (21/40 -> 20/40 linhas certas), e isso dispara o gatilho
+    automatico do criterio 6 e da ordem de corte da D53 item 4. Por isso o
+    produto transcreve outra vez com a lingua fixa, e o ingles continua a
+    funcionar pelas DUAS listas brancas do encaminhador (T7/D58b), que nunca
+    dependeram da lingua detetada.
+
+    `lingua_fixa=None` liga a deteccao: o faster-whisper detecta a lingua UMA
+    vez dentro deste mesmo `transcribe()` e devolve `info.all_language_probs`;
+    o dict traz entao a lingua ja decidida por argmax RESTRITO a {pt, en}
+    (`prob_pt`, `prob_en`, `lingua`, `lingua_hesitou`) e uma terceira lingua
+    com a probabilidade mais alta fica em `lingua_top1` sem entrar na escolha
+    do produto. LIMITE medido (D66, ponto 3): e essa terceira lingua que
+    DESCODIFICA o audio, porque `language=` aceita um codigo unico e nao uma
+    lista de candidatas; nesse caso a frase fica marcada `lingua-terceira` e
+    segue o caminho normal, sem ser descartada nem re-transcrita. Foi este
+    modo de falha, em 3 das 20 frases portuguesas, que custou a linha de acerto
+    que disparou a reversao.
 
     `condition_on_previous_text=False` de proposito: cada ficheiro desta task e
     uma frase isolada, nao uma sessao continua, e deixar isto a True so
@@ -205,7 +232,14 @@ def transcrever(
         fim_do_carregamento = time.perf_counter()
         segmentos, info = modelo.transcribe(
             str(caminho),
-            language="pt",
+            # T8 criterio 6: "pt" por omissao (a reversao, medida em A/B
+            # controlado). Com `lingua_fixa=None` isto passa a `language=None`
+            # e o faster-whisper detecta a lingua UMA vez dentro deste mesmo
+            # transcribe() (transcribe.py:880-904), devolvendo
+            # `info.all_language_probs`; o argmax restrito a {pt, en} acontece
+            # a seguir, em jarvis/lingua.py. Nao se chama `detect_language()`
+            # a parte: pagava o encoder duas vezes (S10).
+            language=lingua_fixa,
             beam_size=5,
             vad_filter=False,
             initial_prompt=initial_prompt,
@@ -224,7 +258,7 @@ def transcrever(
             fim_do_carregamento = time.perf_counter()
             segmentos, info = modelo.transcribe(
                 str(caminho),
-                language="pt",
+                language=lingua_fixa,  # T8 criterio 6, como no modelo preferido acima
                 beam_size=5,
                 vad_filter=False,
                 initial_prompt=initial_prompt,
@@ -245,6 +279,17 @@ def transcrever(
     latencia_transcricao_ms = (fim - fim_do_carregamento) * 1000
 
     texto = " ".join(segmento.text.strip() for segmento in segmentos).strip()
+    # A lingua que vai para o log. Com a lingua FIXA (o produto, T8 criterio 6)
+    # nao houve deteccao nenhuma e o log tem de o dizer assim, em vez de
+    # escrever um `p=0.00 hesitou` que parece uma deteccao falhada. Com
+    # `lingua_fixa=None` sai do MESMO transcribe() que acabou de correr, por
+    # argmax restrito a {pt, en} sobre `info.all_language_probs`. Nos dois
+    # casos NUNCA decide encaminhamento — a regra das duas listas brancas (T7,
+    # D58b) e que manda.
+    if lingua_fixa:
+        deteccao = lingua_fixada(lingua_fixa)
+    else:
+        deteccao = decidir_lingua(getattr(info, "all_language_probs", None))
     return {
         "texto": texto,
         "modelo": modelo_usado,
@@ -261,6 +306,42 @@ def transcrever(
         # da T4/T6 o registar sem passar pelo CLI.
         "prompt_estado": estado_do_prompt(initial_prompt),
         "initial_prompt": initial_prompt,
+        # D58b/S10 (T8), criterio 2: quem chama recebe a lingua decidida, as
+        # duas probabilidades que a decidiram e se a deteccao hesitou, sem ter
+        # de reabrir o modelo nem repetir a deteccao.
+        "lingua": deteccao.lingua,
+        "lingua_probabilidade": deteccao.probabilidade,
+        "lingua_hesitou": deteccao.hesitou,
+        "prob_pt": deteccao.prob_pt,
+        "prob_en": deteccao.prob_en,
+        "lingua_margem": deteccao.margem,
+        # Diagnostico: o argmax LIVRE sobre as ~100 linguas do Whisper (D66,
+        # ponto 3). Quando cai fora de {pt, en} nao entra na ESCOLHA da lingua
+        # do produto — essa sai sempre do argmax RESTRITO a {pt, en} e e a que
+        # vai para o log, para a coluna da evidencia e para o encaminhador —,
+        # mas foi essa terceira lingua que DESCODIFICOU o audio, porque este
+        # `transcribe()` correu com `language=None` e o parametro `language=`
+        # da API publica do faster-whisper aceita um codigo unico e nao uma
+        # lista de candidatas (S10). E por isso que este campo existe: sem ele
+        # ninguem consegue contar, depois, quantas frases sairam escritas numa
+        # lingua que o produto nao escolheu (marca `lingua-terceira`).
+        "lingua_top1": deteccao.top1,
+        "lingua_top1_probabilidade": deteccao.top1_probabilidade,
+        "lingua_motivo": deteccao.motivo,
+        "lingua_deteccao": deteccao,
+        # D66, ponto 7: com que `language=` esta transcricao foi feita. `"pt"`
+        # = a lingua FIXA, que e o que o produto faz desde a reversao do
+        # criterio 6 (perna A do A/B); `None` = deteccao automatica, a perna B
+        # que foi medida e reprovada. Quem escreve evidencia tem de poder
+        # dize-lo sem adivinhar.
+        "lingua_fixa": lingua_fixa,
+        # D66, ponto 3: True quando o argmax LIVRE caiu fora de {pt, en} e
+        # portanto foi uma terceira lingua a descodificar este audio.
+        "lingua_terceira": deteccao.lingua_terceira,
+        # False quando a transcricao correu com a lingua FIXA: nao houve
+        # deteccao nenhuma e quem escreve log ou evidencia tem de o dizer
+        # em vez de mostrar uma probabilidade de 0.00 que ninguem mediu.
+        "lingua_detetada": deteccao.detetada,
     }
 
 
@@ -339,6 +420,11 @@ def main() -> int:
         f"(carregar o modelo {resultado['latencia_carregamento_ms']:.1f} ms "
         f"+ transcrever {resultado['latencia_transcricao_ms']:.1f} ms)"
     )
+    # D58b/S10 criterio 2: a lingua detetada, a probabilidade e se hesitou
+    # ficam SEMPRE no output, como o estado do prompt da D51.
+    print(f"lingua          = {resultado['lingua_deteccao'].resumo()}")
+    if resultado["lingua_hesitou"] or resultado["lingua_deteccao"].lingua_terceira:
+        print(f"  motivo        = {resultado['lingua_motivo']}")
     # A transcricao e o unico texto aqui que pode ter caracteres fora da pagina
     # de codigo da consola (o Whisper devolve UTF-8 e o stdout do Windows e
     # cp1252 quando isto corre num pipe): sem isto, um caractere fora do mapa
@@ -460,6 +546,41 @@ def _autoteste() -> int:
     verificar("consola: caracteres fora do mapa viram ? em vez de rebentar", texto_para_a_consola(fora_do_mapa, "cp1252"), "horas ??")
     verificar("consola: em utf-8 nada e substituido", texto_para_a_consola(fora_do_mapa, "utf-8"), fora_do_mapa)
 
+    # 7. D58b/S10 (T8): a lingua que este script devolve nunca pode vir de
+    # fora de {pt, en}. Nao carrega modelo nenhum: `decidir_lingua` e pura.
+    terceira = decidir_lingua([("es", 0.80), ("pt", 0.15), ("en", 0.05)])
+    verificar("S10 terceira lingua mais provavel nao decide a lingua", terceira.lingua, "pt")
+    verificar("S10 terceira lingua mais provavel fica registada", terceira.top1, "es")
+    verificar("S10 abaixo do limiar 0,5 a deteccao hesita", terceira.hesitou, True)
+    # D66 ponto 3: a frase fica MARCADA, porque foi essa terceira lingua que
+    # descodificou o audio — o log e a evidencia tem de o dizer.
+    verificar(
+        "D66 terceira lingua no topo marca a frase lingua-terceira",
+        terceira.marca_lingua_terceira,
+        "lingua-terceira(es descodificou)",
+    )
+    verificar(
+        "D66 a marca entra no resumo que vai para o log",
+        "lingua-terceira(es descodificou)" in terceira.resumo(),
+        True,
+    )
+    # T8 criterio 6 / D53 item 4: depois do A/B controlado (o acerto de
+    # intencao em portugues desceu, 21/40 -> 20/40), o produto voltou a
+    # transcrever com a lingua FIXA. O default tem de o dizer, e o mecanismo
+    # de deteccao continua a um argumento de distancia (`lingua_fixa=None`).
+    verificar(
+        "T8 criterio 6 transcrever(lingua_fixa=...) por omissao e a lingua do produto",
+        inspect.signature(transcrever).parameters["lingua_fixa"].default,
+        LINGUA_FIXA_DO_PRODUTO,
+    )
+    fixa = lingua_fixada()
+    verificar("T8 criterio 6 sem deteccao o log escreve FIXA", "FIXA" in fixa.resumo(), True)
+    verificar("T8 criterio 6 sem deteccao nao ha hesitacao para reportar", fixa.hesitou, False)
+    verificar("T8 criterio 6 sem deteccao nao ha argmax livre", fixa.lingua_terceira, False)
+    decidida = decidir_lingua([("en", 0.93), ("pt", 0.04)])
+    verificar("S10 argmax restrito escolhe o ingles quando e ele o maior", decidida.lingua, "en")
+    verificar("S10 acima do limiar 0,5 a deteccao nao hesita", decidida.hesitou, False)
+
     print()
     if falhas:
         print(f"FALHOU: {len(falhas)} verificacao(oes)")
@@ -468,7 +589,8 @@ def _autoteste() -> int:
         return 1
     print(
         "OK: autoteste do transcrever_ficheiro completo "
-        "(D51 a/b/c, lista fechada de modelos, protecao de codificacao da consola)."
+        "(D51 a/b/c, lista fechada de modelos, protecao de codificacao da "
+        "consola, argmax restrito da lingua)."
     )
     return 0
 
