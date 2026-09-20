@@ -65,7 +65,10 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
+import logging
+import multiprocessing
 import sys
 import threading
 import time
@@ -719,6 +722,121 @@ def detalhe_da_transcricao(recorder, texto: str) -> str:
     )
 
 
+# --- Ruido de terceiros no encerramento (QA-close-1.md, finding 4b) ---------
+#
+# Onde nasce o ruido: `RealtimeSTT/audio_recorder.py:134` faz
+# `logging.error(f"Error receiving data from connection: {e}", exc_info=True)`
+# dentro de `TranscriptionWorker.poll_connection`, quando o pipe ja foi fechado
+# pelo `recorder.shutdown()`. Em Windows esse worker NAO corre neste processo:
+# `_start_thread` (audio_recorder.py:996) usa `mp.Process` sempre que o sistema
+# nao e Linux, por isso a mensagem e escrita no logger raiz do PROCESSO FILHO e
+# sai pelo stderr herdado. Um filtro instalado so aqui no pai nunca e consultado
+# pelo filho — e por isso que o silenciador tem duas metades:
+#
+#   1. `instalar_silenciador_no_processo_filho()`, chamado no corpo deste modulo,
+#      que so faz alguma coisa quando o modulo esta a ser executado DENTRO de um
+#      filho de multiprocessing. Em Windows (start method `spawn`) o filho volta
+#      a executar o modulo `__main__` do pai como `__mp_main__`
+#      (`multiprocessing/spawn.py`, `prepare()` -> `_fixup_main_from_name`), e o
+#      `__main__` do caminho real e precisamente este modulo
+#      (`python -m jarvis.app`); quando o ponto de entrada e outro, esse outro
+#      importa na mesma `jarvis.app` para chegar a `correr_wav`/`correr_microfone`.
+#      De qualquer das formas este corpo corre no filho, antes de o worker existir.
+#   2. `silenciar_ruido_do_shutdown()`, usado so a volta das duas chamadas
+#      `recorder.shutdown()`. Esta metade NAO resolve o caso Windows (o emissor
+#      esta noutro processo): serve de defesa em profundidade e cobre o caso
+#      Linux, onde `_start_thread` usa uma `threading.Thread` deste processo e
+#      portanto o mesmo logger raiz.
+#
+# Em ambas as metades descarta-se um unico registo — o que traz as DUAS partes
+# da mensagem conhecida — e tudo o resto, de qualquer nivel, passa intacto.
+
+_RUIDO_DE_ENCERRAMENTO = ("Error receiving data from connection", "WinError 6")
+
+
+class _FiltroDoRuidoDeEncerramento(logging.Filter):
+    """Descarta so o traceback conhecido do WinError 6 no shutdown do RealtimeSTT.
+
+    QA-close-1.md, finding 4b: intermitente, aparece DEPOIS de a resposta ja
+    ter sido dada, em `recorder.shutdown()`. Qualquer outro registo, de
+    qualquer nivel, passa sem tocar (tem de trazer as DUAS partes da mensagem
+    exata do QA, nunca so uma).
+    """
+
+    MENSAGEM_1, MENSAGEM_2 = _RUIDO_DE_ENCERRAMENTO
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - API do logging
+        mensagem = record.getMessage()
+        return not (self.MENSAGEM_1 in mensagem and self.MENSAGEM_2 in mensagem)
+
+
+def _num_processo_filho_de_multiprocessing() -> bool:
+    """Este modulo esta a ser executado dentro de um filho de multiprocessing?
+
+    Em `spawn` (Windows) o corpo do modulo corre durante a preparacao do filho,
+    antes de `_bootstrap`, por isso `parent_process()` ainda devolve `None`;
+    nessa janela o sinal disponivel e `_inheriting` (posto por
+    `multiprocessing/spawn.py::_main`) e o nome do processo, que `prepare()` ja
+    substituiu por "Process-N". Testam-se os tres: qualquer um chega.
+    """
+    if multiprocessing.parent_process() is not None:
+        return True
+    processo = multiprocessing.current_process()
+    if getattr(processo, "_inheriting", False):
+        return True
+    return processo.name != "MainProcess"
+
+
+def instalar_silenciador_no_processo_filho() -> bool:
+    """No processo filho do RealtimeSTT: descarta so o WinError 6 conhecido.
+
+    Devolve True se instalou (e portanto se estamos num filho). No processo
+    principal nao faz absolutamente nada — nenhum filtro, nenhum handler,
+    nenhum toque no stderr. Qualquer falha e engolida de proposito: no pior
+    caso o filtro nao fica instalado e o programa comporta-se exatamente como
+    antes, com a linha de ruido a aparecer.
+    """
+    try:
+        if not _num_processo_filho_de_multiprocessing():
+            return False
+        logging.getLogger().addFilter(_FiltroDoRuidoDeEncerramento())
+    except Exception:  # noqa: BLE001 - nunca partir um filho por causa de ruido
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def silenciar_ruido_do_shutdown() -> Iterator[None]:
+    """So a volta de `recorder.shutdown()`: tira do stderr o WinError 6 conhecido.
+
+    Defesa em profundidade e cobertura do caso Linux (worker em thread deste
+    processo). Em Windows o emissor esta noutro processo e quem trata dele e
+    `instalar_silenciador_no_processo_filho()`.
+
+    Instala o filtro no logger raiz e remove-o sempre no `finally`, mesmo que
+    o shutdown levante. Se a instalacao ou a remocao falharem por qualquer
+    razao, o pior caso e o filtro nao ter efeito (ou ficar por instalar) — o
+    `shutdown()` corre exatamente como corria antes disto existir; nunca
+    engole excecoes do proprio shutdown.
+    """
+    logger_raiz = logging.getLogger()
+    filtro = _FiltroDoRuidoDeEncerramento()
+    try:
+        logger_raiz.addFilter(filtro)
+    except Exception:  # noqa: BLE001 - nunca impedir o shutdown por causa disto
+        yield
+        return
+    try:
+        yield
+    finally:
+        logger_raiz.removeFilter(filtro)
+
+
+# Corre no corpo do modulo de proposito: em `spawn` esta e a unica janela em que
+# ainda se chega ao filho antes de o worker do RealtimeSTT comecar a falar.
+_SILENCIADOR_INSTALADO_NO_FILHO = instalar_silenciador_no_processo_filho()
+
+
 # --- Modo (b): ficheiro -----------------------------------------------------
 
 
@@ -861,7 +979,8 @@ def correr_wav(
         registo.marcar(2, detalhe_da_transcricao(recorder, texto), desde=registo.fim_da_fala)
         jarvis.tratar_transcricao(texto, registo)
     finally:
-        recorder.shutdown()
+        with silenciar_ruido_do_shutdown():
+            recorder.shutdown()
         jarvis.fechar()
     return 0
 
@@ -952,7 +1071,8 @@ def correr_microfone(jarvis: Jarvis, *, device: str = "cuda", modelo: str = MODE
         log.linha("Ctrl+C: a desligar o microfone e a fechar o jarvis (D30)")
         return 0
     finally:
-        recorder.shutdown()
+        with silenciar_ruido_do_shutdown():
+            recorder.shutdown()
         jarvis.fechar()
 
 

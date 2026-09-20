@@ -59,6 +59,7 @@ import io
 import os
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,7 +148,18 @@ def _preparar_encoding_do_piper() -> None:
 
 def _construir_stream():
     """Constroi o TextToAudioStream ligado ao PiperEngine real (S4)."""
-    from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
+    # O RealtimeTTS importa o pydub (dependencia transitiva, so para outros
+    # motores que este jarvis nunca usa) e o pydub avisa em stderr que nao
+    # encontra o ffmpeg (QA-close-1.md, finding 4a): o caminho de voz real e
+    # o piper.exe chamado como executavel e nunca usa ffmpeg, por isso o aviso
+    # e ruido puro para o Sponsor. So este import fica silenciado, so este
+    # aviso: warnings.filters volta ao estado de antes ao sair do `with`
+    # (contrato do proprio contextlib.catch_warnings), nada fica global.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning, module=r"pydub\.utils"
+        )
+        from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
 
     if not MODELO_ONNX.is_file() or not CONFIG_ONNX.is_file():
         raise FileNotFoundError(

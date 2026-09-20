@@ -31,6 +31,10 @@ Corre com:
 from __future__ import annotations
 
 import datetime
+import logging
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from io import StringIO
@@ -50,7 +54,9 @@ from jarvis.app import (
     chunks_de_silencio,
     formatar_etapa,
     frames_do_wav,
+    instalar_silenciador_no_processo_filho,
     resumo_falado,
+    silenciar_ruido_do_shutdown,
 )
 from jarvis.audio_util import escrever_wav_pcm16
 from jarvis.config import Config, Projeto
@@ -441,6 +447,163 @@ class TestInjeccaoDeFicheiro(unittest.TestCase):
         chunks = list(chunks_de_silencio(1.0))
         self.assertEqual(len(chunks), 31)  # 32000 bytes // 1024
         self.assertTrue(all(c == b"\x00" * BYTES_POR_CHUNK for c in chunks))
+
+
+MENSAGEM_DO_WINERROR_6 = (
+    "Error receiving data from connection: [WinError 6] The handle is invalid"
+)
+
+
+class _HandlerDeCaptura(logging.Handler):
+    """Guarda as mensagens que chegam mesmo a um handler do logger raiz."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mensagens: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.mensagens.append(record.getMessage())
+
+
+class TestSilenciadorDoRuidoDoShutdown(unittest.TestCase):
+    """Metade do processo pai (QA-close-1.md, finding 4b): so o WinError 6
+    conhecido e descartado; tudo o resto do logger raiz continua a passar, e o
+    logger fica exatamente como estava antes de o context manager correr.
+
+    Esta metade NAO e a que resolve o caso Windows — la o emissor esta noutro
+    processo e quem trata dele e `instalar_silenciador_no_processo_filho()`,
+    provado em TestSilenciadorNoProcessoFilho com processos a serio. Aqui
+    testa-se o que esta metade faz: defesa em profundidade e o caso Linux, em
+    que o worker do RealtimeSTT e uma thread deste mesmo processo.
+    """
+
+    def _capturar(self, corpo) -> list[str]:
+        """Corre `corpo()` com um handler no logger raiz e devolve o que passou.
+
+        Comportamental de proposito: chama `logging.error`/`logging.info` como
+        o RealtimeSTT chama, em vez de ir buscar o filtro a mao. Repoe o nivel e
+        o handler no fim.
+        """
+        logger_raiz = logging.getLogger()
+        handler = _HandlerDeCaptura()
+        nivel_antes = logger_raiz.level
+        logger_raiz.addHandler(handler)
+        logger_raiz.setLevel(logging.DEBUG)
+        try:
+            corpo()
+        finally:
+            logger_raiz.setLevel(nivel_antes)
+            logger_raiz.removeHandler(handler)
+        return handler.mensagens
+
+    def test_i_descarta_a_mensagem_exata_e_deixa_passar_tudo_o_resto(self) -> None:
+        def corpo() -> None:
+            with silenciar_ruido_do_shutdown():
+                logging.error(MENSAGEM_DO_WINERROR_6)
+                logging.error("Error receiving data from connection: o disco esta cheio")
+                logging.error("[WinError 6] noutro sitio qualquer")
+                logging.info("etapa 5/5 resposta falada")
+            logging.error(MENSAGEM_DO_WINERROR_6)
+
+        passaram = self._capturar(corpo)
+
+        self.assertEqual(
+            passaram,
+            [
+                # a mensagem do finding 4b desapareceu, e so ela
+                "Error receiving data from connection: o disco esta cheio",
+                "[WinError 6] noutro sitio qualquer",
+                "etapa 5/5 resposta falada",
+                # fora do `with`, ate ela volta a passar: nada fica permanente
+                MENSAGEM_DO_WINERROR_6,
+            ],
+        )
+
+    def test_ii_o_logger_raiz_fica_igual_depois_de_sair(self) -> None:
+        logger_raiz = logging.getLogger()
+        filtros_antes = list(logger_raiz.filters)
+        handlers_antes = list(logger_raiz.handlers)
+        nivel_antes = logger_raiz.level
+
+        with silenciar_ruido_do_shutdown():
+            self.assertNotEqual(list(logger_raiz.filters), filtros_antes)
+
+        self.assertEqual(list(logger_raiz.filters), filtros_antes)
+        self.assertEqual(list(logger_raiz.handlers), handlers_antes)
+        self.assertEqual(logger_raiz.level, nivel_antes)
+
+    def test_o_filtro_e_removido_mesmo_que_o_corpo_do_with_levante(self) -> None:
+        logger_raiz = logging.getLogger()
+        filtros_antes = list(logger_raiz.filters)
+
+        with self.assertRaises(RuntimeError):
+            with silenciar_ruido_do_shutdown():
+                raise RuntimeError("recorder.shutdown() falhou a serio")
+
+        self.assertEqual(list(logger_raiz.filters), filtros_antes)
+
+    def test_no_processo_principal_nao_instala_nada(self) -> None:
+        """Importar `jarvis.app` no processo principal nao mexe no logger raiz.
+
+        O silenciador do filho corre no corpo do modulo; aqui garante-se que no
+        pai isso e um no-op declarado — devolve False e nao deixa filtro nenhum.
+        """
+        logger_raiz = logging.getLogger()
+        filtros_antes = list(logger_raiz.filters)
+
+        self.assertFalse(instalar_silenciador_no_processo_filho())
+
+        self.assertEqual(list(logger_raiz.filters), filtros_antes)
+
+
+class TestSilenciadorNoProcessoFilho(unittest.TestCase):
+    """A prova do finding 4b com processos a serio.
+
+    O emissor real (`RealtimeSTT/audio_recorder.py:134`) corre num filho de
+    `mp.Process` (audio_recorder.py:996, porque em Windows o sistema nao e
+    Linux), por isso nenhum filtro do processo pai o apanha. `tests/_filho_ruidoso.py`
+    monta a mesma situacao: um filho de verdade que faz `logging.error` com a
+    mensagem exata e `exc_info=True`, mais um ERROR diferente e uma linha INFO.
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+    OUTRO_ERRO = "Error receiving data from connection: o disco esta cheio"
+    LINHA_DE_INFO = "linha informativa do filho que tem de continuar a passar"
+
+    def _correr_auxiliar(self, *argumentos: str) -> subprocess.CompletedProcess:
+        ambiente = dict(os.environ, PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, "-m", "tests._filho_ruidoso", *argumentos],
+            cwd=str(self.RAIZ),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=ambiente,
+            timeout=300,
+        )
+
+    def test_controlo_sem_o_silenciador_a_mensagem_aparece(self) -> None:
+        """Controlo negativo: sem `jarvis.app` importado no filho, e o de hoje."""
+        corrida = self._correr_auxiliar("--controlo")
+
+        self.assertEqual(corrida.returncode, 0, corrida.stderr)
+        self.assertIn(MENSAGEM_DO_WINERROR_6, corrida.stderr)
+        self.assertIn("Traceback (most recent call last)", corrida.stderr)
+        self.assertIn(self.OUTRO_ERRO, corrida.stderr)
+
+    def test_com_o_silenciador_a_mensagem_do_filho_nao_chega_ao_stderr(self) -> None:
+        corrida = self._correr_auxiliar()
+
+        self.assertEqual(corrida.returncode, 0, corrida.stderr)
+        # (b): a mensagem do filho e o seu traceback desapareceram do stderr do pai
+        self.assertNotIn("WinError 6", corrida.stderr)
+        self.assertNotIn("Traceback (most recent call last)", corrida.stderr)
+        # e so ela: um ERROR diferente do mesmo filho continua a aparecer,
+        # e uma linha de nivel INFO tambem
+        self.assertIn(self.OUTRO_ERRO, corrida.stderr)
+        self.assertIn(self.LINHA_DE_INFO, corrida.stderr)
+        # o stdout do pai nao e tocado
+        self.assertIn("pai: filho terminado", corrida.stdout)
 
 
 class TestConfiguracaoEmFalta(unittest.TestCase):
