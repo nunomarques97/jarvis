@@ -8,8 +8,10 @@ config.toml real, D10): os projetos usados chamam-se "exemplo-um" e
 
 Nenhum destes testes arranca um subprocess a serio (VS Code, explorador) nem
 toca no piper.exe: --simular nunca chega ao subprocess.Popen (verificado
-diretamente), e os testes de voz correm com --sem-voz OU chamam so as funcoes
-puras que nao falam. O que estes testes protegem, alem do caminho feliz:
+diretamente), e os testes de voz correm com --sem-voz, com um stream falso OU
+chamam so as funcoes puras que nao falam. D61/T5: esta CLI e passo do guiao de
+QA, por isso sem `--com-som` nao pede reproducao nenhuma
+(`TestCliSilenciosaPorOmissao`). O que estes testes protegem, alem do caminho feliz:
 
   * --simular nunca executa nada: nao arranca processo nenhum, devolve a
     linha de comando exata que arrancaria (D48: lista de argumentos, sempre
@@ -288,6 +290,92 @@ class TestProjetoDesconhecidoENuncaAdivinhado(unittest.TestCase):
 
         self.assertNotEqual(codigo, 0)
         self.assertIn("nao esta na configuracao", saida_erro.getvalue())
+
+
+class _StreamFalsoSemDispositivo:
+    """O minimo de `TextToAudioStream` que `jarvis.voz.falar()` toca.
+
+    Nao abre dispositivo nenhum porque nao ha dispositivo nenhum: e um duplo
+    (mesma convencao de tests/test_voz.py). So regista o que lhe pediram.
+    """
+
+    def __init__(self) -> None:
+        self.chamadas_play: list[dict] = []
+
+    def feed(self, texto: str) -> None:
+        pass
+
+    def play(self, **kwargs) -> None:
+        self.chamadas_play.append(kwargs)
+
+
+class TestCliSilenciosaPorOmissao(unittest.TestCase):
+    """D61(1)(2): esta CLI e caminho de teste manual e passo do guiao de QA
+    (`python -m jarvis.acoes_locais horas`), NAO "o jarvis a serio" — a unica
+    isencao da D61 e `jarvis/app.py`. Sem `--com-som` nada toca: `falar()`
+    recusa-se antes de construir o motor, por isso nenhum dispositivo de saida
+    de audio chega sequer a ser considerado. Com `--com-som`, e so com ele, a
+    reproducao e pedida (aqui ao duplo, nunca ao Piper nem ao PyAudio).
+    """
+
+    def _correr(self, argumentos: list[str], stream) -> tuple[int, str]:
+        from unittest import mock
+
+        from jarvis import voz
+
+        self.addCleanup(voz.retomar_a_voz)
+        saida = StringIO()
+        stdout_original = sys.stdout
+        sys.stdout = saida
+        try:
+            with mock.patch.object(voz, "_construir_stream", lambda: stream):
+                codigo = main(argumentos)
+        finally:
+            sys.stdout = stdout_original
+        return codigo, saida.getvalue()
+
+    def test_horas_sem_flag_nao_abre_dispositivo_nenhum(self) -> None:
+        stream = _StreamFalsoSemDispositivo()
+        codigo, texto = self._correr(["horas"], stream)
+
+        self.assertEqual(codigo, 0)
+        self.assertEqual(
+            stream.chamadas_play,
+            [],
+            "python -m jarvis.acoes_locais horas pediu reproducao sem --com-som (D61)",
+        )
+        self.assertIn("resposta =", texto)
+        self.assertIn("voz recusada", texto)
+
+    def test_com_som_e_a_unica_maneira_de_pedir_reproducao(self) -> None:
+        stream = _StreamFalsoSemDispositivo()
+        codigo, texto = self._correr(["--com-som", "horas"], stream)
+
+        self.assertEqual(codigo, 0)
+        self.assertEqual(stream.chamadas_play, [{"muted": False}])
+        self.assertIn("resposta =", texto)
+
+    def test_sem_voz_continua_a_nem_chamar_a_voz(self) -> None:
+        stream = _StreamFalsoSemDispositivo()
+        codigo, texto = self._correr(["--sem-voz", "horas"], stream)
+
+        self.assertEqual(codigo, 0)
+        self.assertEqual(stream.chamadas_play, [])
+        self.assertIn("resposta =", texto)
+        self.assertNotIn("voz recusada", texto)
+
+    def test_a_ajuda_diz_numa_linha_que_sem_a_flag_nada_toca(self) -> None:
+        saida = StringIO()
+        stdout_original = sys.stdout
+        sys.stdout = saida
+        try:
+            with self.assertRaises(SystemExit):
+                main(["--help"])
+        finally:
+            sys.stdout = stdout_original
+        texto = saida.getvalue()
+        self.assertIn("--com-som", texto)
+        self.assertIn("sem esta flag", texto)
 
 
 class TestAcoesAdiadasParaAT6(unittest.TestCase):

@@ -52,6 +52,10 @@ Uso na linha de comandos (accao direta, sem passar pelo router — para testar):
     .venv\Scripts\python -m jarvis.acoes_locais abrir-pasta <projeto> [--simular]
     .venv\Scripts\python -m jarvis.acoes_locais --config <caminho> ...
     .venv\Scripts\python -m jarvis.acoes_locais --sem-voz ...   # nao fala, so imprime
+    .venv\Scripts\python -m jarvis.acoes_locais --com-som horas  # ouvir a serio (D61)
+
+Sem --com-som nada toca nas colunas: este comando e caminho de teste manual e
+passo do guiao de QA, e a D61(1) so isenta o jarvis a serio (jarvis/app.py).
 
 Autoteste das partes puras, com uma configuracao ficticia em memoria (nunca
 com o config.toml real):
@@ -446,14 +450,21 @@ def _autoteste() -> int:
     return 0
 
 
-def _resposta(resultado: ResultadoAcao, *, sem_voz: bool) -> None:
-    """Imprime a resposta e, salvo --sem-voz, di-la em voz alta (D35.4)."""
+def _resposta(resultado: ResultadoAcao, *, sem_voz: bool, com_som: bool) -> None:
+    """Imprime a resposta e, com --com-som, di-la em voz alta (D35.4/D61).
+
+    D61(1): esta CLI e caminho de teste manual e passo do guiao de QA, nao "o
+    jarvis a serio" (a isencao da D61 e so para `jarvis/app.py`), por isso o
+    som e opt-in explicito: sem `--com-som`, `jarvis.voz.falar()` recusa-se a
+    abrir qualquer dispositivo de audio e a resposta fica so em texto. O
+    `--sem-voz` mantem-se como sempre foi: nem sequer chama a voz.
+    """
     print(f"resposta = {resultado.texto}")
     if sem_voz:
         return
     from jarvis.voz import falar
 
-    falar(resultado.texto)
+    falar(resultado.texto, com_som=com_som)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -467,7 +478,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sem-voz",
         action="store_true",
-        help="nao fala a resposta em voz alta, so imprime (default: fala via Piper, com fallback D35.4)",
+        help="nem tenta falar, so imprime (por omissao ja nada toca: ouvir pede --com-som, D61)",
+    )
+    parser.add_argument(
+        "--com-som",
+        action="store_true",
+        help=(
+            "opt-in explicito para tocar a resposta nas colunas (D61): sem esta flag "
+            "nada toca, a resposta so sai em texto"
+        ),
     )
     parser.add_argument("--autoteste", action="store_true", help="corre o autoteste com config ficticia")
 
@@ -494,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.comando in ("horas", "data"):
             resultado = horas_e_data(args.comando)
-            _resposta(resultado, sem_voz=args.sem_voz)
+            _resposta(resultado, sem_voz=args.sem_voz, com_som=args.com_som)
             return 0
 
         # abrir-vscode / abrir-pasta precisam da configuracao. Em --simular
@@ -508,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         funcao = abrir_vscode if args.comando == "abrir-vscode" else abrir_pasta
         resultado = funcao(projeto, simular=args.simular)
         print(f"comando  = {resultado.comando}")
-        _resposta(resultado, sem_voz=args.sem_voz)
+        _resposta(resultado, sem_voz=args.sem_voz, com_som=args.com_som)
         return 0
     except (AcaoError, ConfigError) as erro:
         print(f"ERRO: {erro}", file=sys.stderr)

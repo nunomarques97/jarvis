@@ -44,6 +44,12 @@ deste repositorio que o `.gitignore` apanha para ficheiros `.md`. Mesma regra,
 e pela mesma razao, que `jarvis/audio_util.py::caminho_wav_de_saida` ja aplica
 aos WAV (D1/D10/D48(2): a linha de comandos e entrada externa).
 
+TESTES SILENCIOSOS POR OMISSAO (D61, TECHNOLOGY.md S13): este e um arnes de
+medicao — por omissao NAO toca nenhum dispositivo de audio, so escreve e le os
+WAV temporarios de `audio/medir-voz/` (apagados no fim, a menos que
+`--manter-audio`). Ouvir cada frase enquanto e sintetizada e `--com-som`,
+sempre opt-in explicito e nunca uma variavel de ambiente (D61.2).
+
 Uso:
     .venv\Scripts\python scripts/medir_voz.py
     .venv\Scripts\python scripts/medir_voz.py --device cpu
@@ -51,6 +57,7 @@ Uso:
     .venv\Scripts\python scripts/medir_voz.py --amostra tests/voz/frases-en.md
     .venv\Scripts\python scripts/medir_voz.py --prefixo "hey jarvis, "
     .venv\Scripts\python scripts/medir_voz.py --modelo small
+    .venv\Scripts\python scripts/medir_voz.py --com-som
 """
 
 from __future__ import annotations
@@ -546,6 +553,7 @@ def medir_uma_frase(
     manter_audio: bool,
     modelo: str = transcrever_mod.MODELO_PREFERIDO,
     prefixo: str = "",
+    com_som: bool = False,
 ) -> LinhaMedida:
     """Sintese -> transcricao -> encaminhador, para UMA frase da amostra.
 
@@ -561,6 +569,10 @@ def medir_uma_frase(
     `modelo` (D53, T1): passado a `transcrever(modelo_preferido=...)`; por
     omissao continua a ser `transcrever_ficheiro.MODELO_PREFERIDO` (D39), o
     mesmo modelo que corria antes desta task existir.
+
+    `com_som` (D61, T5): False por omissao — nenhum dispositivo de audio e
+    aberto, so o WAV temporario e escrito e lido de volta. True toca cada
+    frase nas colunas enquanto mede, so quando pedido de forma explicita.
     """
     frase_esperada = substituir_marcadores(frase_da_amostra.frase_com_marcadores, nomes_projetos)
 
@@ -571,7 +583,9 @@ def medir_uma_frase(
     garantir_pasta(pasta_audio)
     caminho_wav = pasta_audio / f"{frase_da_amostra.numero:02d}.wav"
     try:
-        _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(texto_sintetizado, caminho_wav)
+        _, duracao_audio_s, _ = gerar_wav_mod.gerar_wav(
+            texto_sintetizado, caminho_wav, com_som=com_som
+        )
         resultado_transcricao = transcrever_mod.transcrever(
             caminho_wav, device=device, modelo_preferido=modelo, usar_cache_do_modelo=True
         )
@@ -921,6 +935,14 @@ def construir_parser() -> argparse.ArgumentParser:
         help="nao apaga os WAV temporarios depois de cada frase (ficam em audio/medir-voz/, fora do Git)",
     )
     parser.add_argument(
+        "--com-som",
+        action="store_true",
+        help=(
+            "opt-in explicito para ouvir cada frase enquanto e medida (D61); sem esta flag "
+            "nada toca nas colunas, so os WAV temporarios sao escritos e lidos de volta"
+        ),
+    )
+    parser.add_argument(
         "--modelo",
         default=transcrever_mod.MODELO_PREFERIDO,
         choices=transcrever_mod.MODELOS_PERMITIDOS,
@@ -982,6 +1004,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"frases          = {len(frases)}")
     print(f"modelo          = {args.modelo}")
     print(f"prefixo         = {args.prefixo!r}" if args.prefixo else "prefixo         = (nenhum)")
+    print(f"com som         = {'sim (D61 opt-in)' if args.com_som else 'nao (so ficheiro, D61)'}")
     print(f"evidencia       = {caminho_saida.relative_to(RAIZ)}")
     print()
 
@@ -1004,6 +1027,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manter_audio=args.manter_audio,
                 modelo=args.modelo,
                 prefixo=args.prefixo,
+                com_som=args.com_som,
             )
         except KeyboardInterrupt:
             print("INTERROMPIDO pelo utilizador")

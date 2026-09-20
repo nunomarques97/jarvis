@@ -32,8 +32,15 @@ maquina. O PiperEngine manda-lhe UTF-8. Sem correcao, cada `a`/`c` acentuado
 chegava partido em dois caracteres e a voz soava os NOMES deles ("a til",
 "paragrafo"), com exit 0 e sem aviso nenhum.
 
+TESTES SILENCIOSOS POR OMISSAO (D61, TECHNOLOGY.md S13): por omissao este
+script NUNCA abre um dispositivo de audio — so escreve o WAV pedido
+(`muted=True`, como sempre fez). Ouvir o que foi gerado, alem de o escrever, e
+`--com-som`, sempre opt-in explicito e nunca uma variavel de ambiente
+(D61.2). `--autoteste` nunca usa `--com-som`: a regressao continua muda.
+
 Uso:
     .venv\Scripts\python scripts/gerar_wav.py "que horas sao" --saida audio/t-horas.wav
+    .venv\Scripts\python scripts/gerar_wav.py "que horas sao" --saida audio/t-horas.wav --com-som
     .venv\Scripts\python scripts/gerar_wav.py --autoteste
 """
 
@@ -204,8 +211,18 @@ def preparar_encoding_do_piper(revalidar: bool = False) -> str:
     return encoding
 
 
-def sintetizar_para_wav_bruto(texto: str, caminho_bruto: Path, piper_exe: Path) -> int:
-    """Escreve o WAV que sai do Piper, na taxa nativa da voz. Devolve a taxa em Hz."""
+def sintetizar_para_wav_bruto(
+    texto: str, caminho_bruto: Path, piper_exe: Path, *, com_som: bool = False
+) -> int:
+    """Escreve o WAV que sai do Piper, na taxa nativa da voz. Devolve a taxa em Hz.
+
+    `com_som` (D61, opt-in explicito, nunca variavel de ambiente): False por
+    omissao — so escreve `caminho_bruto`, nenhum dispositivo de audio e aberto
+    (`StreamPlayer.open_stream` nem tenta quando `muted=True`). Com
+    `com_som=True` toca a serio nas colunas AO MESMO TEMPO que escreve o
+    ficheiro: a escrita do WAV no RealtimeTTS e independente do `muted`
+    (`text_to_stream.py`, o `output_wavfile` grava em qualquer dos dois casos).
+    """
     from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
 
     # Repetido aqui de proposito (a verificacao fica em cache, nao custa nada):
@@ -222,25 +239,31 @@ def sintetizar_para_wav_bruto(texto: str, caminho_bruto: Path, piper_exe: Path) 
 
     voz = PiperVoice(model_file=str(MODELO_ONNX), config_file=str(CONFIG_ONNX))
     motor = PiperEngine(voice=voz, piper_path=str(piper_exe))
-    # muted=True: nunca abre um dispositivo de saida de audio (StreamPlayer.open_stream
-    # nem tenta se config.muted); este script so escreve ficheiro, nunca toca som.
+    # muted=not com_som: por omissao (com_som=False) nunca abre um dispositivo
+    # de saida de audio (D61/S13); so com --com-som explicito e que este
+    # script toca alguma coisa alem de escrever o ficheiro.
     # tokenizer="rule-based": o default "nltk+rule-based" manda o stream2sentence
     # fazer `nltk.download("punkt_tab")` na primeira corrida — 4,3 MB vindos da
     # rede, fora de models/ e fora do registo da D14e, e a primeira corrida numa
     # maquina offline deixava de funcionar. O divisor de frases interno chega
     # para o que este script faz (uma frase de cada vez).
-    stream = TextToAudioStream(motor, muted=True, language="pt", tokenizer="rule-based")
+    stream = TextToAudioStream(motor, muted=not com_som, language="pt", tokenizer="rule-based")
     stream.feed(texto)
     # O unico sitio onde nasce o processo do piper.exe: e aqui que o ambiente
     # deste processo tem de estar sem segredos (D50(9)).
     with ambiente_sem_segredos():
-        stream.play(muted=True, output_wavfile=str(caminho_bruto))
+        stream.play(muted=not com_som, output_wavfile=str(caminho_bruto))
     _, taxa, _ = ler_wav_pcm16(caminho_bruto)
     return taxa
 
 
-def gerar_wav(texto: str, saida: Path) -> tuple[Path, float, int]:
-    """Sintetiza `texto` em `saida` (16 kHz mono). Devolve (caminho, duracao_s, bytes)."""
+def gerar_wav(texto: str, saida: Path, *, com_som: bool = False) -> tuple[Path, float, int]:
+    """Sintetiza `texto` em `saida` (16 kHz mono). Devolve (caminho, duracao_s, bytes).
+
+    `com_som` (D61): False por omissao, nunca abre dispositivo de audio; True
+    toca a serio nas colunas ALEM de escrever `saida`, so quando pedido de
+    forma explicita (`--com-som` na CLI).
+    """
     piper_exe = caminho_do_piper_exe()
     preparar_encoding_do_piper()
     garantir_pasta(saida.parent)
@@ -253,7 +276,7 @@ def gerar_wav(texto: str, saida: Path) -> tuple[Path, float, int]:
     os.close(descritor)
     caminho_bruto = Path(nome_bruto)
     try:
-        sintetizar_para_wav_bruto(texto, caminho_bruto, piper_exe)
+        sintetizar_para_wav_bruto(texto, caminho_bruto, piper_exe, com_som=com_som)
         dados, taxa_nativa, canais = ler_wav_pcm16(caminho_bruto)
         if canais != 1:
             raise ValueError(
@@ -412,9 +435,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--com-som",
+        action="store_true",
+        help=(
+            "opt-in explicito para tocar nas colunas (D61), alem de escrever o WAV; "
+            "sem esta flag nada toca — so o ficheiro e escrito"
+        ),
+    )
+    parser.add_argument(
         "--autoteste",
         action="store_true",
-        help="corre a regressao da codificacao UTF-8 do piper (nao escreve em audio/)",
+        help="corre a regressao da codificacao UTF-8 do piper (nao escreve em audio/, nunca toca som)",
     )
     args = parser.parse_args()
 
@@ -438,9 +469,10 @@ def main() -> int:
 
     print("=== jarvis - gerar_wav (Piper, voz pt_PT-tugao-medium) ===")
     print(f"texto           = {args.texto!r}")
+    print(f"com som         = {'sim (D61 opt-in)' if args.com_som else 'nao (so ficheiro, D61)'}")
     t0 = time.perf_counter()
     try:
-        caminho, duracao_s, n_bytes = gerar_wav(args.texto, saida)
+        caminho, duracao_s, n_bytes = gerar_wav(args.texto, saida, com_som=args.com_som)
     except Exception as erro:
         print(f"FALHOU: {erro}", file=sys.stderr)
         return 1

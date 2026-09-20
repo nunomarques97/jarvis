@@ -762,7 +762,14 @@ class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
         chamadas_gerar_wav: list[str] = []
         chamadas_transcrever: list[dict] = []
 
-        def gerar_wav_falso(texto, saida):
+        def gerar_wav_falso(texto, saida, **kwargs):
+            # D61/T5: o arnes de medicao NUNCA pede som. Se um dia alguem
+            # passar `com_som=True` por omissao aqui, este teste cai antes de
+            # a suite fazer barulho nas colunas do Sponsor.
+            assert kwargs.get("com_som") is False, (
+                "medir_uma_frase pediu som ao sintetizador (D61): "
+                f"com_som={kwargs.get('com_som')!r}"
+            )
             chamadas_gerar_wav.append(texto)
             return saida, 1.23, 999
 

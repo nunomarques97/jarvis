@@ -2,9 +2,13 @@ r"""Orquestrador do jarvis: ouve, transcreve, encaminha, age e responde.
 
 O processo de consola da D11/D30: arranca-se a mao, nao tem interface grafica,
 nao e servico do Windows, nao arranca com o sistema, e fechar a janela desliga
-o microfone. A consola deixa obvio a olho quando esta a ouvir (o cabecalho e a
-linha de estado) e e, ao mesmo tempo, a prova: cada frase escreve um unico
-registo com timestamps e latencias, na consola E em `logs/jarvis-<data>.log`.
+o microfone E cala a voz (D60: Ctrl+C, saida do processo e o comando "cala-te"
+passam todos pelo mesmo `jarvis.voz.calar_agora`, que mata a sintese em curso
+antes de parar a reproducao, e depois disso nada novo e falado).
+
+A consola deixa obvio a olho quando esta a ouvir (o cabecalho e a linha de
+estado) e e, ao mesmo tempo, a prova: cada frase escreve um unico registo com
+timestamps e latencias, na consola E em `logs/jarvis-<data>.log`.
 
 Dois modos, o MESMO pipeline (TECHNOLOGY.md S1/S5):
 
@@ -65,10 +69,12 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import datetime
 import logging
 import multiprocessing
+import signal
 import sys
 import threading
 import time
@@ -87,6 +93,14 @@ from jarvis.audio_util import (
 )
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
 from jarvis.consola import forcar_consola_utf8
+from jarvis.resposta_falada import (
+    FRASE_RECURSO_SEM_CORTE_SEGURO,
+    MAXIMO_ABSOLUTO_FALADO,
+    MAXIMO_CARACTERES_FALADOS,
+    PREFIXO_DA_RESPOSTA_DO_CLAUDE,
+    cortar_no_limite,
+    resumo_falado,
+)
 from jarvis.router import ResultadoRouter, encaminhar
 
 # --- Constantes do envelope (nada configuravel por texto vindo de fora) -----
@@ -126,16 +140,12 @@ SILENCIO_DEPOIS_DO_FICHEIRO_S = 1.5
 #: Tempo que o modo ficheiro ainda espera pela transcricao depois de alimentar
 #: tudo. Esgotado, a frase e abortada e o log escreve o falso despertar.
 ESPERA_MAXIMA_DEPOIS_DO_FICHEIRO_S = 8.0
-#: Teto do que se le em voz alta de uma resposta do Claude Code. D48(4): a
-#: sessao filha corre sem ferramentas e pode alucinar que as usou; o log leva a
-#: resposta inteira, a voz le so o principio e nunca a apresenta como facto.
-MAXIMO_CARACTERES_FALADOS = 240
-#: Corte duro de qualquer resposta falada, seja de onde for.
-MAXIMO_ABSOLUTO_FALADO = 400
-#: D48(4), verificado em execucao nesta task: sem ferramentas, a sessao filha
-#: inventou "File read: <caminho>" e um resumo do projeto. A voz nomeia sempre
-#: a origem e diz que nao esta verificado, em vez de o ler como facto.
-PREFIXO_DA_RESPOSTA_DO_CLAUDE = "Resposta do Claude Code, não verificada:"
+# O contrato do que chega a voz (limites, prefixo de origem, filtro por exclusao
+# e frases de recurso) vive em jarvis/resposta_falada.py (D48.4/D59): a sessao
+# filha do Claude Code corre sem ferramentas e pode alucinar que as usou, por
+# isso o log leva a resposta INTEIRA em bruto e a voz so o que passa o filtro.
+# Este modulo importa de la e nao define limites proprios.
+
 #: Limite por frase entregue ao Claude Code.
 LIMITE_CLAUDE_S = 120.0
 
@@ -232,22 +242,6 @@ def formatar_etapa(numero_da_frase: int, etapa: int, latencia_ms: float, detalhe
         f"frase #{numero_da_frase} | etapa {NOMES_DAS_ETAPAS[etapa]} "
         f"| {latencia_ms:7.0f} ms | {detalhe}"
     )
-
-
-def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS) -> str:
-    """O que a voz le de uma resposta do Claude Code (D48.4).
-
-    Junta as linhas numa so, tira as crases da formatacao markdown, corta no
-    fim de uma palavra e nomeia sempre a origem: o Sponsor tem de ouvir de
-    quem e a frase e que ela nao esta verificada. O log fica com a resposta
-    inteira, em bruto.
-    """
-    limpo = " ".join((resposta or "").replace("`", "").split())
-    if not limpo:
-        return f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} respondeu sem texto."
-    if len(limpo) > limite:
-        limpo = limpo[:limite].rsplit(" ", 1)[0] + "..."
-    return f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} {limpo}"
 
 
 @dataclass(frozen=True)
@@ -504,11 +498,15 @@ class Jarvis:
         executar: Callable[..., acoes_locais.ResultadoAcao] = acoes_locais.executar,
         abrir_canal: Callable[[], object] = canal_claude.abrir_canal,
         com_voz: bool = True,
+        calar: Callable[..., voz.ResultadoSilencio] = voz.calar_agora,
     ) -> None:
         self.config = config
         self.log = log
         self.estado = estado or EstadoDoProcesso()
         self._falar = falar
+        # O MESMO mecanismo dos tres gatilhos (D60(2)); entra pelo construtor
+        # so para os testes o poderem espiar sem Piper nem dispositivo de som.
+        self._calar = calar
         self._executar = executar
         self._abrir_canal = abrir_canal
         self.com_voz = com_voz
@@ -535,6 +533,11 @@ class Jarvis:
 
     def _accao_de_estado(self, nome_acao: str) -> str:
         if nome_acao == "calar":
+            # D60(2): "cala-te" cala a frase que esta a ser dita NAQUELE
+            # momento, pelo mesmo mecanismo do Ctrl+C, e so depois marca o
+            # estado para as respostas futuras (que era tudo o que fazia).
+            # `definitivo=False`: um "acorda" a seguir volta a poder falar.
+            self.calar_agora("cala-te (lista branca D4.d)", definitivo=False)
             self.estado.mudo = True
             return "Fico calado."
         if nome_acao == "adormecer":
@@ -606,12 +609,30 @@ class Jarvis:
             return
         falado = " ".join(texto.split())
         if len(falado) > MAXIMO_ABSOLUTO_FALADO:  # ultima rede, nunca deve disparar
-            falado = falado[:MAXIMO_ABSOLUTO_FALADO].rstrip() + "..."
+            # D59.3: mesmo este corte de emergencia nunca parte uma palavra ao meio. Nao havendo
+            # um unico espaco dentro do limite (uma "palavra" de centenas de caracteres, que
+            # nunca e linguagem natural), diz-se a frase de recurso em vez de ler meia palavra —
+            # e sem ficar calado (inaceitavel n.4). O texto inteiro ja foi para o log.
+            falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or (
+                FRASE_RECURSO_SEM_CORTE_SEGURO
+            )
+        if voz.esta_calado():
+            # Depois de um Ctrl+C (ou da saida do processo) nada novo e
+            # falado: nem o resto da frase, nem uma despedida, nem esta
+            # resposta do Claude Code que acabou de chegar (D60(1)).
+            registo.marcar(5, f"silenciado a pedido (D60): nada e falado | texto: {falado!r}")
+            return
         if self.estado.mudo or not self.com_voz:
             razao = "modo calado (D4.d)" if self.estado.mudo else "--sem-voz"
             registo.marcar(5, f"voz desligada ({razao}); resposta so na consola: {falado!r}")
             return
-        resultado = self._falar(falado)
+        # com_som=True: o UNICO opt-in explicito da D61 que liga as colunas a
+        # serio. E o jarvis a serio (este processo): tem de falar, por isso
+        # liga-se aqui, sempre — o interruptor continua a ser --sem-voz (que
+        # ja fez `self.com_voz` chegar a False e devolver mais acima, nunca
+        # chegando a esta linha) e o "cala-te"/adormecido (idem). Sem este
+        # opt-in, `jarvis.voz.falar()` recusa-se a abrir o dispositivo (D61).
+        resultado = self._falar(falado, com_som=True)
         if resultado.falou:
             registo.marcar(5, f"falado em pt-PT (Piper): {falado!r}")
         else:
@@ -639,6 +660,20 @@ class Jarvis:
             fim = "ignorada (jarvis adormecido)"
         registo.fechar(fim)
         return resultado
+
+    def calar_agora(
+        self, motivo: str, *, definitivo: bool, ja_calado: bool = False
+    ) -> voz.ResultadoSilencio:
+        """Cala a voz JA e escreve as duas linhas com timestamps (D60(4)(b)).
+
+        E o unico caminho de silenciamento do processo: usam-no o handler de
+        Ctrl+C, a saida do processo e a accao "calar" da lista branca da D4.d
+        (e o equivalente ingles quando existir). `ja_calado=True` faz o mesmo
+        trabalho sem repetir as duas linhas no log.
+        """
+        return self._calar(
+            motivo, definitivo=definitivo, registar=None if ja_calado else self.log.linha
+        )
 
     def fechar(self) -> None:
         canal = self.canal
@@ -1049,7 +1084,7 @@ def correr_microfone(jarvis: Jarvis, *, device: str = "cuda", modelo: str = MODE
     log.bruto("=" * LARGURA_DA_SEPARACAO)
     log.bruto("   JARVIS ESTA A OUVIR   -   diz:  \"hey jarvis, que horas sao?\"")
     log.bruto(f"   microfone LIGADO   |   transcricao em {getattr(recorder, 'device', '?')}")
-    log.bruto("   fechar esta janela (ou Ctrl+C) desliga o microfone (D30)")
+    log.bruto("   fechar esta janela (ou Ctrl+C) cala a voz e desliga o microfone (D30/D60)")
     log.bruto("=" * LARGURA_DA_SEPARACAO)
     novo_registo()
     try:
@@ -1068,7 +1103,11 @@ def correr_microfone(jarvis: Jarvis, *, device: str = "cuda", modelo: str = MODE
             log.bruto(">>> A OUVIR - diz \"hey jarvis\" <<<")
     except KeyboardInterrupt:
         log.bruto("")
-        log.linha("Ctrl+C: a desligar o microfone e a fechar o jarvis (D30)")
+        # PRIMEIRO calar (D60): matar a sintese em curso e parar a reproducao,
+        # ANTES do `recorder.shutdown()` do `finally`, que demora segundos. Era
+        # aqui que o jarvis so desligava o microfone e continuava a falar.
+        jarvis.calar_agora("Ctrl+C (D30/D60)", definitivo=True, ja_calado=voz.esta_calado())
+        log.linha("Ctrl+C: voz calada, a desligar o microfone e a fechar o jarvis (D30/D60)")
         return 0
     finally:
         with silenciar_ruido_do_shutdown():
@@ -1174,6 +1213,30 @@ def main(argv: list[str] | None = None) -> int:
         f"voz={'ligada' if not args.sem_voz else 'desligada'} | device pedido={args.device}"
     )
     jarvis = Jarvis(config, log, com_voz=not args.sem_voz)
+    # Ultima rede da saida do processo (D60(2)): mesmo que o processo acabe por
+    # um caminho que nao passe pelo `finally` abaixo, nao fica um `piper.exe`
+    # vivo a falar. Sem `registar`: nesse ponto o log ja pode estar fechado.
+    atexit.register(voz.calar_agora, "saida do processo (atexit)", definitivo=True)
+
+    def ao_ctrl_c(numero_do_sinal, _quadro):
+        """Cala ANTES de a excecao desenrolar a pilha (D60).
+
+        Sem isto, o `KeyboardInterrupt` sobe primeiro por dentro de
+        `jarvis.voz.falar()`, que larga o registo da voz ativa no seu
+        `finally` — e o handler la em baixo ja nao teria o `piper.exe` a mao
+        para matar. Um handler de sinal corre na thread principal, entre
+        bytecodes, que e o instante mais cedo possivel.
+        """
+        jarvis.calar_agora("Ctrl+C (D30/D60)", definitivo=True)
+        raise KeyboardInterrupt
+
+    try:
+        handler_anterior = signal.signal(signal.SIGINT, ao_ctrl_c)
+    except ValueError:
+        # Fora da thread principal nao ha handlers de sinal. O Ctrl+C continua
+        # a ser apanhado pelo `except KeyboardInterrupt` de `correr_microfone`
+        # e pelo `finally` daqui: so se perde o instante mais cedo.
+        handler_anterior = None
     try:
         if args.wav:
             return correr_wav(
@@ -1185,6 +1248,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         return correr_microfone(jarvis, device=args.device, modelo=args.modelo)
     finally:
+        if handler_anterior is not None:
+            signal.signal(signal.SIGINT, handler_anterior)
+        # Gatilho 3 (D60(2)): a saida do processo cala pelo MESMO mecanismo. Se
+        # o Ctrl+C ja calou, isto corre na mesma (nao ha nada para matar) mas
+        # sem repetir as duas linhas no log.
+        jarvis.calar_agora("saida do processo", definitivo=True, ja_calado=voz.esta_calado())
         log.linha("jarvis terminado")
         log.fechar()
 
