@@ -72,3 +72,5 @@ Thumbs.db
 logs/
 tmp/
 .forja/
+# Instrucoes locais dos agentes (caminhos do disco do Sponsor)
+/AGENTS.md
