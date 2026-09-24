@@ -1,29 +1,28 @@
 r"""Testes de jarvis/voz.py, unittest da biblioteca padrao (sem pytest, mesma
-convencao de tests/test_router.py e tests/test_app.py: nao ha decisao do
-Technology Scout para uma framework de testes fora da biblioteca padrao).
+convencao de tests/test_router.py e tests/test_app.py: nenhuma framework de
+testes fora da biblioteca padrao).
 
-Este ficheiro cobre o ponto 1 da T12 (QA-close-1.md, finding 4a) e o teste de
-guarda da D61/S13 (T5).
+Este ficheiro cobre o filtro do aviso do pydub e o teste de guarda do opt-in
+de som.
 
-T12: o import tardio do RealtimeTTS em `_construir_stream()` fica dentro de um
+O import tardio do RealtimeTTS em `_construir_stream()` fica dentro de um
 `warnings.catch_warnings()` que ignora SO o `RuntimeWarning` do `pydub.utils`
 (o aviso de ffmpeg em falta), e `warnings.filters` volta EXATAMENTE ao estado
 anterior depois do import — lista inteira, nao so as entradas do pydub. A
 comparacao tem de ser da lista inteira porque e isso que apanha o contrario do
-que a task pede: um `warnings.filterwarnings("ignore")` global passaria numa
+que se quer: um `warnings.filterwarnings("ignore")` global passaria numa
 comparacao so das entradas do pydub.
 
-T5/D61 (`TestGuardaDaD61`): `falar()` sem `ficheiro=` e sem `com_som=True` e um
+Opt-in de som (`TestGuardaDoOptInDeSom`): `falar()` sem `ficheiro=` e sem `com_som=True` e um
 erro (nunca chega a construir o motor, nunca chega perto de um dispositivo de
 audio); com `ficheiro=` e sem `com_som`, escreve com `muted=True`; `com_som=True`
 e a UNICA maneira de pedir `muted=False`, com ou sem `ficheiro=` — tudo provado
-com um stream falso, sem Piper nem PyAudio. E o guarda do silencio (D60(1))
-corre ANTES do da D61: calado, nem o recurso em texto e impresso.
+com um stream falso, sem Piper nem PyAudio. E o guarda do silencio
+corre ANTES do do opt-in: calado, nem o recurso em texto e impresso.
 
 Nao toca em GPU, em Piper nem em audio real: so o comportamento do import, do
 estado dos filtros de warnings e do contrato de `falar()`, que corre em
-qualquer maquina com o venv instalado (RealtimeTTS ja e dependencia decidida,
-TECHNOLOGY.md S1/S4).
+qualquer maquina com o venv instalado (RealtimeTTS ja e dependencia do projeto).
 
 Corre com:
 
@@ -46,7 +45,7 @@ from jarvis.audio_util import escrever_wav_pcm16
 
 
 class TestFiltroDeAvisoDoPydub(unittest.TestCase):
-    """Ponto 1 da T12: so o import do RealtimeTTS fica silenciado, e so
+    """So o import do RealtimeTTS fica silenciado, e so
     localmente — nada de `warnings.filterwarnings("ignore")` global."""
 
     def _accionar_o_import(self) -> None:
@@ -121,8 +120,8 @@ class _StreamFalsoParaGuarda:
             escrever_wav_pcm16(Path(caminho), b"\x01\x00" * 8000, 16000, 1)
 
 
-class TestGuardaDaD61(unittest.TestCase):
-    """Teste de guarda da D61(3)/S13: `falar()` nunca abre um dispositivo de
+class TestGuardaDoOptInDeSom(unittest.TestCase):
+    """Teste de guarda: `falar()` nunca abre um dispositivo de
     audio sem opt-in explicito, e o caminho de ficheiro nunca muda isso.
 
     As DUAS metades que a D61(3) exige, literalmente: sem `ficheiro=` e sem
@@ -139,7 +138,7 @@ class TestGuardaDaD61(unittest.TestCase):
 
     def test_sem_ficheiro_e_sem_com_som_e_recusado_antes_de_construir(self) -> None:
         chamou_construir: list[int] = []
-        # stdout capturado: a recusa imprime o texto como recurso (D35.4) e
+        # stdout capturado: a recusa imprime o texto como recurso e
         # isso nao pode sujar a saida da suite.
         saida = io.StringIO()
         with mock.patch.object(voz, "_construir_stream", lambda: chamou_construir.append(1)):
@@ -169,7 +168,7 @@ class TestGuardaDaD61(unittest.TestCase):
         self.assertTrue(caminho_absoluto.is_file())
 
     def test_com_ficheiro_e_com_som_toca_e_grava(self) -> None:
-        """A flag quer dizer a mesma coisa em todo o repositorio (D61(2)): com
+        """A flag quer dizer a mesma coisa em todo o repositorio: com
         `com_som=True` sai som, tambem quando ha `ficheiro=` — o WAV continua a
         ser escrito, exatamente como `scripts/gerar_wav.py --com-som`."""
         stream = _StreamFalsoParaGuarda()

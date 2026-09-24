@@ -1,29 +1,29 @@
 r"""Testes das accoes locais (jarvis/acoes_locais.py), unittest da biblioteca
-padrao (sem pytest: nao ha decisao do Scout para uma framework de testes fora
-da biblioteca padrao, mesma convencao de tests/test_router.py).
+padrao (sem pytest: nenhuma framework de testes fora da biblioteca padrao,
+mesma convencao de tests/test_router.py).
 
 Config sempre FICTICIA e em memoria ou num ficheiro temporario (nunca o
-config.toml real, D10): os projetos usados chamam-se "exemplo-um" e
+config.toml real): os projetos usados chamam-se "exemplo-um" e
 "exemplo-dois", com pastas temporarias que sao apagadas no fim de cada teste.
 
 Nenhum destes testes arranca um subprocess a serio (VS Code, explorador) nem
 toca no piper.exe: --simular nunca chega ao subprocess.Popen (verificado
 diretamente), e os testes de voz correm com --sem-voz, com um stream falso OU
-chamam so as funcoes puras que nao falam. D61/T5: esta CLI e passo do guiao de
-QA, por isso sem `--com-som` nao pede reproducao nenhuma
+chamam so as funcoes puras que nao falam. Esta CLI e passo do guiao de
+testes manuais, por isso sem `--com-som` nao pede reproducao nenhuma
 (`TestCliSilenciosaPorOmissao`). O que estes testes protegem, alem do caminho feliz:
 
   * --simular nunca executa nada: nao arranca processo nenhum, devolve a
-    linha de comando exata que arrancaria (D48: lista de argumentos, sempre
+    linha de comando exata que arrancaria (lista de argumentos, sempre
     shell=False, executavel real e nunca um shim .cmd);
   * um projeto que nao esta na configuracao e SEMPRE recusado com um erro
     legivel, tanto pela CLI (exit code != 0) como pela biblioteca
-    (AcaoError) — nunca "o mais parecido" (D4);
+    (AcaoError) — nunca "o mais parecido";
   * um ResultadoRouter cujo argumento nao corresponde a nenhum caminho da
     config e recusado por executar(), mesmo vindo "do router" (defesa em
-    profundidade contra um bug no router, D48.2);
-  * as tres accoes adiadas para a T6 (calar/adormecer/acordar) sao recusadas
-    com uma razao clara, nunca fingidas como "feitas" (D13/D35).
+    profundidade contra um bug no router);
+  * as tres accoes adiadas para o jarvis/app.py (calar/adormecer/acordar) sao recusadas
+    com uma razao clara, nunca fingidas como "feitas".
 
 Corre com:
 
@@ -39,7 +39,7 @@ from io import StringIO
 from pathlib import Path
 
 from jarvis.acoes_locais import (
-    ACOES_ADIADAS_PARA_A_T6,
+    ACOES_ADIADAS,
     AcaoError,
     ResultadoAcao,
     _projeto_conhecido,
@@ -56,7 +56,7 @@ from jarvis.router import ResultadoRouter
 
 def _config_com_pastas_reais(pasta_base: Path) -> Config:
     """Uma Config com projetos cujos caminhos EXISTEM mesmo no disco (pasta
-    temporaria do teste) — carregar_config() exige isto (D50.7), e
+    temporaria do teste) — carregar_config() exige isto, e
     abrir_vscode/abrir_pasta usam o caminho tal e qual num subprocess.Popen
     de mentira (--simular nunca chega la, mas o caminho tem de ser real para
     o teste ser representativo)."""
@@ -98,7 +98,7 @@ class TestHorasEData(unittest.TestCase):
 
 
 class TestModoSimularNuncaExecutaNada(unittest.TestCase):
-    """O criterio (b) da T5: --simular imprime a linha de comando exata e
+    """--simular imprime a linha de comando exata e
     NAO abre nada. Verificado das duas formas: sem Popen a ser chamado, e com
     o resultado a dizer explicitamente executou=False."""
 
@@ -152,7 +152,7 @@ class TestModoSimularNuncaExecutaNada(unittest.TestCase):
         self.assertIn("explorer.exe", resultado.comando.lower())
 
     def test_comando_simulado_e_uma_lista_shell_false_nunca_uma_string_composta(self) -> None:
-        # Defesa em profundidade (D48): a linha impressa e so para o Sponsor
+        # Defesa em profundidade: a linha impressa e so para o utilizador
         # ler; o que corre de verdade (fora de --simular) e sempre uma lista.
         projeto = self.config.encontrar_projeto("exemplo-um")
         assert projeto is not None
@@ -221,7 +221,7 @@ class TestProjetoDesconhecidoENuncaAdivinhado(unittest.TestCase):
         self.assertIn("exemplo-um", str(ctx.exception))  # lista os conhecidos
 
     def test_nome_parecido_nao_e_o_projeto(self) -> None:
-        # "exemplo dos" nao e "exemplo-dois" (mesma regra do router, D4).
+        # "exemplo dos" nao e "exemplo-dois" (mesma regra do router).
         with self.assertRaises(AcaoError):
             _projeto_conhecido("exemplo dos", self.config)
 
@@ -267,7 +267,7 @@ class TestProjetoDesconhecidoENuncaAdivinhado(unittest.TestCase):
         self.assertIn("nao esta na configuracao", saida_erro.getvalue())
 
     def test_cli_com_config_ficticia_do_repositorio_recusa_projeto_desconhecido(self) -> None:
-        # A mesma config.exemplo.toml VERSIONADA que o criterio (b) da T5
+        # A mesma config.exemplo.toml VERSIONADA que o modo --simular
         # usa: um projeto que nao esta la tem de ser recusado, nao adivinhado.
         raiz = Path(__file__).resolve().parent.parent
         caminho_exemplo = raiz / "config.exemplo.toml"
@@ -378,21 +378,21 @@ class TestCliSilenciosaPorOmissao(unittest.TestCase):
         self.assertIn("sem esta flag", texto)
 
 
-class TestAcoesAdiadasParaAT6(unittest.TestCase):
-    """D13/D35: calar, adormecer e acordar ficam por fazer nesta task e o
-    dizem, nunca fingem sucesso."""
+class TestAcoesAdiadas(unittest.TestCase):
+    """Calar, adormecer e acordar nao se executam aqui e o dizem, nunca
+    fingem sucesso."""
 
     def test_as_tres_ficam_de_fora_desta_task(self) -> None:
-        self.assertEqual(set(ACOES_ADIADAS_PARA_A_T6), {"calar", "adormecer", "acordar"})
+        self.assertEqual(set(ACOES_ADIADAS), {"calar", "adormecer", "acordar"})
 
     def test_executar_recusa_cada_uma_com_razao_clara(self) -> None:
         config = Config(microfone="Microfone de Teste", projetos=())
-        for nome_acao in ACOES_ADIADAS_PARA_A_T6:
+        for nome_acao in ACOES_ADIADAS:
             with self.subTest(nome_acao=nome_acao):
                 resultado_router = ResultadoRouter("local", nome_acao=nome_acao)
                 with self.assertRaises(AcaoError) as ctx:
                     executar(resultado_router, config)
-                self.assertIn("T6", str(ctx.exception))
+                self.assertIn("jarvis/app.py", str(ctx.exception))
 
 
 class TestExecutarDespachaCorretamente(unittest.TestCase):

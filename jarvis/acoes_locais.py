@@ -1,23 +1,21 @@
-r"""Acoes locais da lista branca fechada da D4: EXECUTA o que o router (T4)
-so descreve.
+r"""Acoes locais da lista branca fechada: EXECUTA o que o router so descreve.
 
 `jarvis/router.py` decide e devolve uma `ResultadoRouter` com `tipo="local"`,
-`nome_acao` e `argumento` — mas nunca executa nada (D48.2: "quem executa e a
-T5"). Este modulo e essa T5: pega no `ResultadoRouter` (ou, na CLI de teste,
+`nome_acao` e `argumento` — mas nunca executa nada. Quem executa e este
+modulo: pega no `ResultadoRouter` (ou, na CLI de teste,
 num nome de accao e num nome de projeto dados diretamente) e corre a accao a
 serio, ou so imprime o que correria (`--simular`).
 
-ORDEM DE CORTE (D13/D35), OBRIGATORIOS nesta task: (a) horas e data; (b) abrir
-o VS Code num projeto da configuracao. Os restantes tres da lista branca da D4
-— abrir uma pasta, calar, adormecer e acordar — ficam de fora desta task:
-`abrir_pasta` esta implementada porque o custo extra sobre `abrir_vscode` era
-quase zero (mesma resolucao de projeto, so muda o executavel), mas `calar`,
-`adormecer` e `acordar` PRECISAM de um processo `jarvis` vivo com estado (a
-consola a ouvir, o microfone aberto) que so a T6 (`jarvis/app.py`) vai criar —
-nao ha nada aqui para "calar" ou "adormecer" ainda. `executar()` recusa-as com
-`AcaoError`, citando a T6, para nao fingir uma accao que nao faz nada.
+IMPLEMENTADAS AQUI: (a) horas e data; (b) abrir o VS Code num projeto da
+configuracao; (c) abrir a pasta de um projeto (`abrir_pasta` custa quase nada
+sobre `abrir_vscode`: mesma resolucao de projeto, so muda o executavel).
+`calar`, `adormecer` e `acordar` PRECISAM de um processo `jarvis` vivo com
+estado (a consola a ouvir, o microfone aberto), que so `jarvis/app.py` tem —
+nao ha nada aqui para "calar" ou "adormecer". `executar()` recusa-as com
+`AcaoError`, apontando para `jarvis/app.py`, para nao fingir uma accao que nao
+faz nada.
 
-REGRAS DE SEGURANCA (D48, D12), nao negociaveis:
+REGRAS DE SEGURANCA, nao negociaveis:
   - as accoes SO usam caminhos que vieram da configuracao (`jarvis.config`),
     NUNCA texto da transcricao — o `argumento` que `executar()` recebe de um
     `ResultadoRouter` "abrir_vscode"/"abrir_pasta" e sempre revalidado contra
@@ -26,12 +24,12 @@ REGRAS DE SEGURANCA (D48, D12), nao negociaveis:
     com uma linha de comandos composta a mao;
   - o executavel e sempre resolvido para o binario REAL (`Code.exe`,
     `explorer.exe`), nunca para um shim `.cmd`/`.bat` que reabriria o
-    cmd.exe a reparsear a linha toda (D48.1) — `localizar_code_exe()` segue a
+    cmd.exe a reparsear a linha toda — `localizar_code_exe()` segue a
     mesma logica de `jarvis.canal_claude.localizar_cli()` para o `claude.CMD`
     do npm, aplicada ao `code.cmd` da instalacao do VS Code;
-  - nenhuma accao toca noutro repositorio do Sponsor, em corretoras, carteiras
-    ou ordens (D12) — a unica coisa que uma accao local sabe abrir e um
-    projeto da configuracao privada, e a lista branca fechada da D4 nao tem
+  - nenhuma accao toca noutro repositorio do utilizador, em corretoras, carteiras
+    ou ordens — a unica coisa que uma accao local sabe abrir e um
+    projeto da configuracao privada, e a lista branca fechada nao tem
     nenhuma accao capaz de negociar.
 
 Uso como biblioteca:
@@ -52,7 +50,7 @@ Uso na linha de comandos (accao direta, sem passar pelo router — para testar):
     .venv\Scripts\python -m jarvis.acoes_locais abrir-pasta <projeto> [--simular]
     .venv\Scripts\python -m jarvis.acoes_locais --config <caminho> ...
     .venv\Scripts\python -m jarvis.acoes_locais --sem-voz ...   # nao fala, so imprime
-    .venv\Scripts\python -m jarvis.acoes_locais --com-som horas  # ouvir a serio (D61)
+    .venv\Scripts\python -m jarvis.acoes_locais --com-som horas  # ouvir a serio
 
 Sem --com-som nada toca nas colunas: este comando e caminho de teste manual e
 passo do guiao de QA, e a D61(1) so isenta o jarvis a serio (jarvis/app.py).
@@ -83,15 +81,14 @@ from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, Projeto, c
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 from jarvis.router import ResultadoRouter  # noqa: E402
 
-#: Nomes de accao que a lista branca da D4 conhece e que esta task implementa
-#: (as tres restantes — calar, adormecer, acordar — precisam de um processo
-#: jarvis vivo, que so a T6 cria; ver o docstring do modulo).
+#: Nomes de accao da lista branca que este modulo implementa (as tres
+#: restantes — calar, adormecer, acordar — precisam de um processo jarvis
+#: vivo, que so `jarvis/app.py` tem; ver o docstring do modulo).
 ACOES_IMPLEMENTADAS = frozenset({"horas_e_data", "abrir_vscode", "abrir_pasta"})
 
-#: As tres accoes da D4 que ficam por fazer nesta task, e porque (D13/D35: a
-#: ordem de corte deixa-as de fora quando o tempo aperta; aqui ficam de fora
-#: porque dependem de estado que ainda nao existe, nao so por falta de tempo).
-ACOES_ADIADAS_PARA_A_T6 = ("calar", "adormecer", "acordar")
+#: As tres accoes da lista branca que este modulo nao executa, porque
+#: dependem de estado que so existe no processo vivo (`jarvis/app.py`).
+ACOES_ADIADAS = ("calar", "adormecer", "acordar")
 
 MESES_PT = (
     "janeiro",
@@ -127,12 +124,12 @@ class AcaoError(Exception):
 @dataclass(frozen=True)
 class ResultadoAcao:
     """O que uma accao fez, ou teria feito em --simular. Nunca guarda texto
-    vindo da transcricao (D48.2): so o que a propria accao construiu."""
+    vindo da transcricao: so o que a propria accao construiu."""
 
     nome_acao: str
     #: True so quando o subprocess foi mesmo arrancado (nunca em --simular).
     executou: bool
-    #: A frase para o Sponsor ouvir/ler (D2/D11): a resposta da accao.
+    #: A frase para o utilizador ouvir/ler: a resposta da accao.
     texto: str
     #: A linha de comando exata (lista de argumentos, ja formatada para
     #: leitura humana com subprocess.list2cmdline) — preenchida so nas accoes
@@ -164,7 +161,7 @@ def horas_e_data(argumento: str | None, *, agora: datetime.datetime | None = Non
 
 
 def _projeto_conhecido(nome: str, config: Config) -> Projeto:
-    """O Projeto com este nome exato na config, ou AcaoError (D4: nunca 'o
+    """O Projeto com este nome exato na config, ou AcaoError (nunca 'o
     mais parecido' — quem ja decidiu isso e o router; aqui so se confirma)."""
     projeto = config.encontrar_projeto(nome)
     if projeto is None:
@@ -177,7 +174,7 @@ def _projeto_conhecido(nome: str, config: Config) -> Projeto:
 
 
 def _projeto_pelo_caminho(caminho_texto: str, config: Config) -> Projeto:
-    """O Projeto cujo caminho RESOLVIDO e exatamente este (D48.2).
+    """O Projeto cujo caminho RESOLVIDO e exatamente este.
 
     Usado quando o argumento vem de um `ResultadoRouter` (o router ja
     resolveu o caminho a partir da config): revalida-se contra a config em
@@ -195,7 +192,7 @@ def _projeto_pelo_caminho(caminho_texto: str, config: Config) -> Projeto:
 
 
 def localizar_code_exe(ambiente: dict[str, str] | None = None) -> Path:
-    """O `Code.exe` REAL desta maquina, nunca o shim `code.cmd` (D48.1).
+    """O `Code.exe` REAL desta maquina, nunca o shim `code.cmd`.
 
     Mesma logica de `jarvis.canal_claude.localizar_cli()` para o `claude.CMD`
     do npm: o `shutil.which("code")` devolve tipicamente o `code.cmd` da
@@ -241,7 +238,7 @@ def localizar_code_exe(ambiente: dict[str, str] | None = None) -> Path:
 
 
 def localizar_explorer_exe(ambiente: dict[str, str] | None = None) -> Path:
-    """O `explorer.exe` REAL do Windows (D48.1: mesma regra, binario de sistema)."""
+    """O `explorer.exe` REAL do Windows (mesma regra, binario de sistema)."""
     env = dict(os.environ if ambiente is None else ambiente)
     candidatos: list[Path] = []
     windir = env.get("WINDIR") or env.get("SystemRoot")
@@ -275,7 +272,7 @@ def _abrir_com(
     subprocess ou so devolve a linha exata que arrancaria (--simular)."""
     executavel = localizar_exe()
     # O UNICO valor que entra na lista de argumentos e o caminho JA RESOLVIDO
-    # que veio da config (nunca texto de transcricao, D48.2).
+    # que veio da config (nunca texto de transcricao).
     comando = [str(executavel), str(projeto.caminho)]
     linha = subprocess.list2cmdline(comando)
     if simular:
@@ -310,7 +307,7 @@ def executar(resultado_router: ResultadoRouter, config: Config, *, simular: bool
     """Executa (ou simula) a accao que `jarvis.router.encaminhar()` descreveu.
 
     Levanta `AcaoError` se `resultado_router.tipo != "local"`, se a accao
-    ainda nao estiver implementada (D13/D35, ver ACOES_ADIADAS_PARA_A_T6), ou
+    ainda nao estiver implementada (ver ACOES_ADIADAS), ou
     se o argumento nao corresponder a nenhum projeto da configuracao.
     """
     if resultado_router.tipo != "local":
@@ -319,11 +316,10 @@ def executar(resultado_router: ResultadoRouter, config: Config, *, simular: bool
             f"'{resultado_router.tipo}' ({resultado_router.motivo})"
         )
     nome_acao = resultado_router.nome_acao
-    if nome_acao in ACOES_ADIADAS_PARA_A_T6:
+    if nome_acao in ACOES_ADIADAS:
         raise AcaoError(
-            f"accao '{nome_acao}' e da lista branca da D4 mas ainda nao esta implementada "
-            "nesta task (D13/D35): precisa de um processo jarvis vivo com estado, que so a "
-            "T6 (jarvis/app.py) cria. Registado no relatorio da T5."
+            f"accao '{nome_acao}' e da lista branca mas nao e executada aqui: precisa de "
+            "um processo jarvis vivo com estado, que so o jarvis/app.py tem."
         )
     if nome_acao == "horas_e_data":
         return horas_e_data(resultado_router.argumento)
@@ -386,7 +382,7 @@ def _autoteste() -> int:
         verificar("simular (pasta): explorer.exe na linha de comando", "explorer.exe" in resultado_pasta.comando.lower(), True)
 
         # 3. um projeto que nao esta na config e SEMPRE recusado, nunca "o
-        # mais parecido" (D4) — tanto por nome direto como pelo caminho que um
+        # mais parecido" — tanto por nome direto como pelo caminho que um
         # ResultadoRouter traria.
         verificar(
             "projeto desconhecido (por nome): recusado com mensagem legivel",
@@ -399,7 +395,7 @@ def _autoteste() -> int:
             True,
         )
 
-        # 4. executar() a partir de um ResultadoRouter, como o router (T4)
+        # 4. executar() a partir de um ResultadoRouter, como o router
         # devolveria de verdade — nunca confia em bruto no argumento.
         resultado_horas = executar(ResultadoRouter("local", nome_acao="horas_e_data", argumento="horas"), config)
         verificar("executar(): horas_e_data devolve texto com a hora", bool(resultado_horas.texto), True)
@@ -412,7 +408,7 @@ def _autoteste() -> int:
         verificar("executar(): projeto identificado", resultado_exec.projeto, "projeto-a")
 
         # 5. um ResultadoRouter com um caminho que NAO veio da config nunca
-        # executa (defesa em profundidade contra um bug no router, D48.2).
+        # executa (defesa em profundidade contra um bug no router).
         resultado_router_falso = ResultadoRouter(
             "local", nome_acao="abrir_vscode", argumento=str(Path(pasta) / "nunca-esteve-na-config")
         )
@@ -422,13 +418,13 @@ def _autoteste() -> int:
             True,
         )
 
-        # 6. as tres accoes adiadas para a T6 sao recusadas com uma razao
+        # 6. as tres accoes adiadas sao recusadas com uma razao
         # clara, nunca fingidas como "feitas".
-        for nome_acao in ACOES_ADIADAS_PARA_A_T6:
+        for nome_acao in ACOES_ADIADAS:
             resultado_adiado = ResultadoRouter("local", nome_acao=nome_acao)
             verificar(
-                f"executar(): '{nome_acao}' adiada para a T6, nunca finge sucesso",
-                "T6" in apanhar(lambda r=resultado_adiado: executar(r, config)),
+                f"executar(): '{nome_acao}' adiada para o jarvis/app.py, nunca finge sucesso",
+                "jarvis/app.py" in apanhar(lambda r=resultado_adiado: executar(r, config)),
                 True,
             )
 
@@ -451,7 +447,7 @@ def _autoteste() -> int:
 
 
 def _resposta(resultado: ResultadoAcao, *, sem_voz: bool, com_som: bool) -> None:
-    """Imprime a resposta e, com --com-som, di-la em voz alta (D35.4/D61).
+    """Imprime a resposta e, com --com-som, di-la em voz alta.
 
     D61(1): esta CLI e caminho de teste manual e passo do guiao de QA, nao "o
     jarvis a serio" (a isencao da D61 e so para `jarvis/app.py`), por isso o
@@ -518,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # abrir-vscode / abrir-pasta precisam da configuracao. Em --simular
         # nada toca no disco, por isso os caminhos ficticios do
-        # config.exemplo.toml (D10) tambem podem ser pre-vistos sem existirem
+        # config.exemplo.toml tambem podem ser pre-vistos sem existirem
         # de verdade — fora de --simular a validacao de caminho continua
         # sempre ligada (validar_caminhos, jarvis/config.py).
         caminho_config = args.config if args.config is not None else CAMINHO_CONFIG_PADRAO

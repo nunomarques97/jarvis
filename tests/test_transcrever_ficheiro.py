@@ -1,14 +1,14 @@
 r"""Testes da cache opcional de modelos de scripts/transcrever_ficheiro.py.
 
-A cache foi acrescentada pela T7 (o arnes de medicao transcreve 20 WAV no mesmo
-processo e pagava ~5 s de carregamento em cada um). O Reviewer da tentativa 2
-apanhou que o ramo novo so estava provado a mao (nit 4): estes testes provam-no
+A cache foi acrescentada para o arnes de medicao (transcreve 20 WAV no mesmo
+processo e pagava ~5 s de carregamento em cada um). O ramo novo so estava
+provado a mao: estes testes provam-no
 sozinhos, com um `faster_whisper` FALSO injetado em `sys.modules` — nao tocam no
 GPU, nao carregam nenhum modelo real e nao leem nenhum WAV.
 
 O que tem de continuar verdade:
-  - por omissao (`usar_cache=False`) cada chamada carrega o modelo, como a T3/T6
-    mediram: e nesse caminho que vive a latencia de carregamento do log;
+  - por omissao (`usar_cache=False`) cada chamada carrega o modelo, como foi
+    medido: e nesse caminho que vive a latencia de carregamento do log;
   - com `usar_cache=True` o mesmo (nome, device) carrega UMA vez;
   - a cache e por (nome, device), nao por nome;
   - uma chamada por omissao NUNCA le da cache, mesmo com a cache cheia.
@@ -114,7 +114,7 @@ class TestCacheDeModelos(unittest.TestCase):
         self.assertEqual(transcrever_ficheiro.limpar_cache_de_modelos(), 0)
 
 
-# --- T8/D58b/S10: deteccao de lingua no caminho dos scripts ----------------
+# --- Deteccao de lingua no caminho dos scripts -----------------------------
 
 
 class SegmentoFalso:
@@ -135,7 +135,7 @@ class InfoFalso:
 class ModeloQueTranscreve:
     """Regista os kwargs de cada `transcribe()` e devolve um info a medida.
 
-    `detect_language` existe de proposito e REBENTA: a S10 proibe chamar a
+    `detect_language` existe de proposito e REBENTA: e proibido chamar a
     deteccao a parte (pagava o encoder duas vezes). Se alguem a chamar um dia,
     o teste cai em vez de passar a custar latencia em silencio.
     """
@@ -156,12 +156,12 @@ class ModeloQueTranscreve:
 
     def detect_language(self, *args, **kwargs):  # pragma: no cover - so falha
         raise AssertionError(
-            "detect_language() chamado a parte: paga o encoder duas vezes (S10)"
+            "detect_language() chamado a parte: paga o encoder duas vezes"
         )
 
 
 class TestDeteccaoDeLinguaNoTranscritor(unittest.TestCase):
-    """Criterios 1 e 2 da T8, no caminho dos scripts."""
+    """Argmax restrito e hesitacao, no caminho dos scripts."""
 
     def setUp(self) -> None:
         transcrever_ficheiro.limpar_cache_de_modelos()
@@ -180,7 +180,7 @@ class TestDeteccaoDeLinguaNoTranscritor(unittest.TestCase):
         self.addCleanup(transcrever_ficheiro.limpar_cache_de_modelos)
 
     def test_por_omissao_a_transcricao_usa_a_lingua_fixa_do_produto(self) -> None:
-        # Criterio 6 da T8 (reversao): o A/B controlado deu o acerto de
+        # Reversao: o A/B controlado deu o acerto de
         # intencao em portugues a descer com a deteccao ligada, por isso o
         # DEFAULT voltou a `language="pt"`. Trava-se aqui para ninguem religar
         # a deteccao no produto sem voltar a medir.
@@ -189,7 +189,7 @@ class TestDeteccaoDeLinguaNoTranscritor(unittest.TestCase):
         self.assertEqual(self.modelos[0].chamadas[0]["language"], LINGUA_FIXA_DO_PRODUTO)
 
     def test_lingua_fixa_none_liga_a_deteccao_e_pede_language_none(self) -> None:
-        # O mecanismo nao foi apagado (D66/T9): sem isto o faster-whisper nem
+        # O mecanismo nao foi apagado: sem isto o faster-whisper nem
         # chega a detetar lingua nenhuma e `all_language_probs` vem vazio.
         transcrever_ficheiro.transcrever(Path("x.wav"), device="cpu", lingua_fixa=None)
         self.assertEqual(len(self.modelos), 1)
@@ -288,7 +288,7 @@ class TestDeteccaoDeLinguaNoTranscritor(unittest.TestCase):
 
     def test_a_deteccao_nao_chama_detect_language_a_parte(self) -> None:
         # O `detect_language` do duplo rebenta: se esta chamada passar, nao foi
-        # chamado (S10 — uma so passagem pelo encoder).
+        # chamado (uma so passagem pelo encoder).
         resultado = transcrever_ficheiro.transcrever(Path("x.wav"), device="cpu")
         self.assertEqual(resultado["texto"], "que horas sao")
 

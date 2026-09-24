@@ -1,13 +1,13 @@
-r"""Transcreve um ficheiro WAV no GPU com faster-whisper (D33: prova sem microfone).
+r"""Transcreve um ficheiro WAV no GPU com faster-whisper (prova sem microfone).
 
 Modelo `medium`, com fallback automatico para `small` se o `medium` nao
-carregar ou nao transcrever no device pedido (D39/TECHNOLOGY.md S3). Device
-por omissao `cuda`; a regra da D42 (T1) aplica-se sempre que o device e cuda:
+carregar ou nao transcrever no device pedido. Device
+por omissao `cuda`; a regra da D42 aplica-se sempre que o device e cuda:
 importar torch e registar as suas DLLs ANTES de importar faster_whisper /
 ctranslate2, senao o CTranslate2 nao encontra o cuBLAS/cuDNN que vieram no
 wheel do torch e rebenta so no primeiro encode.
 
-ACHADO desta task, com evidencia no relatorio: um WAV isolado de menos de 1 s
+ACHADO medido: um WAV isolado de menos de 1 s
 (como "que horas sao" sintetizado pelo Piper, ~0.7 s) faz o faster-whisper
 alucinar uma frase comum de treino (ex.: "Tchau, pessoal.") em vez de
 transcrever o audio — reproduzido em medium, small E large-v3, com e sem VAD,
@@ -16,22 +16,22 @@ com o mesmo resultado errado. Isto e uma limitacao conhecida do Whisper para
 frases isoladas ultra-curtas (o encoder preenche sempre a janela de 30 s), nao
 um erro deste script.
 
-PROMPT DESLIGADO POR OMISSAO (D51). Um `initial_prompt` com o vocabulario de
+PROMPT DESLIGADO POR OMISSAO. Um `initial_prompt` com o vocabulario de
 comandos (PROMPT_VOCABULARIO_PADRAO, abaixo) faz a frase curta acertar, mas e
 polarizacao de vocabulario, nao capacidade de transcrever: com ele ligado, 3 s
-de ruido branco sem fala nenhuma saiam como uma frase de comando inteira, que e
-o inaceitavel n.2 do PRODUCT-PROFILE. Por isso, e por a D7 so autorizar o
-initial_prompt DEPOIS de medir e dentro da banda 75-90%:
+de ruido branco sem fala nenhuma saiam como uma frase de comando inteira, o que
+e inaceitavel. Por isso, e porque o initial_prompt so se liga DEPOIS de medir e
+dentro da banda 75-90%:
 
   - `transcrever(...)` tem `initial_prompt=None` por omissao: quem o quiser
-    passa-o a olho, nunca por heranca silenciosa (T4/T6);
+    passa-o a olho, nunca por heranca silenciosa;
   - o CLI corre sem prompt a menos que se peca `--com-prompt` ou `--prompt`;
   - o estado do prompt e SEMPRE impresso e vem no dict devolvido, para o log
-    com timestamps da T4/T6 o carregar sem depender do CLI.
+    com timestamps do jarvis o carregar sem depender do CLI.
 
 O prompt desligado nao impede o ruido de alucinar (fica "Obrigado por
 assistir!" em vez de um comando): quem garante que ruido nunca vira acao e o
-VAD mais o encaminhador determinista com lista branca (D4/D5/D9).
+VAD mais o encaminhador determinista com lista branca.
 
 Uso:
     .venv\Scripts\python scripts/transcrever_ficheiro.py audio/t-horas.wav
@@ -67,15 +67,15 @@ MODELO_FALLBACK = "small"
 #: Lista fechada de modelos, como o --device ja tinha. Sem ela, a string ia
 #: direta para `faster_whisper.WhisperModel` e o `download_model` aceita
 #: qualquer `repo/id` do Hugging Face: `--modelo alguem/repo-mau` descarregava
-#: pesos arbitrarios para models/, fora do registo da D14e e da decisao do
-#: Scout (D39/TECHNOLOGY.md S3), e mandava-os ao parser binario do CTranslate2.
-#: `large-v3-turbo` acrescentado na T9 (S8/D65) para ser medido pelo arnes
+#: pesos arbitrarios para models/, fora do registo de docs/MODELOS.md, e
+#: mandava-os ao parser binario do CTranslate2.
+#: `large-v3-turbo` acrescentado para ser medido pelo arnes
 #: (`medir_voz.py --modelo` usa esta lista como `choices`); estar na lista nao
-#: o torna o preferido — isso decide-se pelos numeros da D53.
+#: o torna o preferido — isso decide-se pelos numeros medidos.
 MODELOS_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 
-#: Vocabulario de comandos do jarvis (D4, sem nomes de projetos privados —
-#: D10). NAO e usado por omissao (D51): fica aqui para quem o queira passar
+#: Vocabulario de comandos do jarvis (sem nomes de projetos privados —
+#: D10). NAO e usado por omissao: fica aqui para quem o queira passar
 #: explicitamente, em `--com-prompt` ou em `transcrever(initial_prompt=...)`.
 #: Generico de proposito: e o vocabulario inteiro da lista branca mais o
 #: encaminhamento livre, nao a resposta da frase de teste.
@@ -86,7 +86,7 @@ PROMPT_VOCABULARIO_PADRAO = (
 )
 
 #: Rotulos do estado do prompt (D51(c)): os mesmos no ecra e no dict, para o
-#: log com timestamps da T4/T6 nao ter de reinventar nomes.
+#: log com timestamps do jarvis nao ter de reinventar nomes.
 ESTADO_PROMPT_DESLIGADO = "desligado"
 ESTADO_PROMPT_PADRAO = "ligado (vocabulario padrao)"
 ESTADO_PROMPT_PERSONALIZADO = "ligado (personalizado)"
@@ -117,15 +117,15 @@ def texto_para_a_consola(texto: str, codificacao: str | None = None) -> str:
 
 
 def tipo_de_computo(device: str) -> str:
-    """float16 no GPU (D39: equilibrio latencia/precisao), int8 fora dele."""
+    """float16 no GPU (equilibrio latencia/precisao), int8 fora dele."""
     return "float16" if device == "cuda" else "int8"
 
 
 #: Modelos ja carregados neste processo, por (nome, device). So e consultado
 #: quando quem chama pede `usar_cache=True`: o comportamento por omissao fica
-#: exatamente como estava (um carregamento por chamada), porque e nele que a
-#: T3/T6 mediram a latencia de carregamento. Quem corre a mesma transcricao
-#: dezenas de vezes seguidas no mesmo processo — o arnes da T7, 20 frases —
+#: exatamente como estava (um carregamento por chamada), porque e nele que se
+#: mediu a latencia de carregamento. Quem corre a mesma transcricao
+#: dezenas de vezes seguidas no mesmo processo — o arnes, 20 frases —
 #: paga hoje ~5 s de carregamento por frase sem nenhum ganho.
 _MODELOS_EM_CACHE: dict[tuple[str, str], object] = {}
 
@@ -134,8 +134,8 @@ def limpar_cache_de_modelos() -> int:
     """Esvazia a cache de modelos e devolve quantos estavam la dentro.
 
     Enquanto a cache tiver um modelo, ele ocupa VRAM ate o processo acabar
-    (nit 8 do Reviewer, T7 a2). Num CLI que termina a seguir isso e inofensivo;
-    num processo longo (a T4/T6, se alguma vez ligarem `usar_cache_do_modelo`)
+    Num CLI que termina a seguir isso e inofensivo;
+    num processo longo (o jarvis, se alguma vez ligar `usar_cache_do_modelo`)
     passa a ser a diferenca entre libertar o GPU e nao o libertar. Tambem e o
     que os testes usam para nao deixar estado de um teste no seguinte.
     """
@@ -181,22 +181,22 @@ def transcrever(
 ) -> dict:
     """Carrega o modelo (com fallback) e transcreve `caminho`. Devolve um resumo em dict.
 
-    `initial_prompt=None` por omissao (D51): sem polarizacao de vocabulario a
+    `initial_prompt=None` por omissao: sem polarizacao de vocabulario a
     menos que quem chama a peca. Quem a quiser passa
     `initial_prompt=PROMPT_VOCABULARIO_PADRAO` explicitamente.
 
     `usar_cache_do_modelo=False` por omissao (comportamento inalterado: um
-    carregamento por chamada, que e o que a T3/T6 mediram). A `True`, o modelo
-    fica em cache por (nome, device) durante o processo — e o que o arnes da T7
+    carregamento por chamada, que e o que se mediu). A `True`, o modelo
+    fica em cache por (nome, device) durante o processo — e o que o arnes
     usa para nao pagar 20 carregamentos do `medium` numa corrida de 20 frases.
 
-    `lingua_fixa="pt"` POR OMISSAO (T8, criterio 6). A T8 ligou a deteccao
-    automatica (`lingua_fixa=None` -> `language=None`, TECHNOLOGY.md S10) e
-    mediu-a com um A/B controlado sobre os MESMOS WAV: o acerto de intencao em
-    portugues DESCEU (21/40 -> 20/40 linhas certas), e isso dispara o gatilho
-    automatico do criterio 6 e da ordem de corte da D53 item 4. Por isso o
+    `lingua_fixa="pt"` POR OMISSAO. A deteccao automatica
+    (`lingua_fixa=None` -> `language=None`) foi ligada e
+    medida com um A/B controlado sobre os MESMOS WAV: o acerto de intencao em
+    portugues DESCEU (21/40 -> 20/40 linhas certas), e a regra era reverter se
+    descesse. Por isso o
     produto transcreve outra vez com a lingua fixa, e o ingles continua a
-    funcionar pelas DUAS listas brancas do encaminhador (T7/D58b), que nunca
+    funcionar pelas DUAS listas brancas do encaminhador, que nunca
     dependeram da lingua detetada.
 
     `lingua_fixa=None` liga a deteccao: o faster-whisper detecta a lingua UMA
@@ -204,19 +204,19 @@ def transcrever(
     o dict traz entao a lingua ja decidida por argmax RESTRITO a {pt, en}
     (`prob_pt`, `prob_en`, `lingua`, `lingua_hesitou`) e uma terceira lingua
     com a probabilidade mais alta fica em `lingua_top1` sem entrar na escolha
-    do produto. LIMITE medido (D66, ponto 3): e essa terceira lingua que
+    do produto. LIMITE medido: e essa terceira lingua que
     DESCODIFICA o audio, porque `language=` aceita um codigo unico e nao uma
     lista de candidatas; nesse caso a frase fica marcada `lingua-terceira` e
     segue o caminho normal, sem ser descartada nem re-transcrita. Foi este
     modo de falha, em 3 das 20 frases portuguesas, que custou a linha de acerto
     que disparou a reversao.
 
-    `condition_on_previous_text=False` de proposito: cada ficheiro desta task e
+    `condition_on_previous_text=False` de proposito: cada ficheiro aqui e
     uma frase isolada, nao uma sessao continua, e deixar isto a True so
     aumentaria o risco de a alucinacao de um segmento contaminar o seguinte.
     """
     if device == "cuda":
-        registar_dlls_do_torch()  # tem de correr antes do import do faster_whisper (D42)
+        registar_dlls_do_torch()  # tem de correr antes do import do faster_whisper
 
     if not initial_prompt:
         initial_prompt = None  # "" e None sao a mesma coisa para o faster-whisper
@@ -225,7 +225,7 @@ def transcrever(
     aviso_fallback = ""
     # Tres relogios: o total (que era a unica coisa medida ate aqui) e os dois
     # numeros que o compoem. Carregar o modelo e ~3/4 do total e acontece uma
-    # vez por processo; a T4 vai manter o modelo carregado, por isso a latencia
+    # vez por processo; o jarvis mantem o modelo carregado, por isso a latencia
     # que interessa a experiencia e so a segunda.
     t0 = time.perf_counter()
     inicio_do_modelo_usado = t0
@@ -235,13 +235,13 @@ def transcrever(
         fim_do_carregamento = time.perf_counter()
         segmentos, info = modelo.transcribe(
             str(caminho),
-            # T8 criterio 6: "pt" por omissao (a reversao, medida em A/B
+            # "pt" por omissao (a reversao, medida em A/B
             # controlado). Com `lingua_fixa=None` isto passa a `language=None`
             # e o faster-whisper detecta a lingua UMA vez dentro deste mesmo
             # transcribe() (transcribe.py:880-904), devolvendo
             # `info.all_language_probs`; o argmax restrito a {pt, en} acontece
             # a seguir, em jarvis/lingua.py. Nao se chama `detect_language()`
-            # a parte: pagava o encoder duas vezes (S10).
+            # a parte: pagava o encoder duas vezes.
             language=lingua_fixa,
             beam_size=5,
             vad_filter=False,
@@ -261,7 +261,7 @@ def transcrever(
             fim_do_carregamento = time.perf_counter()
             segmentos, info = modelo.transcribe(
                 str(caminho),
-                language=lingua_fixa,  # T8 criterio 6, como no modelo preferido acima
+                language=lingua_fixa,  # como no modelo preferido acima
                 beam_size=5,
                 vad_filter=False,
                 initial_prompt=initial_prompt,
@@ -282,13 +282,13 @@ def transcrever(
     latencia_transcricao_ms = (fim - fim_do_carregamento) * 1000
 
     texto = " ".join(segmento.text.strip() for segmento in segmentos).strip()
-    # A lingua que vai para o log. Com a lingua FIXA (o produto, T8 criterio 6)
+    # A lingua que vai para o log. Com a lingua FIXA (o produto)
     # nao houve deteccao nenhuma e o log tem de o dizer assim, em vez de
     # escrever um `p=0.00 hesitou` que parece uma deteccao falhada. Com
     # `lingua_fixa=None` sai do MESMO transcribe() que acabou de correr, por
     # argmax restrito a {pt, en} sobre `info.all_language_probs`. Nos dois
-    # casos NUNCA decide encaminhamento — a regra das duas listas brancas (T7,
-    # D58b) e que manda.
+    # casos NUNCA decide encaminhamento — a regra das duas listas brancas e
+    # que manda.
     if lingua_fixa:
         deteccao = lingua_fixada(lingua_fixa)
     else:
@@ -305,11 +305,11 @@ def transcrever(
         "latencia_transcricao_ms": latencia_transcricao_ms,
         "duracao_audio_s": info.duration,
         "aviso_fallback": aviso_fallback,
-        # D51(c): o estado do prompt viaja no dict, para o log com timestamps
-        # da T4/T6 o registar sem passar pelo CLI.
+        # O estado do prompt viaja no dict, para o log com timestamps
+        # do jarvis o registar sem passar pelo CLI.
         "prompt_estado": estado_do_prompt(initial_prompt),
         "initial_prompt": initial_prompt,
-        # D58b/S10 (T8), criterio 2: quem chama recebe a lingua decidida, as
+        # Quem chama recebe a lingua decidida, as
         # duas probabilidades que a decidiram e se a deteccao hesitou, sem ter
         # de reabrir o modelo nem repetir a deteccao.
         "lingua": deteccao.lingua,
@@ -325,7 +325,7 @@ def transcrever(
         # mas foi essa terceira lingua que DESCODIFICOU o audio, porque este
         # `transcribe()` correu com `language=None` e o parametro `language=`
         # da API publica do faster-whisper aceita um codigo unico e nao uma
-        # lista de candidatas (S10). E por isso que este campo existe: sem ele
+        # lista de candidatas. E por isso que este campo existe: sem ele
         # ninguem consegue contar, depois, quantas frases sairam escritas numa
         # lingua que o produto nao escolheu (marca `lingua-terceira`).
         "lingua_top1": deteccao.top1,
@@ -423,7 +423,7 @@ def main() -> int:
         f"(carregar o modelo {resultado['latencia_carregamento_ms']:.1f} ms "
         f"+ transcrever {resultado['latencia_transcricao_ms']:.1f} ms)"
     )
-    # D58b/S10 criterio 2: a lingua detetada, a probabilidade e se hesitou
+    # A lingua detetada, a probabilidade e se hesitou
     # ficam SEMPRE no output, como o estado do prompt da D51.
     print(f"lingua          = {resultado['lingua_deteccao'].resumo()}")
     if resultado["lingua_hesitou"] or resultado["lingua_deteccao"].lingua_terceira:
@@ -437,7 +437,7 @@ def main() -> int:
     return 0
 
 
-# --- Autoteste / regressao do default do prompt (D51) ---------------------
+# --- Autoteste / regressao do default do prompt ---------------------
 
 
 def _autoteste() -> int:
@@ -457,7 +457,7 @@ def _autoteste() -> int:
             print(f"ok   {nome}")
 
     # 1. D51(a): a assinatura da FUNCAO nao polariza nada por omissao. E esta
-    # a verificacao que apanha a regressao real: a T4/T6 chamam transcrever()
+    # a verificacao que apanha a regressao real: o jarvis chama transcrever()
     # sem passar prompt nenhum.
     omissao = inspect.signature(transcrever).parameters["initial_prompt"].default
     verificar("D51(a) transcrever(initial_prompt=...) por omissao e None", omissao, None)
@@ -549,12 +549,12 @@ def _autoteste() -> int:
     verificar("consola: caracteres fora do mapa viram ? em vez de rebentar", texto_para_a_consola(fora_do_mapa, "cp1252"), "horas ??")
     verificar("consola: em utf-8 nada e substituido", texto_para_a_consola(fora_do_mapa, "utf-8"), fora_do_mapa)
 
-    # 7. D58b/S10 (T8): a lingua que este script devolve nunca pode vir de
+    # 7. A lingua que este script devolve nunca pode vir de
     # fora de {pt, en}. Nao carrega modelo nenhum: `decidir_lingua` e pura.
     terceira = decidir_lingua([("es", 0.80), ("pt", 0.15), ("en", 0.05)])
-    verificar("S10 terceira lingua mais provavel nao decide a lingua", terceira.lingua, "pt")
-    verificar("S10 terceira lingua mais provavel fica registada", terceira.top1, "es")
-    verificar("S10 abaixo do limiar 0,5 a deteccao hesita", terceira.hesitou, True)
+    verificar("lingua: terceira lingua mais provavel nao decide a lingua", terceira.lingua, "pt")
+    verificar("lingua: terceira lingua mais provavel fica registada", terceira.top1, "es")
+    verificar("lingua: abaixo do limiar 0,5 a deteccao hesita", terceira.hesitou, True)
     # D66 ponto 3: a frase fica MARCADA, porque foi essa terceira lingua que
     # descodificou o audio — o log e a evidencia tem de o dizer.
     verificar(
@@ -567,22 +567,22 @@ def _autoteste() -> int:
         "lingua-terceira(es descodificou)" in terceira.resumo(),
         True,
     )
-    # T8 criterio 6 / D53 item 4: depois do A/B controlado (o acerto de
+    # Depois do A/B controlado (o acerto de
     # intencao em portugues desceu, 21/40 -> 20/40), o produto voltou a
     # transcrever com a lingua FIXA. O default tem de o dizer, e o mecanismo
     # de deteccao continua a um argumento de distancia (`lingua_fixa=None`).
     verificar(
-        "T8 criterio 6 transcrever(lingua_fixa=...) por omissao e a lingua do produto",
+        "lingua fixa: transcrever(lingua_fixa=...) por omissao e a lingua do produto",
         inspect.signature(transcrever).parameters["lingua_fixa"].default,
         LINGUA_FIXA_DO_PRODUTO,
     )
     fixa = lingua_fixada()
-    verificar("T8 criterio 6 sem deteccao o log escreve FIXA", "FIXA" in fixa.resumo(), True)
-    verificar("T8 criterio 6 sem deteccao nao ha hesitacao para reportar", fixa.hesitou, False)
-    verificar("T8 criterio 6 sem deteccao nao ha argmax livre", fixa.lingua_terceira, False)
+    verificar("lingua fixa: sem deteccao o log escreve FIXA", "FIXA" in fixa.resumo(), True)
+    verificar("lingua fixa: sem deteccao nao ha hesitacao para reportar", fixa.hesitou, False)
+    verificar("lingua fixa: sem deteccao nao ha argmax livre", fixa.lingua_terceira, False)
     decidida = decidir_lingua([("en", 0.93), ("pt", 0.04)])
-    verificar("S10 argmax restrito escolhe o ingles quando e ele o maior", decidida.lingua, "en")
-    verificar("S10 acima do limiar 0,5 a deteccao nao hesita", decidida.hesitou, False)
+    verificar("lingua: argmax restrito escolhe o ingles quando e ele o maior", decidida.lingua, "en")
+    verificar("lingua: acima do limiar 0,5 a deteccao nao hesita", decidida.hesitou, False)
 
     print()
     if falhas:

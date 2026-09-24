@@ -1,18 +1,18 @@
-r"""Testes da decisao de lingua PT/EN (jarvis/lingua.py, T8/D58b/S10).
+r"""Testes da decisao de lingua PT/EN (jarvis/lingua.py).
 
 Sem GPU, sem modelo, sem audio: `decidir_lingua` e `decidir_lingua_do_top1`
 sao funcoes puras sobre numeros que o faster-whisper (ou o RealtimeSTT) ja
 devolveu. O que estes testes protegem e a regra de produto, nao a aritmetica:
 
   * o argmax e RESTRITO a {pt, en} — uma terceira lingua com a probabilidade
-    mais alta NUNCA decide nada (criterio 1 da T8, S10);
+    mais alta NUNCA decide nada;
   * o limiar e 0,5, o default da propria biblioteca, e e ele (e so ele) que
     diz se a deteccao HESITOU;
   * a lingua devolvida esta SEMPRE dentro de {pt, en}, aconteca o que
     acontecer a entrada — porque o produto tem sempre de decidir em que lingua
     escreve o log e responde;
   * hesitar nunca e um erro nem um estado terceiro: quem encaminha casa a
-    frase contra as DUAS listas brancas (T7), com ou sem hesitacao.
+    frase contra as DUAS listas brancas, com ou sem hesitacao.
 
 Corre com:
 
@@ -40,7 +40,7 @@ from jarvis.lingua import (  # noqa: E402
 
 
 class TestArgmaxRestrito(unittest.TestCase):
-    """Criterio 1 da T8: so `pt` e `en` decidem; terceira lingua nunca."""
+    """So `pt` e `en` decidem; terceira lingua nunca."""
 
     def test_portugues_claro(self) -> None:
         d = decidir_lingua([("pt", 0.97), ("es", 0.02), ("en", 0.01)])
@@ -55,7 +55,7 @@ class TestArgmaxRestrito(unittest.TestCase):
         self.assertFalse(d.hesitou)
 
     def test_terceira_lingua_mais_provavel_nao_decide_a_lingua_do_produto(self) -> None:
-        # O caso que a S10 manda garantir: o argmax LIVRE aponta para espanhol,
+        # O caso a garantir: o argmax LIVRE aponta para espanhol,
         # a decisao do PRODUTO continua a sair de entre pt e en.
         d = decidir_lingua([("es", 0.70), ("en", 0.20), ("pt", 0.05)])
         self.assertEqual(d.lingua, "en")
@@ -65,7 +65,7 @@ class TestArgmaxRestrito(unittest.TestCase):
         self.assertIn("es", d.motivo)
 
     def test_o_motivo_diz_que_a_terceira_lingua_descodificou(self) -> None:
-        # D66, ponto 3: o defeito da tentativa 1 da T8 foi escrever que a
+        # Um defeito anterior foi escrever que a
         # terceira lingua "nao decidiu nada". Decidiu o TEXTO: com
         # `language=None` e o argmax livre que descodifica. O motivo tem de o
         # dizer, e nao pode voltar a dizer que ela foi ignorada.
@@ -113,7 +113,7 @@ class TestArgmaxRestrito(unittest.TestCase):
 
 
 class TestLimiarDaHesitacao(unittest.TestCase):
-    """Criterio 2 da T8: `hesitou` e exatamente a comparacao com o limiar."""
+    """`hesitou` e exatamente a comparacao com o limiar."""
 
     def test_o_limiar_e_o_default_da_biblioteca(self) -> None:
         # faster_whisper/transcribe.py:747 -> language_detection_threshold=0.5
@@ -167,7 +167,7 @@ class TestEntradasEstranhas(unittest.TestCase):
 
 
 class TestLinhaDeLog(unittest.TestCase):
-    """Criterio 2 da T8: lingua, probabilidade e hesitacao no log da frase."""
+    """Lingua, probabilidade e hesitacao no log da frase."""
 
     def test_decidida_escreve_os_tres_numeros(self) -> None:
         texto = decidir_lingua([("pt", 0.96), ("en", 0.01)]).para_log()
@@ -188,17 +188,17 @@ class TestLinhaDeLog(unittest.TestCase):
 
 
 class TestLinhaDeLogComLinguaFixa(unittest.TestCase):
-    """Com a lingua FIXA (a reversao do criterio 6) o log tem de ser CURTO.
+    """Com a lingua FIXA (a reversao da deteccao) o log tem de ser CURTO.
 
-    A linha sai uma vez por frase, no log que o Sponsor le em direto. Dizer
-    `FIXA` e porque (a task) cabe numa dezena de caracteres; a justificacao
+    A linha sai uma vez por frase, no log que o utilizador le em direto. Dizer
+    `FIXA` cabe numa dezena de caracteres; a justificacao
     inteira da reversao nao muda de frase para frase e vive no `motivo`, que
     e consultavel, e no comentario da constante.
     """
 
     def test_o_resumo_diz_fixa_sem_probabilidade_inventada(self) -> None:
         texto = lingua_fixada("pt").para_log()
-        self.assertEqual(texto, "lingua=pt FIXA (sem deteccao, T8 criterio 6)")
+        self.assertEqual(texto, "lingua=pt FIXA (sem deteccao)")
         self.assertNotIn("p=0.00", texto)
         self.assertNotIn("hesitou", texto)
 
@@ -216,7 +216,7 @@ class TestLinhaDeLogComLinguaFixa(unittest.TestCase):
 
 
 class TestCaminhoVivoSoComTop1(unittest.TestCase):
-    """O que o RealtimeSTT expoe (achado da T8): `detected_language` e mais nada."""
+    """O que o RealtimeSTT expoe: `detected_language` e mais nada."""
 
     def test_top1_portugues(self) -> None:
         d = decidir_lingua_do_top1("pt", 0.99)

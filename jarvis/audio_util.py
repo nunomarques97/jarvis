@@ -1,4 +1,4 @@
-r"""Utilitarios de audio partilhados pelos tres scripts da T3.
+r"""Utilitarios de audio partilhados pelos tres scripts de audio.
 
 Junta o que scripts/gerar_wav.py, scripts/transcrever_ficheiro.py e
 scripts/verificar_microfone.py tinham em comum: os caminhos-padrao (audio/,
@@ -8,13 +8,12 @@ juntar nenhuma dependencia nova (nem sequer resampy, que a instalacao da
 RealtimeTTS 0.8.5 trouxe como transitiva mas que este modulo nao usa).
 
 `registar_dlls_do_torch` e uma copia deliberada da funcao homonima em
-scripts/verificar_ambiente.py (D42, T1): esse ficheiro nao e um pacote
-importavel (vive em scripts/, sem __init__.py) e a T1 ja esta fechada, por
-isso o codigo repete-se aqui em vez de o scripts/verificar_ambiente.py passar
+scripts/verificar_ambiente.py: esse ficheiro nao e um pacote
+importavel (vive em scripts/, sem __init__.py), por isso o codigo repete-se aqui em vez de o scripts/verificar_ambiente.py passar
 a depender de outra coisa fora do seu ambito. A logica tem de ficar identica
 nos dois sitios: torna visiveis ao CTranslate2 as DLLs de CUDA que vem no
 wheel do torch, e tem de correr ANTES de importar faster_whisper/ctranslate2
-quando o device e "cuda" (regra da D42).
+quando o device e "cuda".
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ PASTA_AUDIO = RAIZ / "audio"
 PASTA_MODELOS_PIPER = RAIZ / "models" / "piper"
 PASTA_MODELOS_FASTER_WHISPER = RAIZ / "models" / "faster-whisper"
 
-#: Taxa de amostragem que os tres scripts desta task usam (D33/criterio da T3).
+#: Taxa de amostragem que os tres scripts de audio usam.
 TAXA_AMOSTRAGEM_PADRAO = 16_000
 
 
@@ -44,16 +43,16 @@ def garantir_pasta(pasta: Path) -> Path:
 #: Sufixo obrigatorio de qualquer WAV que estes scripts escrevam. A regra
 #: `*.wav` do .gitignore apanha-o em qualquer pasta; um `--saida notas.txt`
 #: nao era apanhado por regra nenhuma, e o conteudo destes ficheiros e a voz
-#: do Sponsor (D10/D31, repositorio destinado a ser publico pela D1).
+#: do utilizador (e o repositorio e publico).
 SUFIXO_DE_SAIDA_PERMITIDO = ".wav"
 
 
 def caminho_wav_de_saida(valor: str | Path, raiz: Path | None = None) -> Path:
     """Valida um caminho de saida vindo de fora (a linha de comandos hoje; a
-    configuracao na T4, e ai e entrada externa pela D48(2)).
+    configuracao mais tarde, e ai tambem e entrada externa).
 
     Duas regras, as duas pela mesma razao: o que se escreve nestes ficheiros e
-    a voz do Sponsor, e este repositorio vai ser publico.
+    a voz do utilizador, e este repositorio e publico.
 
     1. fica dentro da raiz do repositorio. Sem isto, `--saida audio/../../x.wav`
        escreve fora dele (e `escrever_wav_pcm16` cria as pastas todas pelo
@@ -72,7 +71,7 @@ def caminho_wav_de_saida(valor: str | Path, raiz: Path | None = None) -> Path:
         raise ValueError(
             f"saida '{valor}': so se escrevem ficheiros {SUFIXO_DE_SAIDA_PERMITIDO} "
             "(e a unica extensao que o .gitignore deste repositorio apanha, e estes "
-            "ficheiros levam a voz do Sponsor)"
+            "ficheiros levam a voz do utilizador)"
         )
     if not caminho.is_relative_to(raiz):
         raise ValueError(
@@ -82,11 +81,10 @@ def caminho_wav_de_saida(valor: str | Path, raiz: Path | None = None) -> Path:
     return caminho
 
 
-#: Onde a evidencia de `--prova-silencio` (D60(4)(b), T4/T12) tem de cair: a
-#: unica pasta deste repositorio que fica ao mesmo tempo dentro dele e
-#: apanhada pelo .gitignore para ficheiros `.md` (`.gitignore` so ignora
-#: `docs/forja/` inteira; nenhuma outra regra cobre `.md`).
-PASTA_EVIDENCIA_FORJA = RAIZ / "docs" / "forja" / "evidence"
+#: Onde a evidencia de `--prova-silencio` tem de cair: a unica pasta deste
+#: repositorio que fica ao mesmo tempo dentro dele e ignorada pelo .gitignore
+#: para ficheiros `.md` (nenhuma outra regra cobre `.md`).
+PASTA_EVIDENCIA = RAIZ / "docs" / "forja" / "evidence"
 
 #: Sufixo obrigatorio de qualquer ficheiro de evidencia escrito por esta
 #: guarda.
@@ -101,17 +99,16 @@ def caminho_evidencia_de_saida(
     """Valida um caminho de evidencia vindo de fora (`--evidencia`).
 
     Mesma forma e mesma intencao de `caminho_wav_de_saida` acima, mas
-    confinada a `docs/forja/evidence/` em vez da raiz inteira do
-    repositorio (mesmo padrao ja em vigor, revisto e aprovado, em
+    confinada a `PASTA_EVIDENCIA` em vez da raiz inteira do
+    repositorio (mesmo padrao ja em vigor em
     `scripts/medir_voz.py::caminho_evidencia_de_saida` para o `--saida`
     dessa medicao). A evidencia de `--prova-silencio` leva a saida do
-    `tasklist` da maquina do Sponsor e, no ramo de erro, caminhos absolutos
-    do disco dele (`piper.exe nao encontrado em 'C:\\Users\\...'`) — o mesmo
-    defeito do `--saida` de `scripts/gerar_wav.py` que gerou a Q4 na fila do
-    Sponsor (D1/D10/D52/D64(A)).
+    `tasklist` da maquina do utilizador e, no ramo de erro, caminhos absolutos
+    do disco dele (`piper.exe nao encontrado em '<disco>\\...'`) — o mesmo
+    defeito que o `--saida` de `scripts/gerar_wav.py` ja teve.
 
     1. acaba em `.md`;
-    2. fica dentro de `docs/forja/evidence/`. Nao basta "dentro do
+    2. fica dentro de `PASTA_EVIDENCIA`. Nao basta "dentro do
        repositorio": so essa subpasta esta no `.gitignore`, logo
        `--evidencia notas.md` (que cairia na raiz) ou `--evidencia
        docs/notas.md` ficariam em pasta VERSIONADA.
@@ -123,7 +120,7 @@ def caminho_evidencia_de_saida(
     Devolve o caminho absoluto ja normalizado; levanta `ValueError` legivel
     se alguma das duas falhar. Nao cria nem toca em nada no disco.
     """
-    pasta = (PASTA_EVIDENCIA_FORJA if pasta_permitida is None else Path(pasta_permitida)).resolve()
+    pasta = (PASTA_EVIDENCIA if pasta_permitida is None else Path(pasta_permitida)).resolve()
     raiz_para_relativos = (RAIZ if raiz is None else Path(raiz)).resolve()
     caminho = Path(valor).expanduser()
     if not caminho.is_absolute():
@@ -133,14 +130,13 @@ def caminho_evidencia_de_saida(
         raise ValueError(
             f"evidencia '{valor}': so se escrevem ficheiros {SUFIXO_DE_EVIDENCIA_PERMITIDO} "
             "(este ficheiro pode levar a saida do tasklist e caminhos absolutos da maquina "
-            "do Sponsor, D1/D10)"
+            "do utilizador)"
         )
     if not caminho.is_relative_to(pasta):
         raise ValueError(
             f"evidencia '{valor}' cai fora de '{pasta}' (resolvida para {caminho}); a "
             "evidencia do silencio imediato so pode ser escrita na unica pasta deste "
-            "repositorio que o .gitignore apanha para ficheiros .md (docs/forja/evidence/) "
-            "— D1/D10"
+            "repositorio que o .gitignore apanha para ficheiros .md (docs/forja/evidence/)"
         )
     return caminho
 
@@ -150,8 +146,8 @@ def caminho_para_mostrar(caminho: Path) -> Path:
 
     `caminho_wav_de_saida` devolve caminhos absolutos (e tem de devolver, para
     poder confinar a escrita), mas imprimi-los mete o caminho do disco do
-    Sponsor em todos os logs e relatorios — exatamente o que a D10 nao quer ver
-    a circular. Fora do repositorio devolve o caminho tal e qual.
+    utilizador em todos os logs e relatorios — exatamente o que nao pode
+    circular. Fora do repositorio devolve o caminho tal e qual.
     """
     try:
         return Path(caminho).resolve().relative_to(RAIZ)
@@ -162,8 +158,8 @@ def caminho_para_mostrar(caminho: Path) -> Path:
 def registar_dlls_do_torch() -> list[str]:
     """Torna as DLLs de CUDA que vieram no wheel do torch visiveis ao CTranslate2.
 
-    Tudo dentro do .venv: nada e instalado ou registado no Windows (D14f).
-    Copia de scripts/verificar_ambiente.py::registar_dlls_do_torch (D42) — ver
+    Tudo dentro do .venv: nada e instalado ou registado no Windows.
+    Copia de scripts/verificar_ambiente.py::registar_dlls_do_torch — ver
     o aviso no docstring do modulo sobre porque nao e importada de la.
     """
     registadas: list[str] = []
@@ -215,7 +211,7 @@ def reamostrar_pcm16(dados: bytes, taxa_de: int, taxa_para: int, canais: int = 1
 
     Usado pelo gerar_wav.py para descer os 22050 Hz nativos da voz Piper
     (models/piper/pt_PT-tugao-medium.onnx.json) para os 16 kHz mono exigidos
-    pelo criterio da T3. audioop esta descontinuado desde o Python 3.13, mas
+    pela transcricao. audioop esta descontinuado desde o Python 3.13, mas
     corre neste .venv (3.12) sem alternativa nova a instalar.
     """
     if taxa_de == taxa_para:
@@ -254,7 +250,7 @@ def pico_pcm16(dados: bytes) -> int:
 def normalizar_pico_pcm16(dados: bytes, alvo: float = 0.95) -> bytes:
     """Normaliza PCM de 16 bits por PICO para `alvo` da escala (audioop, stdlib).
 
-    T10 (TECHNOLOGY.md S9): o mesmo mecanismo e alvo (-0,95 dBFS por omissao)
+    O mesmo mecanismo e alvo (-0,95 dBFS por omissao)
     que o RealtimeSTT ja aplica sozinho quando `normalize_audio=True`
     (`AudioToTextRecorder`, caminho ao vivo de `jarvis/app.py::construir_recorder`):
     `audio = (audio / pico) * alvo`. Esta funcao existe para os scripts que
@@ -346,7 +342,7 @@ def _autoteste() -> int:
     verificar("pico: maximo negativo conta pelo valor absoluto", pico_pcm16(struct.pack("<2h", 5, -300)), 300)
     verificar("pico: bytes vazios nao rebenta", pico_pcm16(b""), 0)
 
-    # 4e. normalizar_pico_pcm16 (T10, TECHNOLOGY.md S9): silencio digital nao
+    # 4e. normalizar_pico_pcm16: silencio digital nao
     # rebenta nem muda; um sinal baixo sobe o pico para ~0,95 da escala; o
     # comprimento em bytes nunca muda.
     silencio_digital = struct.pack("<8h", *([0] * 8))
@@ -411,7 +407,7 @@ def _autoteste() -> int:
         )
 
     # 4d. caminho_para_mostrar: o que vai para os logs nao leva o caminho do
-    # disco do Sponsor (D10).
+    # disco do utilizador.
     verificar(
         "mostrar: dentro do repositorio fica relativo",
         caminho_para_mostrar(RAIZ / "audio" / "x.wav"),

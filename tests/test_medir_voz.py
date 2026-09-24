@@ -1,14 +1,13 @@
 r"""Testes do arnes de medicao sintetica (scripts/medir_voz.py), unittest da
 biblioteca padrao (sem pytest, mesma convencao de tests/test_router.py e
-tests/test_acoes.py: nao ha decisao do Scout para uma framework de testes fora
-da biblioteca padrao).
+tests/test_acoes.py: nenhuma framework de testes fora da biblioteca padrao).
 
 NENHUM destes testes toca em GPU, em Piper ou no disco de audio: cobrem so as
 partes puras do arnes — o calculo do WER, a substituicao dos marcadores de
-projeto (<projeto-1>/<projeto-2>, D1/D10) e a leitura da tabela de
+projeto (<projeto-1>/<projeto-2>) e a leitura da tabela de
 tests/voz/frases-pt.md. A cadeia inteira (sintese + transcricao + encaminhador)
 so se prova a serio com hardware, correndo
-`.venv\Scripts\python scripts/medir_voz.py` (evidencia no relatorio da T7).
+`.venv\Scripts\python scripts/medir_voz.py`.
 
 Corre com:
 
@@ -37,8 +36,7 @@ def pasta_de_evidencia_temporaria():
     """Redireciona a pasta de evidencia para um tempfile, durante um teste.
 
     Sem isto os testes que exercitam `escrever_evidencia` escreviam ficheiros
-    dentro do `docs/forja/evidence/` REAL do repositorio (nit 5 do Reviewer,
-    T7 a2): colidem com uma corrida do arnes a decorrer e deixam lixo se o
+    dentro da pasta de evidencia REAL do repositorio: colidem com uma corrida do arnes a decorrer e deixam lixo se o
     processo for morto a meio. `caminho_evidencia_de_saida` le as duas
     constantes no momento da chamada, por isso troca-las aqui chega — e a
     validacao que protege a pasta real continua exatamente a mesma, so aponta
@@ -126,7 +124,7 @@ class TestCalcularWer(unittest.TestCase):
 
 
 class TestSubstituirMarcadores(unittest.TestCase):
-    """<projeto-1>/<projeto-2> (D1/D10): nunca um nome real do Sponsor aqui."""
+    """<projeto-1>/<projeto-2>: nunca um nome real do utilizador aqui."""
 
     def test_substitui_os_dois_marcadores(self) -> None:
         resultado = medir_voz.substituir_marcadores(
@@ -140,7 +138,7 @@ class TestSubstituirMarcadores(unittest.TestCase):
         self.assertEqual(resultado, "cala-te")
 
     def test_um_so_projeto_configurado_reutiliza_o_mesmo_nome(self) -> None:
-        # Degradar (D10), nunca rebentar: com um so projeto, os dois
+        # Degradar, nunca rebentar: com um so projeto, os dois
         # marcadores usam o mesmo nome em vez de recusar a frase.
         resultado = medir_voz.substituir_marcadores(
             "abre o vs code no <projeto-1> e a pasta do <projeto-2>",
@@ -173,7 +171,7 @@ class TestLerAmostra(unittest.TestCase):
         self.assertEqual(len(claude), 10)
 
     def test_nenhuma_frase_da_amostra_versionada_leva_um_caminho_do_disco(self) -> None:
-        # D1/D10: a garantia e por comportamento (D52), nunca por uma lista de
+        # D1/D10: a garantia e por comportamento, nunca por uma lista de
         # nomes proibidos em codigo — aqui so se verifica a forma (nenhum
         # caminho absoluto do Windows), nunca um nome especifico de projeto.
         texto_do_ficheiro = medir_voz.CAMINHO_AMOSTRA_PADRAO.read_text(encoding="utf-8")
@@ -249,10 +247,10 @@ class TestEsperadoUsaOEncaminhadorComoFonteDaVerdade(unittest.TestCase):
 
 
 class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
-    """Bloqueador 1 do SECURITY-REJECT da tentativa 1: o `--saida` escrevia em
-    qualquer caminho do disco. A evidencia leva os NOMES e os CAMINHOS reais
-    dos projetos do Sponsor e este repositorio vai ser publico (D1/D10), por
-    isso so pode cair em docs/forja/evidence/ e so com sufixo .md."""
+    """Regressao de seguranca: o `--saida` escrevia em qualquer caminho do
+    disco. A evidencia leva os NOMES e os CAMINHOS reais dos projetos do
+    utilizador e este repositorio e publico, por isso so pode cair na pasta
+    de evidencia e so com sufixo .md."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -289,18 +287,18 @@ class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
         )
 
     def test_pasta_versionada_do_repositorio_e_recusada(self) -> None:
-        # Os tres exemplos do SECURITY-REJECT: caem dentro do repo, mas em
+        # Tres exemplos da revisao de seguranca: caem dentro do repo, mas em
         # pastas que o .gitignore NAO cobre.
         self.assertTrue(self.recusa("docs/EVIDENCIA.md"))
         self.assertTrue(self.recusa("README.md"))
         self.assertTrue(self.recusa("tests/voz/resultado.md"))
 
     def test_docs_forja_fora_da_pasta_de_evidencia_e_recusado(self) -> None:
-        self.assertTrue(self.recusa("docs/forja/DECISIONS.md"))
+        self.assertTrue(self.recusa("docs/forja/notas.md"))
 
     def test_caminho_fora_do_repositorio_e_recusado(self) -> None:
-        # A sonda exata do Security Reviewer: escrever ao lado da raiz.
-        self.assertTrue(self.recusa(str(self.raiz.parent / "FUGA-T7-probe.md")))
+        # A sonda da revisao de seguranca: escrever ao lado da raiz.
+        self.assertTrue(self.recusa(str(self.raiz.parent / "FUGA-probe.md")))
 
     def test_travessia_com_dois_pontos_e_recusada(self) -> None:
         self.assertTrue(self.recusa("docs/forja/evidence/../../../fuga.md"))
@@ -313,7 +311,7 @@ class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
         for valor in (
             "README.md",
             "docs/EVIDENCIA.md",
-            str(self.raiz.parent / "FUGA-T7-probe.md"),
+            str(self.raiz.parent / "FUGA-probe.md"),
             "docs/forja/evidence/notas.txt",
         ):
             with self.assertRaises(ValueError):
@@ -328,8 +326,8 @@ class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
 
     def test_escrever_evidencia_recusa_um_caminho_fora_da_pasta(self) -> None:
         # A validacao nao vive so no main(): quem chamar a funcao diretamente
-        # (como a sonda do Security Reviewer fez) tambem e recusado.
-        alvo = medir_voz.RAIZ / "FUGA-T7-probe.md"
+        # (como a sonda da revisao de seguranca fez) tambem e recusado.
+        alvo = medir_voz.RAIZ / "FUGA-probe.md"
         with self.assertRaises(ValueError):
             medir_voz.escrever_evidencia([], "exemplo", "cpu", alvo, 0.0)
         self.assertFalse(alvo.exists())
@@ -337,7 +335,7 @@ class TestCaminhoEvidenciaDeSaida(unittest.TestCase):
 
 class TestMainRecusaSaidaInvalida(unittest.TestCase):
     """O codigo de saida e o efeito no disco, nao so a excecao: um `--saida`
-    fora de docs/forja/evidence/ falha com 1 ANTES de sintetizar seja o que
+    fora da pasta de evidencia falha com 1 ANTES de sintetizar seja o que
     for (nao ha GPU nem Piper envolvidos neste teste)."""
 
     def test_saida_em_ficheiro_versionado_devolve_1_e_nao_toca_no_ficheiro(self) -> None:
@@ -353,9 +351,9 @@ class TestMainRecusaSaidaInvalida(unittest.TestCase):
     def test_saida_fora_do_repositorio_devolve_1_e_nao_escreve_nada(self) -> None:
         # Destino fora do repositorio, mas dentro de um tempfile deste teste:
         # a versao anterior apontava para `RAIZ.parent`, uma pasta do disco do
-        # Sponsor que este teste nao controla (nit 5 do Reviewer, T7 a2).
+        # utilizador que este teste nao controla.
         with tempfile.TemporaryDirectory() as pasta:
-            alvo = Path(pasta).resolve() / "FUGA-T7-probe.md"
+            alvo = Path(pasta).resolve() / "FUGA-probe.md"
             self.assertFalse(alvo.exists(), "sonda: o ficheiro nao pode existir antes do teste")
             stdout, stderr = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -371,7 +369,7 @@ class TestMainRecusaSaidaInvalida(unittest.TestCase):
 
 
 class TestCelulasDeTabelaMarkdown(unittest.TestCase):
-    """Nit 2 do Security Reviewer: uma transcricao com `|` deslocava as colunas
+    """Uma transcricao com `|` deslocava as colunas
     e falsificava a coluna de acerto que um humano le."""
 
     def test_pipe_na_transcricao_e_escapado(self) -> None:
@@ -387,11 +385,11 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
         self.assertEqual(medir_voz.celula_markdown(""), "—")
 
     def test_uma_linha_escrita_com_pipes_na_transcricao_continua_a_ter_onze_colunas(self) -> None:
-        # O ataque provado na tentativa 1, agora de ponta a ponta: a linha
+        # O ataque ja provado, agora de ponta a ponta: a linha
         # escrita tem de continuar a ter as colunas do cabecalho, com o
         # `acerto` na 7.a e o WER na 8.a (a duracao do audio e a latencia da
-        # transcricao entraram a fechar o nit 2 do Reviewer; a coluna da
-        # LINGUA detetada entrou na T8/D58b e por isso sao 11 e nao 10).
+        # transcricao entraram depois; a coluna da LINGUA detetada tambem, e
+        # por isso sao 11 e nao 10).
         linha = medir_voz.LinhaMedida(
             numero=1,
             tipo_documentado="local",
@@ -427,9 +425,9 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
         self.assertEqual(celulas[3], "isto | NAO | sim | 0.0% | lixo")
         self.assertEqual(celulas[6], "NAO")
         self.assertTrue(celulas[7].endswith("%"))
-        # T8/D58b: a lingua detetada nesta frase, na sua propria coluna.
+        # A lingua detetada nesta frase, na sua propria coluna.
         self.assertEqual(celulas[8], "pt 0.97")
-        # Nit 2 do Reviewer: a duracao do audio e a latencia SO da transcricao
+        # A duracao do audio e a latencia SO da transcricao
         # (nao o total com o carregamento) chegam mesmo ao ficheiro.
         self.assertEqual(celulas[9], "1.25")
         self.assertEqual(celulas[10], "432")
@@ -445,7 +443,7 @@ class TestCelulasDeTabelaMarkdown(unittest.TestCase):
 
 
 class TestAvisosDaAmostra(unittest.TestCase):
-    """Nit 4 do Security Reviewer: uma linha mal formada desaparecia em silencio."""
+    """Uma linha mal formada desaparecia em silencio."""
 
     def escrever_amostra(self, pasta: str, corpo: str) -> Path:
         caminho = Path(pasta) / "amostra.md"
@@ -486,7 +484,7 @@ class TestAvisosDaAmostra(unittest.TestCase):
             self.assertTrue(avisos)
 
     def test_linha_de_celulas_todas_vazias_e_avisada_e_nao_passa_por_separador(self) -> None:
-        # Nit 6 do Reviewer (T7 a2): `| | | |` nao tem celula nenhuma com
+        # `| | | |` nao tem celula nenhuma com
         # texto, logo o `all(...)` do teste de separador dava True por vacuidade
         # e a linha sumia sem entrar na contagem de avisos.
         with tempfile.TemporaryDirectory() as pasta:
@@ -538,7 +536,7 @@ class TestAvisosDaAmostra(unittest.TestCase):
 
 
 class TestAgregados(unittest.TestCase):
-    """Nit 2 do Reviewer: macro-media e WER de corpus sao numeros diferentes e
+    """Macro-media e WER de corpus sao numeros diferentes e
     o ficheiro tem de dizer qual e qual. Valores calculados a mao."""
 
     def linha(self, numero: int, referencia: str, hipotese: str, acertou: bool) -> medir_voz.LinhaMedida:
@@ -573,7 +571,7 @@ class TestAgregados(unittest.TestCase):
         self.assertAlmostEqual(agregados.wer_corpus_pct, 20.0)
 
     def test_uma_referencia_vazia_conta_como_insercoes_no_wer_de_corpus(self) -> None:
-        # Nit 7 do Reviewer (T7 a2): fixado de proposito, nao por acidente.
+        # Fixado de proposito, nao por acidente.
         # Frase A: 2 palavras de referencia, 1 erro. Frase B: referencia vazia
         # e 3 palavras de hipotese = 3 insercoes, nenhuma palavra no
         # denominador. corpus = (1 + 3) / 2 = 200%; macro = (50 + 100) / 2 = 75%.
@@ -593,7 +591,7 @@ class TestAgregados(unittest.TestCase):
 
 
 class TestFalhaDeUmaFraseNaoDeitaForaAMedicao(unittest.TestCase):
-    """Nit 3 do Reviewer: uma excecao na frase 19 deitava fora as 18 anteriores
+    """Uma excecao na frase 19 deitava fora as 18 anteriores
     e o proprio entregavel."""
 
     def setUp(self) -> None:
@@ -649,8 +647,8 @@ class TestFalhaDeUmaFraseNaoDeitaForaAMedicao(unittest.TestCase):
 
 
 class TestAvisosObrigatoriosNaEvidencia(unittest.TestCase):
-    """D34 (audio sintetico, nao mede a voz do Sponsor, proibido propor ingles)
-    e nit 5 do Security Reviewer (dados privados com um config.toml real)."""
+    """Audio sintetico (nao mede a voz do utilizador, proibido propor ingles)
+    e dados privados com um config.toml real."""
 
     def test_o_ficheiro_gerado_diz_as_tres_coisas_da_d34_e_avisa_da_privacidade(self) -> None:
         with pasta_de_evidencia_temporaria() as pasta:
@@ -658,18 +656,18 @@ class TestAvisosObrigatoriosNaEvidencia(unittest.TestCase):
             medir_voz.escrever_evidencia([], "exemplo", "cpu", caminho, 0.0)
             escrito = caminho.read_text(encoding="utf-8")
         self.assertIn("AUDIO SINTETICO", escrito)
-        self.assertIn("NAO mede o reconhecimento da voz do Sponsor", escrito)
+        self.assertIn("NAO mede o reconhecimento da voz do utilizador", escrito)
         self.assertIn("proibido propor a troca para ingles", escrito)
-        # Nit 5: quem copiar excertos daqui para um ficheiro versionado tem de
-        # ser avisado de que isto pode levar nomes e caminhos reais (D1/D10).
-        self.assertIn("dados privados do Sponsor", escrito)
+        # Quem copiar excertos daqui para um ficheiro versionado tem de
+        # ser avisado de que isto pode levar nomes e caminhos reais.
+        self.assertIn("dados privados do utilizador", escrito)
         self.assertIn("`.gitignore`", escrito)
         # E o limiar da D7 escrito com a conjuncao exata, nao suavizado.
         self.assertIn("WER <= 15%", escrito)
 
 
 class TestLatenciaEPisoDoAcertoNaEvidencia(unittest.TestCase):
-    """Nits 2 e 3 do Reviewer (T7 a2): a latencia media-se e nunca chegava ao
+    """A latencia media-se e nunca chegava ao
     ficheiro, e o piso por construcao do acerto de intencao nao estava escrito
     onde quem le os agregados o ve."""
 
@@ -726,9 +724,9 @@ class TestLatenciaEPisoDoAcertoNaEvidencia(unittest.TestCase):
         self.assertNotIn("Piso por construção", escrito)
 
 
-class TestProtocoloD7NoFicheiroVersionado(unittest.TestCase):
-    """Nit 1 do Reviewer: o ficheiro suavizava a D7 («e WER <= 15% como
-    referencia» em vez da conjuncao)."""
+class TestProtocoloNoFicheiroVersionado(unittest.TestCase):
+    """O ficheiro suavizava os limiares («e WER <= 15% como referencia» em vez
+    da conjuncao)."""
 
     def test_o_limiar_de_noventa_por_cento_usa_a_conjuncao_da_d7(self) -> None:
         texto = medir_voz.CAMINHO_AMOSTRA_PADRAO.read_text(encoding="utf-8")
@@ -743,7 +741,7 @@ class TestProtocoloD7NoFicheiroVersionado(unittest.TestCase):
 
 
 class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
-    """T1/D53: o `--prefixo` so entra no texto SINTETIZADO e na referencia do
+    """O `--prefixo` so entra no texto SINTETIZADO e na referencia do
     WER, nunca no calculo da intencao esperada; o `--modelo` chega ao
     transcritor tal e qual. `gerar_wav`/`transcrever` sao substituidos por
     duplos que so REGISTAM o que recebem — nenhum GPU, Piper ou disco de
@@ -768,9 +766,9 @@ class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
         chamadas_transcrever: list[dict] = []
 
         def gerar_wav_falso(texto, saida, **kwargs):
-            # D61/T5: o arnes de medicao NUNCA pede som. Se um dia alguem
+            # O arnes de medicao NUNCA pede som. Se um dia alguem
             # passar `com_som=True` por omissao aqui, este teste cai antes de
-            # a suite fazer barulho nas colunas do Sponsor.
+            # a suite fazer barulho nas colunas do utilizador.
             assert kwargs.get("com_som") is False, (
                 "medir_uma_frase pediu som ao sintetizador (D61): "
                 f"com_som={kwargs.get('com_som')!r}"
@@ -810,7 +808,7 @@ class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
         # Prefixo malicioso de proposito: se ele vazasse para o calculo da
         # intencao esperada, "que horas são" deixava de ser "local" — uma
         # negacao manda SEMPRE para "claude" (D4/router.PADRAO_NEGACAO).
-        # Provar que isso nao acontece e a garantia central desta task.
+        # Provar que isso nao acontece e a garantia central deste arnes.
         linha, chamadas_gerar_wav, _ = self._medir_com_duplos(
             modelo="medium", prefixo="não ", texto_transcrito="não que horas são"
         )
@@ -843,9 +841,9 @@ class TestPrefixoEModeloEmMedirUmaFrase(unittest.TestCase):
 
 
 class TestParserModeloEPrefixo(unittest.TestCase):
-    """T1/D53: as duas flags novas existem, com os defaults certos, e o
+    """As duas flags novas existem, com os defaults certos, e o
     `--modelo` usa a lista fechada do transcritor (nao aceita um repo
-    qualquer do Hugging Face, mesma garantia do autoteste da T6)."""
+    qualquer do Hugging Face, mesma garantia do autoteste do jarvis)."""
 
     def test_defaults_nao_mudam_o_comportamento_de_hoje(self) -> None:
         args = medir_voz.construir_parser().parse_args([])
@@ -876,10 +874,10 @@ class TestParserModeloEPrefixo(unittest.TestCase):
 
 
 class TestLinhasDivergentes(unittest.TestCase):
-    """T1/D53: conta as linhas em que o tipo DOCUMENTADO na tabela difere do
+    """Conta as linhas em que o tipo DOCUMENTADO na tabela difere do
     tipo CALCULADO por `encaminhar()` (`tipo_esperado`) — sem isto, uma
     amostra cujas frases `local` ainda nao tem lista branca (o caso de
-    `frases-en.md` antes da T7/D58) aparecia com acerto de intencao alto so
+    `frases-en.md` antes da lista branca inglesa) aparecia com acerto de intencao alto so
     por construcao."""
 
     def linha(self, tipo_documentado: str, tipo_esperado: str) -> medir_voz.LinhaMedida:
@@ -930,8 +928,8 @@ class TestLinhasDivergentes(unittest.TestCase):
 
 
 class TestCabecalhoDaEvidenciaComAmostraModeloEPrefixo(unittest.TestCase):
-    """T1/D53: o cabecalho da evidencia regista amostra, modelo, prefixo
-    usado e o aviso da voz pt-PT (S11), mesmo com a amostra `frases-en.md`."""
+    """O cabecalho da evidencia regista amostra, modelo, prefixo
+    usado e o aviso da voz pt-PT, mesmo com a amostra `frases-en.md`."""
 
     def test_cabecalho_mostra_amostra_modelo_prefixo_e_aviso_da_voz(self) -> None:
         caminho_en = medir_voz.RAIZ / "tests" / "voz" / "frases-en.md"
@@ -952,7 +950,7 @@ class TestCabecalhoDaEvidenciaComAmostraModeloEPrefixo(unittest.TestCase):
         self.assertIn("small", escrito)
         self.assertIn("'hey jarvis, '", escrito)
         self.assertIn("voz Piper pt-PT", escrito)
-        self.assertIn("S11", escrito)
+        self.assertIn("não existe voz inglesa", escrito)
 
     def test_sem_prefixo_o_cabecalho_diz_nenhum(self) -> None:
         with pasta_de_evidencia_temporaria() as pasta:
@@ -963,8 +961,8 @@ class TestCabecalhoDaEvidenciaComAmostraModeloEPrefixo(unittest.TestCase):
 
 
 class TestLerAmostraFrasesEmIngles(unittest.TestCase):
-    """T1/D53: `frases-en.md` tem a mesma forma e o mesmo tamanho da amostra
-    pt-PT, e nenhuma palavra proibida de compra/venda em ingles (D64/D52)."""
+    """`frases-en.md` tem a mesma forma e o mesmo tamanho da amostra
+    pt-PT, e nenhuma palavra proibida de compra/venda em ingles."""
 
     CAMINHO = RAIZ / "tests" / "voz" / "frases-en.md"
 
@@ -1005,7 +1003,7 @@ class TestLerAmostraFrasesEmIngles(unittest.TestCase):
         self.assertNotIn("Users", texto)
 
 
-# --- T8/D58b/S10: a lingua e o custo de latencia na evidencia --------------
+# --- A lingua e o custo de latencia na evidencia ----------------------------
 
 
 class TestPercentil(unittest.TestCase):
@@ -1028,7 +1026,7 @@ class TestPercentil(unittest.TestCase):
 
 
 class TestLinguaNaEvidencia(unittest.TestCase):
-    """Criterios 2 e 5 da T8: a lingua de cada frase e os percentis no ficheiro."""
+    """A lingua de cada frase e os percentis no ficheiro."""
 
     def linha(self, numero: int, lingua: str, prob: float, hesitou: bool, top1: str, latencia: float):
         return medir_voz.LinhaMedida(
@@ -1074,7 +1072,7 @@ class TestLinguaNaEvidencia(unittest.TestCase):
         self.assertIn("lingua-terceira(es descodificou)", texto)
 
     def test_o_agregado_conta_as_linhas_lingua_terceira_e_diz_quais(self) -> None:
-        # B1 da tentativa 2 / D66 ponto 3: o ficheiro tem de trazer a CONTAGEM
+        # O ficheiro tem de trazer a CONTAGEM
         # e os numeros das frases, para se poder reconferir linha a linha.
         linhas = [
             self.linha(1, "pt", 0.96, False, "pt", 300.0),
@@ -1085,7 +1083,7 @@ class TestLinguaNaEvidencia(unittest.TestCase):
         self.assertIn("**`lingua-terceira`: 2/3 frases** (#2, #3)", texto)
 
     def test_o_agregado_nao_volta_a_dizer_que_a_terceira_lingua_foi_ignorada(self) -> None:
-        # A afirmacao FALSA que o Reviewer rejeitou na tentativa 1, fixada aqui
+        # Uma afirmacao FALSA de uma versao anterior, fixada aqui
         # para nunca mais voltar: com language=None quem descodifica e o argmax
         # LIVRE, logo a terceira lingua nao pode ser descrita como ignorada.
         texto = self.escrever([self.linha(1, "pt", 0.20, True, "ru", 300.0)])
@@ -1194,9 +1192,9 @@ class TestLinhaMedidaCarregaALingua(unittest.TestCase):
 
 
 class TestAbControlado(unittest.TestCase):
-    r"""D66, ponto 7: a comparação que decide o critério 6 corre sobre os MESMOS WAV.
+    r"""A comparação que decide a língua do produto corre sobre os MESMOS WAV.
 
-    O Piper é estocástico. Na tentativa 1 da T8 duas corridas do MESMO código
+    O Piper é estocástico. Numa medição anterior, duas corridas do MESMO código
     deram 79 transcrições diferentes em 80 e mudaram a duração do áudio em
     18–20 de 20 linhas por combinação: comparar dois ficheiros desses muda duas
     variáveis ao mesmo tempo. Estes testes fixam a máquina que torna o A/B
@@ -1400,7 +1398,7 @@ class TestAbControlado(unittest.TestCase):
         self.assertEqual(args.lingua, "auto")
         self.assertEqual(args.pasta_audio, "ab-pt-sem")
         # Por omissao uma corrida normal mede O PRODUTO: nao reutiliza audio e
-        # transcreve com a lingua fixa (criterio 6 da T8).
+        # transcreve com a lingua fixa.
         omissao = medir_voz.construir_parser().parse_args([])
         self.assertFalse(omissao.reutilizar_audio)
         self.assertEqual(omissao.lingua, medir_voz.LINGUA_FIXA_DO_PRODUTO)

@@ -1,8 +1,8 @@
 r"""Testes do encaminhador deterministico (jarvis/router.py), unittest da
-biblioteca padrao (sem pytest: nao ha decisao do Scout para uma framework de
-testes fora da biblioteca padrao).
+biblioteca padrao (sem pytest: nenhuma framework de testes fora da biblioteca
+padrao).
 
-Config sempre FICTICIA e em memoria (nunca o config.toml real, D10): os
+Config sempre FICTICIA e em memoria (nunca o config.toml real): os
 projetos usados chamam-se "exemplo-um", "exemplo-dois" e "exemplo-bolsa", com
 caminhos inventados que nem sequer existem no disco desta maquina — o router
 nao toca no sistema de ficheiros, so compara texto, por isso isto e seguro e
@@ -12,13 +12,13 @@ O que estes testes protegem, alem do caminho feliz:
 
   * a lista branca da D4 esta FECHADA — uma frase que apenas CONTEM um
     gatilho ("diz ao claude ... sobre o vs code no exemplo-um") vai para o
-    Claude Code, nunca vira acao local. Cada uma das frases que o Reviewer
-    reproduziu na tentativa 1 esta aqui como caso proprio;
+    Claude Code, nunca vira acao local. Cada uma das frases que ja viraram
+    acao local por engano esta aqui como caso proprio;
   * o nome do projeto nao e adivinhado — "exemplo dos", "exemplo doido" e
-    "exemplo-dois-privado" nao sao "exemplo-dois" (D4: nunca "o mais
+    "exemplo-dois-privado" nao sao "exemplo-dois" (nunca "o mais
     parecido");
   * as guardas da D5 e a leitura da D12 fixada pela D52;
-  * D58a/D58b (T7): as MESMAS cinco acoes reconhecidas em ingles, e a regra
+  * D58a/D58b: as MESMAS cinco acoes reconhecidas em ingles, e a regra
     das duas listas brancas (PT+EN) a funcionar sem nenhuma deteccao de
     lingua — `TestListaBrancaInglesa` cobre as 20 intencoes de
     `tests/voz/frases-en.md`, `TestRegraDasDuasListasD58b` cobre o mecanismo
@@ -90,7 +90,7 @@ class TestListaBrancaAcoesLocais(BaseRouter):
         self.assertEqual(resultado.argumento, "data")
 
     def test_horas_e_data_sao_distinguidas_pelo_argumento(self) -> None:
-        # A T5 tem de saber qual das duas dizer sem reinterpretar a frase.
+        # Quem executa tem de saber qual das duas dizer sem reinterpretar a frase.
         self.assertEqual(encaminhar("qual é a hora", self.config).argumento, "horas")
         self.assertEqual(encaminhar("qual é a data de hoje", self.config).argumento, "data")
 
@@ -156,18 +156,17 @@ class TestListaBrancaAcoesLocais(BaseRouter):
         self.assertEqual(resultado.argumento, str(CAMINHO_UM))
 
     def test_acao_local_nunca_leva_texto_de_claude(self) -> None:
-        # Contrato do router (D48.2): uma acao local descreve-se por nome e
+        # Contrato do router: uma acao local descreve-se por nome e
         # argumento, nunca carrega o campo `texto` (que e so para o Claude Code).
         resultado = encaminhar("que horas são", self.config)
         self.assertIsNone(resultado.texto)
 
 
 class TestListaBrancaEstaFechada(BaseRouter):
-    """D4: conter o gatilho nao chega — a frase INTEIRA tem de ser o comando.
+    """Conter o gatilho nao chega — a frase INTEIRA tem de ser o comando.
 
-    Cada caso e uma frase que a tentativa 1 transformou em acao local (medido
-    pelo Reviewer, docs/forja/reports/T4-a1-review.md, bloqueador 1). Todas
-    tem de ir como texto para o Claude Code.
+    Cada caso e uma frase que uma versao anterior transformou em acao local.
+    Todas tem de ir como texto para o Claude Code.
     """
 
     def test_pedido_ao_claude_que_menciona_o_vs_code_nao_abre_nada(self) -> None:
@@ -208,14 +207,14 @@ class TestListaBrancaEstaFechada(BaseRouter):
 
 
 class TestNomeDeProjetoNaoEAdivinhado(BaseRouter):
-    """D4: nunca "o mais parecido". Casos medidos pelo Reviewer (bloqueador 2)."""
+    """Nunca "o mais parecido". Casos medidos numa versao anterior."""
 
     def test_nome_parecido_com_palavra_diferente_nao_abre_o_vs_code(self) -> None:
-        # "exemplo doido" batia 0.88 com exemplo-dois na tentativa 1.
+        # "exemplo doido" batia 0.88 com exemplo-dois numa versao anterior.
         self.assertVaiParaClaude("abre o vs code no exemplo doido")
 
     def test_nome_parecido_numa_palavra_curta_nao_abre_a_pasta(self) -> None:
-        # "exemplo dos" batia 0.957 com exemplo-dois na tentativa 1.
+        # "exemplo dos" batia 0.957 com exemplo-dois numa versao anterior.
         self.assertVaiParaClaude("abre a pasta do exemplo dos")
 
     def test_projeto_desconhecido_que_contem_um_conhecido_nao_abre_a_pasta(self) -> None:
@@ -271,7 +270,7 @@ class TestGuardaDeTokensEFalsosDespertares(BaseRouter):
         self.assertEqual(resultado.tipo, "nada")
 
     def test_ruido_conhecido_do_stt_devolve_nada(self) -> None:
-        # Alucinacao tipica do Whisper sobre um trecho de silencio/ruido (D51).
+        # Alucinacao tipica do Whisper sobre um trecho de silencio/ruido.
         resultado = encaminhar("Obrigado por assistir!", self.config)
         self.assertEqual(resultado.tipo, "nada")
 
@@ -285,7 +284,7 @@ class TestGuardaDeTokensEFalsosDespertares(BaseRouter):
         self.assertTrue(resultado.confianca_verificada)
 
     def test_sem_confianca_o_resultado_diz_que_a_guarda_nao_correu(self) -> None:
-        # Nit do Reviewer: na cadeia viva (T6) e preciso ver no log quando a
+        # Na cadeia viva e preciso ver no log quando a
         # metade "confianca" da guarda da D5 nao foi aplicada.
         resultado = encaminhar("que horas são", self.config)
         self.assertEqual(resultado.tipo, "local")
@@ -314,7 +313,7 @@ class TestProibicaoPermanenteDeOrdensFinanceiras(BaseRouter):
         self.assertVaiParaClaude("qual é o saldo da minha carteira na corretora")
 
     def test_vocabulario_financeiro_comum_fica_etiquetado_no_motivo(self) -> None:
-        # Sem portao, mas o motivo D12 tem de ficar no log (nit do Reviewer).
+        # Sem portao, mas o motivo financeiro tem de ficar no log.
         resultado = encaminhar("compramos acoes na bolsa quando o trading acalmar", self.config)
         self.assertEqual(resultado.tipo, "claude")
         self.assertIn("D12", resultado.motivo)
@@ -340,15 +339,15 @@ class TestProibicaoPermanenteDeOrdensFinanceiras(BaseRouter):
 
 
 class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
-    """D62: residuo da wake word tirado do INICIO, antes do encaminhamento.
+    """Residuo da wake word tirado do INICIO, antes do encaminhamento.
 
     Casos e citacoes de linha vindos de logs/jarvis-2026-09-20.log (a janela
-    do teste real, 10:09-10:20 do dia 20 set 2026) e da propria D62
-    (docs/forja/DECISIONS.md) onde nao ha uma linha de log para citar.
+    do teste real, 10:09-10:20 do dia 20 set 2026) e da especificacao da
+    limpeza, onde nao ha uma linha de log para citar.
     """
 
     def test_jarvis_colado_ao_inicio_vira_acao_local_das_horas(self) -> None:
-        # O proprio exemplo da D62 (docs/forja/DECISIONS.md): "jarvis, que
+        # O exemplo da especificacao: "jarvis, que
         # horas sao" falha onde "que horas sao" passa — sem "hey", para
         # provar que o residuo de uma so palavra tambem e removido (nao ha
         # linha de log para este caso: e o exemplo escrito na decisao).
@@ -360,7 +359,7 @@ class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
 
     def test_hey_jarvis_colado_ao_inicio_vira_acao_local_das_horas(self) -> None:
         # logs/jarvis-2026-09-20.log linha 138 e 613 ("diz: 'hey jarvis, que
-        # horas sao?'" — o guiao de arranque exibido ao Sponsor nesta janela
+        # horas sao?'" — o guiao de arranque exibido ao utilizador nesta janela
         # do teste real, a mesma frase que a wake word cola a transcricao).
         resultado = encaminhar("hey jarvis, que horas sao", self.config)
         self.assertEqual(resultado.tipo, "local")
@@ -370,8 +369,8 @@ class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
 
     def test_jorvis_que_oracao_vai_para_claude_e_nao_executa_nada(self) -> None:
         # logs/jarvis-2026-09-20.log linha 647: a transcricao real do teste do
-        # Sponsor saiu 'Jorvis, que oração!' em vez de 'Jarvis, que horas
-        # são!'. PROIBIDO o dicionario de enganos (D62/D4/D5/D9): 'jorvis' e
+        # utilizador saiu 'Jorvis, que oração!' em vez de 'Jarvis, que horas
+        # são!'. PROIBIDO o dicionario de enganos: 'jorvis' e
         # um residuo conhecido da wake word e sai do inicio, mas o que sobra —
         # 'que oracao' — NUNCA e mapeado para 'que horas sao'. Tem de seguir
         # como texto para o Claude Code, sem executar accao nenhuma.
@@ -383,8 +382,8 @@ class TestLimpezaDoResiduoDaPalavraDeAtivacao(BaseRouter):
         self.assertEqual(resultado.residuo_removido, "jorvis")
 
     def test_hei_jarvis_e_ei_jarvis_tambem_sao_residuo_conhecido(self) -> None:
-        # Variantes da lista fechada da D62 que nao vieram do log mas estao
-        # nomeadas no criterio de aceitacao da task.
+        # Variantes da lista fechada que nao vieram do log mas estao
+        # nomeadas na especificacao.
         resultado_hei = encaminhar("hei jarvis, que horas sao", self.config)
         self.assertEqual(resultado_hei.tipo, "local")
         self.assertEqual(resultado_hei.nome_acao, "horas_e_data")
@@ -425,7 +424,7 @@ class TestListaBrancaInglesa(BaseRouter):
     As 20 frases desta classe sao as 20 intencoes de `tests/voz/frases-en.md`
     (mesma numeracao, mesmos marcadores `<projeto-1>`/`<projeto-2>`
     substituidos pelos projetos ficticios "exemplo-um"/"exemplo-dois" da
-    `_config_ficticia()`, D10). Zero acoes novas: as dez `local` sao as
+    `_config_ficticia()`). Zero acoes novas: as dez `local` sao as
     mesmas cinco acoes da D4 e as dez `claude` reproduzem os mesmos motivos
     ja testados em portugues (negacao, destinatario explicito, projeto
     desconhecido, vocabulario financeiro generico, gatilho a meio da frase).
@@ -515,7 +514,7 @@ class TestListaBrancaInglesa(BaseRouter):
         self.assertVaiParaClaude("open the folder for the ghost project")
 
     def test_15_vocabulario_financeiro_generico_vai_para_claude(self) -> None:
-        # "invest"/"stocks", nunca "buy"/"sell"/"order"/"trade" (D64/D52: a
+        # "invest"/"stocks", nunca "buy"/"sell"/"order"/"trade" (a
         # lista branca inglesa nao tem nenhum verbo de compra/venda).
         self.assertVaiParaClaude("invest some money in stocks for me right now")
 
@@ -543,7 +542,7 @@ class TestListaBrancaInglesa(BaseRouter):
 
 class TestCortesiasEResiduoAceitamVariantesInglesas(BaseRouter):
     """D58a: as cortesias de fronteira e a limpeza do residuo da wake word
-    (T6/D62) tambem aceitam as variantes inglesas, nao so as portuguesas."""
+    tambem aceitam as variantes inglesas, nao so as portuguesas."""
 
     def test_hey_jarvis_com_frase_inglesa_remove_o_mesmo_residuo(self) -> None:
         # "hey jarvis" ja e a variante que o prefixo da medicao da D53 usa

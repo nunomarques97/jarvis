@@ -1,8 +1,8 @@
 r"""Corre a escada do canal para o Claude Code e escreve o ficheiro de prova.
 
-Testa, por esta ordem e com 60 s de limite por degrau (D40/D8, TECHNOLOGY.md S6):
+Testa, por esta ordem e com 60 s de limite por degrau:
 
-  1   Remote Control da app  -> VETADO (D40/D31): nao e tentado, e documentado.
+  1   Remote Control da app  -> VETADO: nao e tentado, e documentado.
   2a  CLI claude em stream-json sobre subprocess.Popen.
   2b  O mesmo sobre pywinpty (so corre se o 2a falhar: a D46 autoriza instalar
       o pywinpty apenas nesse caso).
@@ -12,10 +12,10 @@ Testa, por esta ordem e com 60 s de limite por degrau (D40/D8, TECHNOLOGY.md S6)
 
 A frase de teste e exatamente "responde apenas OK". Um degrau so PASSA se a
 resposta do modelo voltar em texto para dentro deste processo. A sessao filha
-corre nesta pasta (D12) e sem ferramenta nenhuma.
+corre nesta pasta e sem ferramenta nenhuma.
 
-Depois da escada correm SEMPRE seis provas negativas de seguranca (D48), que
-sao a resposta ao SECURITY-REJECT da tentativa 1: uma frase com aspas e `&` nao
+Depois da escada correm SEMPRE seis provas negativas de seguranca, que
+fecham os dois achados de uma revisao de seguranca: uma frase com aspas e `&` nao
 executa nada, e o valor de uma variavel de ambiente nunca entra no prompt. Elas
 passam quando nada acontece, e o ficheiro de prova leva-as escritas — e assim
 que um "PASS" da escada deixa de poder esconder uma injecao.
@@ -165,10 +165,10 @@ def anunciar(resultado: ResultadoDegrau) -> None:
         print(f"      {primeira[:160]}", flush=True)
 
 
-# --- Prova de seguranca: os dois bloqueadores da tentativa 1 (D48) --------
+# --- Prova de seguranca: os dois achados da revisao de seguranca ------
 #
-# Sao testes NEGATIVOS: passam quando nada acontece. Rebentavam no codigo da
-# tentativa 1 (o alvo era o shim claude.CMD e a frase ia em argv) e tem de
+# Sao testes NEGATIVOS: passam quando nada acontece. Rebentavam no codigo
+# anterior (o alvo era o shim claude.CMD e a frase ia em argv) e tem de
 # continuar a correr em cada execucao, porque e a unica forma de a prova nao
 # voltar a ser um "PASS" silencioso por cima de uma injecao.
 
@@ -176,7 +176,7 @@ MARCA_INJECAO = "EXECUTADO_PELA_INJECAO"
 VARIAVEL_FALSA = "JARVIS_PROVA_SEGREDO_FALSO"
 VALOR_FALSO = "SEGREDO-FALSO-DO-TESTE-0000"
 #: Nome usado na sonda de mecanismo, com um valor falso: e o mesmo nome do
-#: achado do Security Reviewer. Nunca e definido para o processo `claude`
+#: achado da revisao de seguranca. Nunca e definido para o processo `claude`
 #: (definir uma ANTHROPIC_API_KEY mudaria a autenticacao da sessao filha), so
 #: para o gravador local que nao fala com ninguem.
 VARIAVEL_DA_SONDA = "ANTHROPIC_API_KEY"
@@ -275,7 +275,7 @@ def provas_de_seguranca(limite_s: float) -> list[ProvaSeguranca]:
                 titulo="Injecao de comandos: o shim .CMD executa a frase, o executavel real nao",
                 estado="PASS" if (criou_pelo_shim and not criou_pelo_exe) else "FAIL",
                 criterio=(
-                    "controlo (shim .cmd, o que a tentativa 1 fazia): cria o ficheiro; "
+                    "controlo (shim .cmd, o que o codigo anterior fazia): cria o ficheiro; "
                     "caminho em vigor (executavel real + lista de argumentos): nao cria nada"
                 ),
                 obtido=(
@@ -353,13 +353,13 @@ def provas_de_seguranca(limite_s: float) -> list[ProvaSeguranca]:
                 criterio=f"extensao fora de {list(EXTENSOES_QUE_PASSAM_PELO_SHELL)}",
                 obtido=f"{alvo_em_vigor}  (extensao {sufixo or 'nenhuma'})",
                 detalhes=[
-                    f"para contraste, o que o shutil.which devolvia e a tentativa 1 usava: "
+                    f"para contraste, o que o shutil.which devolvia e o codigo anterior usava: "
                     f"{shutil.which('claude')}",
                 ],
             )
         )
 
-        # P5 - degrau 4 a serio, com o payload de injecao do Security Reviewer.
+        # P5 - degrau 4 a serio, com o payload de injecao da revisao de seguranca.
         marca_real = pasta / "MARCA_DEGRAU_4.txt"
         payload_real = f'ola" & echo {MARCA_INJECAO} > {marca_real} & "'
         antes_repo = sorted(p.name for p in RAIZ.iterdir())
@@ -386,8 +386,8 @@ def provas_de_seguranca(limite_s: float) -> list[ProvaSeguranca]:
                     f"estado do degrau: {r_injecao.estado}",
                     "resposta do modelo (a frase foi tratada como texto): "
                     + (r_injecao.resposta.replace("\n", " ")[:400] or r_injecao.erro[:400]),
-                    "na tentativa 1 este mesmo payload criava o ficheiro E o degrau "
-                    "reportava PASS na mesma (SECURITY-REJECT, T2-a1-security.md)",
+                    "no codigo anterior este mesmo payload criava o ficheiro E o degrau "
+                    "reportava PASS na mesma",
                 ],
             )
         )
@@ -445,7 +445,7 @@ def anunciar_prova(prova: ProvaSeguranca) -> None:
 def secao_das_provas(provas: list[ProvaSeguranca]) -> str:
     falhas = [p for p in provas if p.estado != "PASS"]
     linhas = [
-        "## Prova de seguranca (D48) — testes negativos dos dois bloqueadores da tentativa 1",
+        "## Prova de seguranca — testes negativos dos dois achados da revisao de seguranca",
         "",
         "Correm em cada execucao deste script. Passam quando **nada acontece**: sao a unica "
         "forma de um PASS da escada nao voltar a esconder uma injecao.",
@@ -532,7 +532,7 @@ def escrever_prova(
     escolhido = passaram[0] if passaram else None
     caminho.parent.mkdir(parents=True, exist_ok=True)
     cabecalho = [
-        "# Prova — canal para o Claude Code (T2, escada da D40/D8)",
+        "# Prova — canal para o Claude Code (escada de transportes)",
         "",
         f"Gerado por `scripts/testar_canal.py` em {time.strftime('%Y-%m-%d %H:%M:%S')} "
         f"(duracao total: {time.monotonic() - inicio:.1f} s).",
@@ -627,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     provas: list[ProvaSeguranca] = []
     if not argumentos.sem_prova_seguranca:
         print()
-        print("prova de seguranca (D48): testes negativos dos dois bloqueadores da tentativa 1")
+        print("prova de seguranca: testes negativos dos dois achados da revisao de seguranca")
         provas = provas_de_seguranca(argumentos.timeout)
         for prova in provas:
             anunciar_prova(prova)

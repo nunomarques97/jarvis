@@ -1,20 +1,21 @@
 r"""Encaminhador deterministico do jarvis: lista branca FECHADA da D4.
 
 Decide, para uma frase ja transcrita, uma de tres saidas — nunca mais que
-isso, e nunca com um LLM no meio (D9, o Ollama nao entra neste run):
+isso, e nunca com um LLM no meio (o Ollama nao entra neste run):
 
   "local"  - a frase INTEIRA e um comando da lista branca fechada da D4 E,
              quando o comando precisa de um projeto, esse projeto esta na
              configuracao. Devolve so a DESCRICAO da acao (`nome_acao` mais
-             `argumento`), nunca a executa (D48.2 — quem executa e a T5; um
+             `argumento`), nunca a executa (quem executa e
+             `jarvis.acoes_locais`; um
              caminho ou nome lido da configuracao e entrada externa e nunca
              entra numa linha de comandos aqui).
   "claude" - tudo o resto: perguntas, conversa, uma frase que apenas CONTEM
              um gatilho da lista branca, um comando sem projeto identificavel
              (ambiguo), um projeto que nao esta na configuracao, e qualquer
-             frase de dominio financeiro (D12 — segue como TEXTO, nunca como
+             frase de dominio financeiro (segue como TEXTO, nunca como
              acao; ver "D12" mais abaixo).
-  "nada"   - guarda de tokens e de falsos despertares (D5): transcricao
+  "nada"   - guarda de tokens e de falsos despertares: transcricao
              vazia, mais curta que o minimo, com confianca abaixo do limiar
              (quando a chamada fornece uma), ou reconhecida como ruido/
              alucinacao tipica do STT sobre silencio. Nunca chega ao Claude
@@ -27,25 +28,25 @@ A lista branca fechada da D4, por esta ordem de deteccao:
   (d) calar / cala-te;
   (e) adormecer e acordar o jarvis.
 
-LIMPEZA DO RESIDUO DA PALAVRA DE ATIVACAO (D62, causa-raiz do defeito 1):
+LIMPEZA DO RESIDUO DA PALAVRA DE ATIVACAO (causa-raiz do defeito 1):
 o microfone continua aberto depois da deteccao da wake word, por isso o audio
 dela entra muitas vezes na janela transcrita e cola-se ao INICIO da frase
 ("jarvis, que horas sao" em vez de "que horas sao"). Antes de qualquer outra
 coisa, `encaminhar()` tira do inicio da frase normalizada um residuo dessa
 palavra, a partir da lista FECHADA e pequena `RESIDUOS_PALAVRA_DE_ATIVACAO`
-(nunca aproximacao/fuzzy — essa fica para a D62.3, fora desta task). So o
+(nunca aproximacao/fuzzy). So o
 INICIO: nunca toca no meio nem no fim da frase, e nunca esvazia a frase (um
 residuo que seria a frase toda fica tal e qual, porque nesse caso a guarda da
 D5 ja trata o caso como "nada", nunca como comando). O que foi removido fica
 em `ResultadoRouter.residuo_removido`, para o log da etapa 3 (jarvis/app.py)
-poder explicar ao Sponsor, numa frase, porque e que "jarvis, que horas sao"
+poder explicar ao utilizador, numa frase, porque e que "jarvis, que horas sao"
 virou a mesma accao que "que horas sao". PROIBIDO o dicionario de enganos: uma
 transcricao que nao e um residuo conhecido da wake word colado a um comando
 da lista branca NUNCA vira essa accao por adivinhacao — "jorvis, que oracao"
 fica fora da lista branca e segue como texto para o Claude Code, exactamente
-como antes desta limpeza (D4/D5/D9, inaceitavel n.1 do PRODUCT-PROFILE).
+como antes desta limpeza (uma accao local por adivinhacao e inaceitavel).
 
-COMO A LISTA BRANCA E FECHADA (corrige o bloqueador 1 da revisao da T4 a1):
+COMO A LISTA BRANCA E FECHADA:
 cada padrao e casado com `re.fullmatch` contra a frase NORMALIZADA INTEIRA,
 nunca com `search`. Uma frase que apenas contenha o gatilho ("diz ao claude
 para abrir um ticket sobre o vs code no exemplo-um") nao casa com nada e vai
@@ -57,7 +58,7 @@ guardas explicitas mandam para o Claude Code qualquer frase com negacao
 ("nao abras o vs code no exemplo-um") ou com destinatario explicito ("diz ao
 claude...", "pergunta...", "manda...", "escreve...").
 
-COMO O PROJETO E RECONHECIDO (corrige o bloqueador 2): o padrao captura o
+COMO O PROJETO E RECONHECIDO: o padrao captura o
 fragmento que vem depois do objeto do comando, e SO esse fragmento e
 comparado com os nomes da configuracao — nunca a frase toda, nunca por
 substring. A comparacao e palavra a palavra: mesmo numero de palavras e cada
@@ -65,8 +66,7 @@ palavra igual, tolerando um unico erro de escrita dentro de palavras longas
 (>= 6 letras). Uma palavra diferente ("exemplo dos", "exemplo doido") ou uma
 palavra a mais ("exemplo dois privado") nao e o projeto: vai para o Claude
 Code. Se mais do que um projeto conhecido bater, e ambiguo e vai tambem para
-o Claude Code. O router nunca escolhe "o mais parecido" (D4, e prioridade
-nao funcional 2 do PRODUCT-PROFILE).
+o Claude Code. O router nunca escolhe "o mais parecido".
 
 D12 (proibicao permanente), como a D52 a fixou: a garantia e a lista branca,
 nao um regex de nomes. Nenhuma das cinco acoes da D4 consegue negociar,
@@ -75,7 +75,7 @@ ja vai como texto. O `PADRAO_FINANCEIRO` corre DEPOIS da lista branca e serve
 so para carimbar o motivo D12 no log dessas frases. Nao existe nenhuma lista
 de nomes proibidos, em codigo ou em configuracao. "Abre o VS Code no
 <projeto>" e "abre a pasta do <projeto>" continuam a ser acao local para
-QUALQUER projeto da configuracao privada (D52.5).
+QUALQUER projeto da configuracao privada.
 
 A deteccao e so regex + comparacao de texto (difflib) contra os nomes de
 projeto da configuracao — determinista, sem inferencia nenhuma.
@@ -113,7 +113,7 @@ from jarvis.config import Config, Projeto
 TipoResultado = Literal["local", "claude", "nada"]
 
 #: Comprimento minimo, em caracteres apos strip(), para uma transcricao ser
-#: sequer considerada (D5). Mais curto do que isto e "sem fala util", nao
+#: sequer considerada. Mais curto do que isto e "sem fala util", nao
 #: ambiguidade — cai na guarda "nada", nunca no Claude Code.
 COMPRIMENTO_MINIMO_CARACTERES = 4
 
@@ -121,15 +121,15 @@ COMPRIMENTO_MINIMO_CARACTERES = 4
 #: chamada fornece uma confianca, ela e comparada com este limiar. O que nao
 #: se pode inventar e um valor quando a chamada nao mede nenhum — nesse caso
 #: `ResultadoRouter.confianca_verificada` vem False e o log tem de o dizer.
-#: NOTA PARA A T6 (cadeia viva): passar SEMPRE a confianca do transcritor a
+#: NOTA PARA A CADEIA VIVA (jarvis/app.py): passar SEMPRE a confianca do transcritor a
 #: encaminhar(); um resultado com confianca_verificada=False significa que a
 #: metade "confianca" da guarda da D5 nao correu naquela frase.
 CONFIANCA_MINIMA = 0.35
 
 #: Lista FECHADA e pequena das variantes escritas do residuo da palavra de
-#: ativacao (D62), depois de `_normalizar()` (minusculas, sem acentos, sem
+#: ativacao, depois de `_normalizar()` (minusculas, sem acentos, sem
 #: pontuacao). So o que esta aqui e o que a medicao das 20 frases mostrou que
-#: aparece de facto (D62) conta como residuo — nada de aproximacao/fuzzy.
+#: aparece de facto conta como residuo — nada de aproximacao/fuzzy.
 #: Ordem: variantes de duas palavras primeiro, para que "hey jarvis" nao pare
 #: a meio em "hey" sozinho; "jorvis" e a grafia que o log real mostrou (linha
 #: 647 de logs/jarvis-2026-09-20.log, "Jorvis, que oração!").
@@ -144,7 +144,7 @@ RESIDUOS_PALAVRA_DE_ATIVACAO: tuple[str, ...] = (
 #: Correspondencias EXATAS (depois de normalizar) que o Whisper produz
 #: tipicamente sobre silencio/ruido de fundo em vez de nao dizer nada — a D51
 #: documenta "Obrigado por assistir!" sobre um WAV de ruido branco isolado.
-#: Uma frase real do Sponsor que por acaso contenha estas palavras no meio de
+#: Uma frase real do utilizador que por acaso contenha estas palavras no meio de
 #: mais texto NAO cai aqui (e comparacao exata da frase inteira, nao uma
 #: palavra solta), so a alucinacao completa e tratada como ruido.
 FRASES_DE_RUIDO_CONHECIDAS = frozenset(
@@ -173,7 +173,7 @@ PADRAO_FINANCEIRO = re.compile(
     r"|investe|investem|investi|investir|investimento(s)?"
     # A grafia inglesa da palavra "cripto" fica deliberadamente de fora: e a
     # unica forma de a verificacao de fecho da D52.1 dar zero linhas, e a
-    # forma portuguesa cobre a fala do Sponsor. Uma frase com a grafia
+    # forma portuguesa cobre a fala do utilizador. Uma frase com a grafia
     # inglesa continua a ir como texto para o Claude Code; so o motivo no log
     # fica generico.
     r"|cripto|criptomoeda(s)?|bitcoin(s)?|ethereum|altcoin(s)?"
@@ -184,7 +184,7 @@ PADRAO_FINANCEIRO = re.compile(
 # --- Guardas que mandam sempre para o Claude Code ---------------------------
 
 #: Negacao em qualquer ponto da frase: "nao abras o vs code no exemplo-um" nao
-#: e uma ordem de abrir. Uma frase negada nunca vira acao local (D4). D58a:
+#: e uma ordem de abrir. Uma frase negada nunca vira acao local. D58a:
 #: as MESMAS regras valem em ingles — "do not"/"never"/"not" (a forma
 #: contraida "don't" chega aqui ja normalizada para "don t" por `_normalizar`,
 #: por isso as formas contraidas entram com o espaco literal).
@@ -199,7 +199,7 @@ PADRAO_NEGACAO = re.compile(
 #: claude...", "pergunta...", "manda...", "escreve...", "tell claude...",
 #: "ask claude..."), logo e texto, nunca um comando local. "diz-me as horas" /
 #: "tell me the time" sao excecao (o destinatario e o proprio jarvis), por
-#: isso o lookahead deixa passar "me"/"nos"/"us" (D58a).
+#: isso o lookahead deixa passar "me"/"nos"/"us".
 PADRAO_DESTINATARIO = re.compile(
     r"\b(diz|diga|digas|dizer|pergunta|pergunte|perguntar|manda|mande|mandar"
     r"|escreve|escreva|escrever|pede|peca|pedir|envia|envie|enviar"
@@ -283,12 +283,12 @@ PADRAO_ABRIR_PASTA = re.compile(
     r"\s+(?P<projeto>[a-z0-9][a-z0-9\s]*)"
 )
 
-# --- Lista branca fechada da D4, formulacoes inglesas (D58a) ----------------
+# --- Lista branca fechada da D4, formulacoes inglesas ----------------
 #
-# MESMAS CINCO ACOES, traduzidas — zero acoes novas (D63). Nenhum verbo de
-# compra/venda entra aqui (D12/D52/D64: nem "buy", nem "sell", nem "order",
-# nem "trade", nem "broker", nem "wallet") e nenhum nome real de projeto
-# (D10/D64): o grupo `projeto` continua a capturar so a cauda do comando, tal
+# MESMAS CINCO ACOES, traduzidas — zero acoes novas. Nenhum verbo de
+# compra/venda entra aqui (nem "buy", nem "sell", nem "order",
+# nem "trade", nem "broker", nem "wallet") e nenhum nome real de projeto:
+# o grupo `projeto` continua a capturar so a cauda do comando, tal
 # e qual a versao portuguesa, comparada com os mesmos nomes da configuracao.
 #
 # Prefixo tolerado de "tell me" nas perguntas de horas e data — o equivalente
@@ -504,8 +504,8 @@ def _normalizar(texto: str) -> str:
 def _remover_residuo_wake_word(normalizado: str) -> tuple[str, str | None]:
     """Tira do INICIO da frase normalizada um residuo conhecido da wake word.
 
-    So a lista FECHADA `RESIDUOS_PALAVRA_DE_ATIVACAO` conta (D62): nada de
-    aproximacao/fuzzy (D62.3, fora desta task). Remove no maximo um residuo,
+    So a lista FECHADA `RESIDUOS_PALAVRA_DE_ATIVACAO` conta: nada de
+    aproximacao/fuzzy. Remove no maximo um residuo,
     uma unica vez — a wake word so acontece uma vez por frase. Nunca esvazia
     a frase: se o residuo fosse a frase toda, nao se remove nada (a guarda de
     tokens da D5, mais acima em `encaminhar()`, ja trata isso como "nada").
@@ -611,7 +611,7 @@ def _projeto_do_fragmento(
 
     Nao ha "melhor candidato": cada projeto e avaliado por um criterio
     absoluto e, se mais do que um bater, a frase e ambigua e vai para o
-    Claude Code (D4).
+    Claude Code.
     """
     for candidato in _candidatos_do_fragmento(fragmento):
         correspondencias = [p for p in projetos if _nome_bate(candidato, p.nome)]
@@ -625,7 +625,7 @@ def _projeto_do_fragmento(
 
 @dataclass(frozen=True)
 class ResultadoRouter:
-    """A decisao do router: nunca executa nada, so descreve (D48.2)."""
+    """A decisao do router: nunca executa nada, so descreve."""
 
     tipo: TipoResultado
     nome_acao: str | None = None
@@ -634,12 +634,12 @@ class ResultadoRouter:
     motivo: str = ""
     #: True so quando quem chamou forneceu uma confianca E ela passou o limiar
     #: da D5. False significa que essa metade da guarda nao correu (ver
-    #: CONFIANCA_MINIMA) — o log da T6 tem de o registar.
+    #: CONFIANCA_MINIMA) — o log da cadeia viva tem de o registar.
     confianca_verificada: bool = False
-    #: O residuo da palavra de ativacao removido do INICIO da frase (D62), tal
+    #: O residuo da palavra de ativacao removido do INICIO da frase, tal
     #: e qual esta em `RESIDUOS_PALAVRA_DE_ATIVACAO` (ex.: "hey jarvis",
     #: "jorvis"), ou None quando nenhum residuo conhecido foi encontrado. Fica
-    #: aqui para o log da etapa 3 (jarvis/app.py) poder explicar ao Sponsor,
+    #: aqui para o log da etapa 3 (jarvis/app.py) poder explicar ao utilizador,
     #: numa frase, o que foi tirado antes do encaminhamento.
     residuo_removido: str | None = None
 
@@ -698,7 +698,7 @@ def encaminhar(
     bruto = texto or ""
     limpo = bruto.strip()
 
-    # --- Guarda de tokens e de falsos despertares (D5) ---------------------
+    # --- Guarda de tokens e de falsos despertares ---------------------
     if not limpo:
         return ResultadoRouter("nada", motivo="transcricao vazia (D5)")
     if len(limpo) < COMPRIMENTO_MINIMO_CARACTERES:
@@ -730,7 +730,7 @@ def encaminhar(
             confianca_verificada=confianca_verificada,
         )
 
-    # --- Limpeza do residuo da palavra de ativacao (D62), ANTES do
+    # --- Limpeza do residuo da palavra de ativacao, ANTES do
     # encaminhamento: so a lista FECHADA RESIDUOS_PALAVRA_DE_ATIVACAO, so no
     # INICIO, nunca no meio nem no fim, nunca esvazia a frase (ver a guarda
     # dentro de `_remover_residuo_wake_word`). O que foi removido viaja em
@@ -753,8 +753,8 @@ def encaminhar(
         return como_texto("frase dirigida a um destinatario: e texto, nunca acao local (D4)")
 
     # --- Lista branca FECHADA da D4/D58a: fullmatch contra a frase inteira,
-    # casada contra AS DUAS listas (PT e EN), sem nenhuma deteccao de lingua
-    # (D58b). Uma recusa por projeto desconhecido nao interrompe a procura:
+    # casada contra AS DUAS listas (PT e EN), sem nenhuma deteccao de lingua.
+    # Uma recusa por projeto desconhecido nao interrompe a procura:
     # outra variante (por exemplo sem a cortesia final) ainda pode ser um
     # comando valido. O primeiro motivo de recusa guarda-se para o log.
     motivo_da_recusa = ""

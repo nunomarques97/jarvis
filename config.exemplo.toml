@@ -1,4 +1,4 @@
-# Exemplo VERSIONADO de config.toml (D10). Copia este ficheiro para
+# Exemplo VERSIONADO de config.toml. Copia este ficheiro para
 # "config.toml" na raiz do repositorio e substitui os valores pelos teus:
 # nome do microfone tal como aparece no Windows, e um projeto por bloco
 # [[projetos]] com o caminho real no teu disco.

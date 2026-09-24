@@ -1,20 +1,19 @@
-r"""Testes do silencio imediato (T4, D60): o Ctrl+C, a saida do processo e o
+r"""Testes do silencio imediato: o Ctrl+C, a saida do processo e o
 "cala-te" calam a voz pelo MESMO mecanismo, e nada novo e falado a seguir.
 
 unittest da biblioteca padrao, mesma convencao de tests/test_app.py e
-tests/test_voz.py (nao ha decisao do Technology Scout para uma framework de
-testes fora da biblioteca padrao).
+tests/test_voz.py (nenhuma framework de testes fora da biblioteca padrao).
 
 NENHUM destes testes abre um dispositivo de audio, arranca o Piper ou toca em
-GPU (D61/S13): o motor de voz e FALSO e o `subprocess.Popen` do wrapper e
+GPU: o motor de voz e FALSO e o `subprocess.Popen` do wrapper e
 substituido por um duplo. O que eles protegem:
 
-  * o wrapper da S12 (`jarvis.voz.MorteDoPiper`): o processo fica guardado
+  * o wrapper que mata o Piper (`jarvis.voz.MorteDoPiper`): o processo fica guardado
     ANTES de `communicate()` bloquear — que e a diferenca toda entre poder e
     nao poder interromper uma sintese em curso — e `matar_agora()` mata-o
     mesmo, de outra thread;
   * a ORDEM obrigatoria de `calar_agora()`: `matar_agora()` primeiro,
-    `stream.stop()` so depois (S12: parar a reproducao com o `piper.exe` vivo
+    `stream.stop()` so depois (parar a reproducao com o `piper.exe` vivo
     deixaria o `stop()` a espera da sintese);
   * as duas linhas de log com timestamps que a D60(4)(b) exige;
   * os TRES gatilhos a passarem pelo mesmo mecanismo: handler de Ctrl+C (antes
@@ -44,7 +43,7 @@ from unittest import mock
 
 from jarvis import app, voz
 from jarvis.app import EstadoDoProcesso, Jarvis, LogDaSessao, RegistoDaFrase
-from jarvis.audio_util import PASTA_EVIDENCIA_FORJA, caminho_evidencia_de_saida
+from jarvis.audio_util import PASTA_EVIDENCIA, caminho_evidencia_de_saida
 from jarvis.config import Config
 from jarvis.voz import ResultadoFala
 
@@ -62,7 +61,7 @@ class VozFalsa:
 
 
 class BaseFalsaDoPiper:
-    """O minimo do `PiperEngine` que o wrapper da S12 toca.
+    """O minimo do `PiperEngine` que o wrapper toca.
 
     Existe para o mixin `MorteDoPiper` ser testavel sem RealtimeTTS e sem
     Piper: os atributos sao os mesmos que a classe real da
@@ -131,7 +130,7 @@ class ProcessoFalso:
 
 
 class TestWrapperDoPiper(unittest.TestCase):
-    """Criterio (1) da T4: o wrapper da S12, sem Piper nenhum."""
+    """O wrapper que mata o Piper, sem Piper nenhum."""
 
     def setUp(self) -> None:
         ProcessoFalso.criados.clear()
@@ -151,7 +150,7 @@ class TestWrapperDoPiper(unittest.TestCase):
         return thread, devolvido
 
     def test_o_comando_do_piper_e_o_mesmo_da_biblioteca(self) -> None:
-        """O cmd_list tem de continuar a ser o do `piper_engine.py` (S12)."""
+        """O cmd_list tem de continuar a ser o do `piper_engine.py`."""
         thread, devolvido = self._sintetizar_noutra_thread()
         processo = self._esperar_pelo_processo()
         processo.acabar_sozinho()
@@ -181,7 +180,7 @@ class TestWrapperDoPiper(unittest.TestCase):
         self.fail("o wrapper nunca chegou a arrancar o processo de sintese")
 
     def test_o_handle_fica_guardado_antes_do_communicate(self) -> None:
-        """O achado critico da S12: sem isto, matar a sintese e impossivel."""
+        """O achado critico: sem isto, matar a sintese e impossivel."""
         visto: list[object] = []
 
         def espreitar() -> object:
@@ -232,7 +231,7 @@ class TestWrapperDoPiper(unittest.TestCase):
         self.assertFalse(self.motor.matar_agora())
 
     def test_o_stop_do_motor_tambem_mata_a_sintese(self) -> None:
-        """`stream.stop()` chama `engine.stop()`: aqui isso mata mesmo (S12)."""
+        """`stream.stop()` chama `engine.stop()`: aqui isso mata mesmo."""
         thread, devolvido = self._sintetizar_noutra_thread()
         processo = self._esperar_pelo_processo()
 
@@ -243,18 +242,18 @@ class TestWrapperDoPiper(unittest.TestCase):
         self.assertTrue(self.motor.parou_na_base, "o stop() da classe-base tem de correr na mesma")
         self.assertEqual(devolvido, [False])
 
-    def test_o_pior_caso_da_s12_cabe_na_fasquia_dos_500_ms(self) -> None:
-        """Achado 3 da S12, o buraco todo: uma sintese VIVA a meio.
+    def test_o_pior_caso_cabe_na_fasquia_dos_500_ms(self) -> None:
+        """O buraco todo: uma sintese VIVA a meio.
 
         O `ProcessoFalso` desta frase nunca acaba sozinho — e o equivalente a
         um `piper.exe` que ainda ia a meio da frase. Sem o wrapper, o
         `stream.stop()` ficava a espera dele (medido no caminho real: 2102 ms,
-        ver docs/forja/evidence/silencio-*.md). Aqui mede-se o caminho
+        com `python -m jarvis.voz --prova-silencio`). Aqui mede-se o caminho
         completo de `calar_agora()` — `matar_agora()` e so depois `stop()` —
-        contra a fasquia da D60, sem Piper, sem audio e sem GPU (D61).
+        contra a fasquia da D60, sem Piper, sem audio e sem GPU.
         """
         stream = StreamFalso()
-        stream.engine = self.motor  # o motor REAL da S12, nao o duplo de voz
+        stream.engine = self.motor  # o motor REAL, nao o duplo de voz
         voz._guardar_voz_ativa(stream)
         self.addCleanup(voz._guardar_voz_ativa, None)
         self.addCleanup(voz.retomar_a_voz)
@@ -268,7 +267,7 @@ class TestWrapperDoPiper(unittest.TestCase):
         thread.join(timeout=ESPERA_MAXIMA_S)
 
         self.assertTrue(processo.matado, "o processo filho ficou vivo")
-        self.assertFalse(thread.is_alive(), "a sintese ficou pendurada: o buraco da S12 continua")
+        self.assertFalse(thread.is_alive(), "a sintese ficou pendurada: o buraco continua")
         self.assertEqual(devolvido, [False], "uma sintese morta nunca devolve sucesso")
         self.assertTrue(self.motor.queue.empty(), "audio de uma sintese morta chegou a fila")
         self.assertLessEqual(
@@ -322,7 +321,7 @@ class StreamFalso:
 
 
 class TestCalarAgora(unittest.TestCase):
-    """Criterio (2): um so mecanismo, com a ordem da S12 e as duas linhas."""
+    """Um so mecanismo, com a ordem certa e as duas linhas."""
 
     def setUp(self) -> None:
         self.addCleanup(voz.retomar_a_voz)
@@ -418,7 +417,7 @@ class TestFalarObedeceAoSilencio(unittest.TestCase):
             # Nada NOVO e falado a seguir: `falar()` nem chega a construir um
             # stream, por isso o motor de voz nunca e acordado outra vez.
             # com_som=True so para chegar ao guarda `esta_calado()` desta
-            # frase (D60); o guarda da D61 (opt-in) e testado a parte.
+            # frase; o guarda da D61 (opt-in) e testado a parte.
             depois = voz.falar("adeus, ate a proxima", com_som=True)
 
         self.assertFalse(thread.is_alive(), "a fala ficou pendurada depois do silencio")
@@ -552,7 +551,7 @@ def _jarvis_de_teste(espia: EspiaDoSilencio, log: LogFalso, falas: list[str]) ->
 
 
 class TestOsTresGatilhos(unittest.TestCase):
-    """Criterio (2) e (3) da T4, do lado do processo: sem microfone, sem voz."""
+    """Os tres gatilhos, do lado do processo: sem microfone, sem voz."""
 
     def setUp(self) -> None:
         self.addCleanup(voz.retomar_a_voz)
@@ -615,7 +614,7 @@ class TestOsTresGatilhos(unittest.TestCase):
         )
 
     def test_o_processo_instala_e_repoe_o_handler_de_ctrl_c(self) -> None:
-        """O handler de sinal cala no instante mais cedo possivel (D60)."""
+        """O handler de sinal cala no instante mais cedo possivel."""
         log = LogFalso()
         handler_antes = signal.getsignal(signal.SIGINT)
         apanhado: list[str] = []
@@ -663,7 +662,7 @@ class TestOsTresGatilhos(unittest.TestCase):
 class TestRuidoDeTerceirosAoCalar(unittest.TestCase):
     """O RealtimeTTS chama "failed ... unknown error" a uma ordem cumprida.
 
-    Mesma regra da T12: descarta-se SO o ruido conhecido e SO durante a janela
+    Mesma regra do ruido do encerramento: descarta-se SO o ruido conhecido e SO durante a janela
     do silenciamento; tudo o resto passa intacto.
     """
 
@@ -695,7 +694,7 @@ class TestNadaAbreDispositivoDeAudio(unittest.TestCase):
         """`voz.falar` so corre nestes testes com `_construir_stream` trocado.
 
         Se algum teste deste ficheiro chamasse o caminho real, arrancaria o
-        `piper.exe` e abriria as colunas do Sponsor. Esta verificacao afirma o
+        `piper.exe` e abriria as colunas do utilizador. Esta verificacao afirma o
         contrario pelo lado observavel: com o modulo calado, `falar()` recusa
         antes de construir seja o que for.
         """
@@ -714,7 +713,7 @@ class TestNadaAbreDispositivoDeAudio(unittest.TestCase):
 
 
 class TestTrancaDoLogEhReentrante(unittest.TestCase):
-    """Bloqueador 1 do Security Reviewer (T4-a1-security.md, item 2):
+    """Regressao de seguranca:
     `LogDaSessao._escrever` tomava um `threading.Lock` (nao reentrante). Um
     SIGINT corre na thread principal entre bytecodes; se cair enquanto essa
     MESMA thread esta dentro de `_escrever` (a tranca ja detida), o handler de
@@ -736,7 +735,7 @@ class TestTrancaDoLogEhReentrante(unittest.TestCase):
         reentrada a seguir nao chegue a bloquear."""
         self.assertIsInstance(
             self.log._tranca, type(threading.RLock()),
-            "LogDaSessao._tranca tem de ser threading.RLock (bloqueador 1, T4/T12)",
+            "LogDaSessao._tranca tem de ser threading.RLock",
         )
 
     def test_reentrar_a_tranca_na_mesma_thread_nao_bloqueia(self) -> None:
@@ -760,14 +759,14 @@ class TestTrancaDoLogEhReentrante(unittest.TestCase):
 
         self.assertFalse(
             watchdog.is_alive(),
-            "deadlock: a tranca do log nao e reentrante na mesma thread (bloqueador 1)",
+            "deadlock: a tranca do log nao e reentrante na mesma thread",
         )
         self.assertEqual(excecoes, [])
         self.assertIn("reentrada dentro da propria tranca", resultado.get("linha", ""))
 
 
 class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
-    """O cenario de producao completo do bloqueador 1: `Jarvis.calar_agora`
+    """O cenario de producao completo da tranca reentrante: `Jarvis.calar_agora`
     (chamado pelo handler de Ctrl+C, `app.py:1324`) escreve no MESMO log que,
     no pior caso, a propria thread principal ja tem detido porque o SIGINT
     caiu a meio de `LogDaSessao._escrever`.
@@ -808,7 +807,7 @@ class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
 
         self.assertFalse(
             watchdog.is_alive(),
-            "deadlock: Ctrl+C nao devolveu com a tranca do log ja detida (bloqueador 1)",
+            "deadlock: Ctrl+C nao devolveu com a tranca do log ja detida",
         )
         self.assertIn("silencio", resultado, "calar_agora nunca chegou a devolver")
         self.assertLess(
@@ -826,11 +825,11 @@ def _instante_ms() -> float:
 
 
 class TestConfinamentoDaEvidencia(unittest.TestCase):
-    """Bloqueador 2 do Security Reviewer (T4-a1-security.md, item 1):
+    """Regressao de seguranca:
     `--evidencia` aceitava qualquer caminho vindo da linha de comandos e
     escrevia fora do repositorio (ou na raiz, nao apanhada pelo
     `.gitignore`). `jarvis.audio_util.caminho_evidencia_de_saida` confina a
-    `docs/forja/evidence/`, mesma forma de `caminho_wav_de_saida`.
+    `PASTA_EVIDENCIA`, mesma forma de `caminho_wav_de_saida`.
     """
 
     def test_aceita_um_relativo_a_raiz_que_cai_dentro_da_pasta_permitida(self) -> None:
@@ -838,11 +837,11 @@ class TestConfinamentoDaEvidencia(unittest.TestCase):
         --saida de scripts/medir_voz.py), por isso tem de vir com o prefixo
         docs/forja/evidence/ para ser aceite."""
         destino = caminho_evidencia_de_saida("docs/forja/evidence/silencio-teste.md")
-        self.assertEqual(destino, (PASTA_EVIDENCIA_FORJA / "silencio-teste.md").resolve())
-        self.assertTrue(destino.is_relative_to(PASTA_EVIDENCIA_FORJA.resolve()))
+        self.assertEqual(destino, (PASTA_EVIDENCIA / "silencio-teste.md").resolve())
+        self.assertTrue(destino.is_relative_to(PASTA_EVIDENCIA.resolve()))
 
     def test_aceita_um_absoluto_dentro_da_pasta_permitida(self) -> None:
-        alvo = PASTA_EVIDENCIA_FORJA / "silencio-absoluto-teste.md"
+        alvo = PASTA_EVIDENCIA / "silencio-absoluto-teste.md"
         destino = caminho_evidencia_de_saida(str(alvo))
         self.assertEqual(destino, alvo.resolve())
 
@@ -859,9 +858,8 @@ class TestConfinamentoDaEvidencia(unittest.TestCase):
 
     def test_recusa_relativo_que_cai_na_raiz_do_repo_nao_ignorada(self) -> None:
         """`--evidencia notas.md` cairia em `<raiz>/notas.md`: dentro do
-        repositorio mas FORA de `docs/forja/evidence/`, e essa raiz nao e
-        apanhada por regra nenhuma do `.gitignore` (ataque (b) do Security
-        Reviewer)."""
+        repositorio mas FORA de `PASTA_EVIDENCIA`, e essa raiz nao e
+        apanhada por regra nenhuma do `.gitignore`."""
         with self.assertRaises(ValueError):
             caminho_evidencia_de_saida("notas.md")
 
@@ -881,7 +879,7 @@ class TestConfinamentoDaEvidencia(unittest.TestCase):
         with tempfile.TemporaryDirectory() as pasta_fora:
             alvo_real = Path(pasta_fora).resolve() / "fuga-verdadeira.md"
             alvo_real.write_text("fora do repo", encoding="utf-8")
-            ligacao = PASTA_EVIDENCIA_FORJA / "ligacao-de-teste.md"
+            ligacao = PASTA_EVIDENCIA / "ligacao-de-teste.md"
             try:
                 ligacao.symlink_to(alvo_real)
             except (OSError, NotImplementedError):

@@ -1,8 +1,8 @@
 r"""Configuracao privada do jarvis: projetos conhecidos, caminhos e microfone.
 
-O ficheiro real (`config.toml`, na raiz do repo) e IGNORADO pelo Git (D10):
-tem os nomes dos projetos do Sponsor e os caminhos reais no disco dele, e este
-repositorio vai ser publico (D1). O que fica versionado e `config.exemplo.toml`,
+O ficheiro real (`config.toml`, na raiz do repo) e IGNORADO pelo Git:
+tem os nomes dos projetos do utilizador e os caminhos reais no disco dele, e este
+repositorio e publico. O que fica versionado e `config.exemplo.toml`,
 com a mesma estrutura mas so dados ficticios (projetos "exemplo-um" e
 "exemplo-dois", caminhos "D:/caminho/para/...") — nunca copiar dados reais para
 esse ficheiro.
@@ -17,14 +17,14 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     caminho = "D:/caminho/para/o/projeto"
 
 `carregar_config()` le com `tomllib` (biblioteca padrao do Python 3.11+, sem
-dependencia nova), valida a estrutura E os caminhos no disco (D50.7: um caminho
+dependencia nova), valida a estrutura E os caminhos no disco (um caminho
 de configuracao e entrada externa e verifica-se na leitura, nao se aceita em
 bruto) e devolve um `Config` imutavel. Erros sao sempre `ConfigError`, com uma
 mensagem legivel que diz o que falhou e onde corrigir.
 
-Este modulo NUNCA executa nada com os valores lidos (D48.2): so os devolve em
-`Projeto`/`Config` para quem precisar deles (o `router` para encaminhar, a T5
-para executar). Nenhum caminho ou nome daqui entra numa linha de comandos.
+Este modulo NUNCA executa nada com os valores lidos: so os devolve em
+`Projeto`/`Config` para quem precisar deles (o `router` para encaminhar,
+`jarvis.acoes_locais` para executar). Nenhum caminho ou nome daqui entra numa linha de comandos.
 
 Uso:
 
@@ -63,7 +63,7 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Projeto:
-    """Um projeto conhecido: o nome que o Sponsor diz e o caminho no disco."""
+    """Um projeto conhecido: o nome que o utilizador diz e o caminho no disco."""
 
     nome: str
     caminho: Path
@@ -130,7 +130,7 @@ def _validar_projeto(item: object, indice: int, caminho: Path) -> tuple[str, str
 
 
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
-    """Resolve e valida o caminho de um projeto no disco (D50.7).
+    """Resolve e valida o caminho de um projeto no disco.
 
     Um caminho vindo do ficheiro de configuracao e entrada externa: resolve-se
     e confirma-se que existe e que e mesmo uma pasta, em vez de o aceitar em
@@ -170,9 +170,9 @@ def carregar_config(
     `validar_caminhos=False` salta so a verificacao de que o caminho de CADA
     projeto existe no disco e e uma pasta (`_resolver_caminho_do_projeto`,
     D50.7); tudo o resto (TOML, [microfone], [[projetos]], duplicados)
-    continua a validar-se sempre. O default e True e e o que toda a T4 usa: a
+    continua a validar-se sempre. O default e True e e o que o router usa: a
     unica excecao aceite e o modo `--simular` de `jarvis/acoes_locais.py`
-    contra o `config.exemplo.toml` VERSIONADO (D10), cujos caminhos
+    contra o `config.exemplo.toml` VERSIONADO, cujos caminhos
     ("D:/caminho/para/...") sao ficticios de proposito e nunca existem em
     disco nenhum — sem esta valvula essa pre-visualizacao nem carregava.
     Uma accao que executa mesmo alguma coisa NUNCA passa False aqui.
@@ -268,7 +268,7 @@ def _autoteste() -> int:
             True,
         )
 
-    # 5. projeto com caminho que nao existe no disco (D50.7).
+    # 5. projeto com caminho que nao existe no disco.
     with tempfile.TemporaryDirectory() as pasta:
         caminho = Path(pasta) / "config.toml"
         caminho.write_text(
@@ -349,7 +349,7 @@ def _autoteste() -> int:
             None,
         )
 
-    # 9. validar_caminhos=False (T5): um caminho ficticio, tipo o do
+    # 9. validar_caminhos=False: um caminho ficticio, tipo o do
     # config.exemplo.toml, continua recusado por omissao mas carrega com a
     # valvula explicita — e o resto da validacao (TOML, [microfone],
     # [[projetos]]) continua a valer.

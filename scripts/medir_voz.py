@@ -1,16 +1,16 @@
 r"""Arnes de medicao com audio SINTETICO das quatro combinacoes da D53
-(PT/EN x com/sem prefixo "hey jarvis") (T1/T7, D7/D34/D53/D58).
+(PT/EN x com/sem prefixo "hey jarvis").
 
-AVISO OBRIGATORIO (D34), repetido no ficheiro de evidencia e em qualquer
+AVISO OBRIGATORIO, repetido no ficheiro de evidencia e em qualquer
 relatorio que use estes numeros: esta medicao usa audio SINTETICO (a propria
 voz Piper pt-PT do jarvis, gerada por `scripts/gerar_wav.py` e transcrita de
-volta por `scripts/transcrever_ficheiro.py` — S11: nao ha voz inglesa neste
+volta por `scripts/transcrever_ficheiro.py` — nao ha voz inglesa neste
 run, por isso a amostra `frases-en.md` tambem sai lida com sotaque pt-PT).
 Isto testa a CADEIA — sintese -> transcricao -> encaminhador — e serve para
 apanhar regressoes de codigo. NAO mede o reconhecimento da voz (nem do
-portugues nem do ingles) do Sponsor e fica PROIBIDO concluir seja o que for
+portugues nem do ingles) do utilizador e fica PROIBIDO concluir seja o que for
 sobre qual lingua ele deve usar com base nestes numeros (protocolo completo
-em tests/voz/frases-pt.md e tests/voz/frases-en.md, D7/D58).
+em tests/voz/frases-pt.md e tests/voz/frases-en.md).
 
 O QUE ESTE SCRIPT FAZ, para cada uma das 20 frases da amostra escolhida
 (`--amostra`, por omissao tests/voz/frases-pt.md):
@@ -18,37 +18,37 @@ O QUE ESTE SCRIPT FAZ, para cada uma das 20 frases da amostra escolhida
   1. substitui os marcadores <projeto-1>/<projeto-2> pelos nomes REAIS da
      configuracao (config.toml se existir; senao degrada para o exemplo
      versionado, config.exemplo.toml, com um aviso escrito — nunca rebenta so
-     por falta de config.toml, D10);
+     por falta de config.toml);
   2. calcula a intencao ESPERADA com `jarvis.router.encaminhar()` sobre a
      frase escrita (a fonte da verdade, nunca um valor fixado a mao);
   3. sintetiza essa frase em WAV com `scripts.gerar_wav.gerar_wav` (reutilizado
-     tal e qual, sem alteracoes — fora de ambito desta task);
+     tal e qual, sem alteracoes);
   4. transcreve o WAV com `scripts.transcrever_ficheiro.transcrever`
      (`initial_prompt=None` por omissao, D51 — a medicao e sempre "seca");
   5. calcula a intencao OBTIDA com o mesmo `encaminhar()` sobre a transcricao;
   6. compara esperado/obtido (acerto de intencao) e calcula o WER
-     (distancia de edicao ao nivel da palavra, Python puro, stdlib — D3,
-     T7: sem jiwer nem qualquer dependencia nova).
+     (distancia de edicao ao nivel da palavra, Python puro, stdlib — sem
+     jiwer nem qualquer dependencia nova).
 
-NUNCA executa a acao nem abre o canal do Claude Code (fora de ambito da T7):
+NUNCA executa a acao nem abre o canal do Claude Code:
 so o texto que o router devolveria e comparado. O audio gerado e temporario
 (escrito dentro de `audio/`, que o .gitignore ja cobre por inteiro) e apagado
 no fim de cada frase, a menos que `--manter-audio` seja passado.
 
-ONDE A EVIDENCIA PODE SER ESCRITA (correcao do SECURITY-REJECT da tentativa 1):
+ONDE A EVIDENCIA PODE SER ESCRITA (correcao de uma revisao de seguranca):
 com um `config.toml` real, o ficheiro produzido leva os NOMES e os CAMINHOS
-ABSOLUTOS reais dos projetos do Sponsor (o router devolve o caminho no campo
+ABSOLUTOS reais dos projetos do utilizador (o router devolve o caminho no campo
 `argumento`). Por isso `--saida` nao aceita um caminho qualquer do disco: tem
 de acabar em `.md` e de cair dentro de `docs/forja/evidence/`, a unica pasta
 deste repositorio que o `.gitignore` apanha para ficheiros `.md`. Mesma regra,
 e pela mesma razao, que `jarvis/audio_util.py::caminho_wav_de_saida` ja aplica
-aos WAV (D1/D10/D48(2): a linha de comandos e entrada externa).
+aos WAV (a linha de comandos e entrada externa).
 
-TESTES SILENCIOSOS POR OMISSAO (D61, TECHNOLOGY.md S13): este e um arnes de
+TESTES SILENCIOSOS POR OMISSAO: este e um arnes de
 medicao — por omissao NAO toca nenhum dispositivo de audio, so escreve e le os
 WAV temporarios de `audio/medir-voz/` (apagados no fim, a menos que
 `--manter-audio`). Ouvir cada frase enquanto e sintetizada e `--com-som`,
-sempre opt-in explicito e nunca uma variavel de ambiente (D61.2).
+sempre opt-in explicito e nunca uma variavel de ambiente.
 
 Uso:
     .venv\Scripts\python scripts/medir_voz.py
@@ -59,9 +59,9 @@ Uso:
     .venv\Scripts\python scripts/medir_voz.py --modelo small
     .venv\Scripts\python scripts/medir_voz.py --com-som
 
-A/B CONTROLADO da deteccao de lingua (D66, ponto 7 — emenda ao metodo da D53):
+A/B CONTROLADO da deteccao de lingua (emenda ao metodo da D53):
 o Piper e estocastico, por isso duas corridas que sintetizam o audio outra vez
-NAO sao comparaveis entre si (na T8 a1 mudaram 79 das 80 transcricoes entre
+NAO sao comparaveis entre si (numa medicao mudaram 79 das 80 transcricoes entre
 duas corridas do mesmo codigo). Para a comparacao ter uma unica variavel, a
 segunda corrida reutiliza os MESMOS WAV:
 
@@ -70,12 +70,12 @@ segunda corrida reutiliza os MESMOS WAV:
     .venv\Scripts\python scripts/medir_voz.py --reutilizar-audio \
         --pasta-audio ab-pt-sem --saida docs/forja/evidence/lingua-ab-fixo-pt-sem-prefixo.md
 
-A primeira liga a detecao frase a frase da S10 (`language=None`) e guarda os
+A primeira liga a detecao frase a frase (`language=None`) e guarda os
 WAV; a segunda le exatamente os mesmos ficheiros e transcreve-os com a lingua
-FIXA, que e o que o produto faz (T8, criterio 6). Cada ficheiro de evidencia
+FIXA, que e o que o produto faz. Cada ficheiro de evidencia
 escreve no cabecalho qual das duas foi e que conjunto de WAV usou. Foi esta
 comparacao que mostrou o acerto de intencao em portugues a descer com a
-detecao ligada, e por isso a T8 reverteu para `language="pt"`.
+detecao ligada, e por isso o produto voltou a `language="pt"`.
 """
 
 from __future__ import annotations
@@ -121,12 +121,12 @@ def _carregar_modulo_irmao(nome: str):
 
     `scripts/` nao e um pacote (sem `__init__.py`), por isso um
     `import gerar_wav` so funciona se `scripts/` estiver no sys.path. Meter la
-    a pasta (o que a tentativa 1 fazia com `sys.path.insert(0, ...)`) punha-a
+    a pasta (o que uma versao anterior fazia com `sys.path.insert(0, ...)`) punha-a
     A FRENTE da biblioteca padrao para TODO o processo — incluindo a suite de
     testes, que importa este modulo: um futuro `scripts/types.py`,
     `scripts/io.py` ou `scripts/re.py` passava a sombrear a stdlib em todo o
     lado. Carregar por caminho explicito tem o mesmo efeito util e nenhum
-    efeito global (nit 3 do Security Reviewer, T7 a1).
+    efeito global.
     """
     chave = f"_jarvis_scripts_{nome}"
     ja_carregado = sys.modules.get(chave)
@@ -153,7 +153,7 @@ CAMINHO_AMOSTRA_PADRAO = RAIZ / "tests" / "voz" / "frases-pt.md"
 PASTA_EVIDENCIA_PADRAO = RAIZ / "docs" / "forja" / "evidence"
 PASTA_AUDIO_TEMPORARIO = PASTA_AUDIO / "medir-voz"
 
-#: Marcadores da amostra (D1/D10): nunca um nome real do Sponsor em ficheiro
+#: Marcadores da amostra: nunca um nome real do utilizador em ficheiro
 #: versionado. Substituidos em runtime pelos nomes da configuracao carregada.
 MARCADOR_PROJETO_1 = "<projeto-1>"
 MARCADOR_PROJETO_2 = "<projeto-2>"
@@ -204,7 +204,7 @@ class LinhaMedida:
     `erro` so e preenchido quando a frase rebentou a meio (sintese, GPU,
     transcricao): nesse caso a linha continua a existir na evidencia, com a
     intencao obtida vazia, acerto False e WER de 100% — o que se perde e a
-    medicao daquela frase, nunca o ficheiro inteiro (nit 3 do Reviewer).
+    medicao daquela frase, nunca o ficheiro inteiro.
     """
 
     numero: int
@@ -224,17 +224,17 @@ class LinhaMedida:
     device_usado: str = "?"
     duracao_audio_s: float = 0.0
     #: So a transcricao (o dict de `transcrever()` traz a chave com este nome);
-    #: o carregamento do modelo esta em `latencia_total_ms`, nao aqui (nit 1 do
-    #: Reviewer, T7 a2: o campo guardava o tempo TOTAL com o nome da parte).
+    #: o carregamento do modelo esta em `latencia_total_ms`, nao aqui (antes o
+    #: campo guardava o tempo TOTAL com o nome da parte).
     latencia_transcricao_ms: float = 0.0
     #: Carregamento do modelo + transcricao. Com a cache ligada (o arnes liga-a)
     #: so a primeira frase paga o carregamento, por isso este numero NAO e
-    #: comparavel com as latencias a frio medidas na T3/T6.
+    #: comparavel com as latencias a frio medidas no jarvis.
     latencia_total_ms: float = 0.0
-    #: T8/D58b: a lingua que a deteccao automatica escolheu para ESTA frase
+    #: A lingua que a deteccao automatica escolheu para ESTA frase
     #: (argmax restrito a {pt, en}), a sua probabilidade, se hesitou e as duas
     #: probabilidades que a decidiram. Nao entra no acerto de intencao — o
-    #: encaminhamento casa sempre contra as DUAS listas brancas (T7) — mas sem
+    #: encaminhamento casa sempre contra as DUAS listas brancas — mas sem
     #: isto na evidencia nao ha como comparar a corrida com `language="pt"`
     #: fixo com a corrida com deteccao automatica.
     lingua: str = "?"
@@ -246,11 +246,11 @@ class LinhaMedida:
     #: `en`, nao entra na escolha do PRODUTO (a coluna `lingua` sai do argmax
     #: RESTRITO), mas foi ELE que DESCODIFICOU o audio: o `language=` da API
     #: publica do faster-whisper aceita um codigo unico e nao uma lista de
-    #: candidatas (S10/D66, ponto 3). A linha fica marcada `lingua-terceira`.
+    #: candidatas. A linha fica marcada `lingua-terceira`.
     lingua_top1: str | None = None
     #: False quando esta corrida NAO detetou lingua nenhuma (transcricao com
-    #: `language` fixo, que e o que o produto faz desde a reversao do criterio
-    #: 6 da T8). A coluna da evidencia tem de escrever FIXA em vez de uma
+    #: `language` fixo, que e o que o produto faz desde a reversao da deteccao).
+    #: A coluna da evidencia tem de escrever FIXA em vez de uma
     #: probabilidade que ninguem mediu.
     lingua_detetada: bool = True
     erro: str | None = None
@@ -260,16 +260,16 @@ class LinhaMedida:
 class Agregados:
     """Os numeros do fim do ficheiro de evidencia.
 
-    Dois WER de proposito, porque nao sao a mesma coisa e o Reviewer da
-    tentativa 1 apanhou a ambiguidade: a macro-media trata as 20 frases por
+    Dois WER de proposito, porque nao sao a mesma coisa e um so seria
+    ambiguo: a macro-media trata as 20 frases por
     igual (uma frase curta mal transcrita pesa tanto como uma longa), o WER de
     corpus pesa cada frase pelo numero de palavras.
 
-    `n_divergentes` (T1, D53): quantas linhas tem o tipo DOCUMENTADO na
+    `n_divergentes`: quantas linhas tem o tipo DOCUMENTADO na
     tabela (`local`/`claude`) diferente do tipo CALCULADO por
     `encaminhar()` sobre a frase sem prefixo (`tipo_esperado`). Sem isto, uma
     amostra cujas frases `local` ainda nao tem lista branca (o caso de
-    `frases-en.md` antes da T7/D58) aparece com acerto de intencao alto so
+    `frases-en.md` antes da lista branca inglesa) aparece com acerto de intencao alto so
     por construcao: a intencao OBTIDA tambem bate `claude` contra `claude`
     assim que a transcricao reproduzir a frase, e isso conta como acerto sem
     a amostra estar a medir o que diz medir.
@@ -292,9 +292,8 @@ def celula_markdown(texto: object) -> str:
 
     A transcricao e saida de um modelo e a frase vem de um ficheiro: um `|` no
     meio parte a linha em mais colunas e o `acerto` que um humano (ou um
-    agente) le passa a ser outra coluna qualquer — foi provado na tentativa 1
-    com a transcricao `isto | NAO | sim | 0.0% | lixo` (nit 2 do Security
-    Reviewer). Escapa-se o `|` e achatam-se as mudancas de linha.
+    programa) le passa a ser outra coluna qualquer — foi provado com a
+    transcricao `isto | NAO | sim | 0.0% | lixo`. Escapa-se o `|` e achatam-se as mudancas de linha.
 
     Limite conhecido e aceite: uma `\\` mesmo antes de um `|` no texto original
     fica ambigua para `dividir_celulas` (o unico consumidor do formato inverso
@@ -339,8 +338,8 @@ def ler_amostra(
     Uma linha de tabela que PARECE uma frase e nao casa (numero mal escrito,
     tipo errado, colunas a mais ou a menos) nao desaparece em silencio: e
     contada, escrita em stderr e acrescentada a `avisos` se a lista for dada
-    (nit 4 do Security Reviewer — uma 21.a frase com um erro na coluna `tipo`
-    era medida como 20 sem ninguem saber).
+    (uma 21.a frase com um erro na coluna `tipo` era medida como 20 sem
+    ninguem saber).
     """
     if not caminho.is_file():
         raise AmostraError(
@@ -360,8 +359,7 @@ def ler_amostra(
             continue  # |----|----| do cabecalho markdown
         # Uma linha de celulas TODAS vazias (`| | | |`) nao e separador nenhum:
         # sem o `celulas_com_texto and`, o `all()` de uma lista vazia dava True
-        # e a linha sumia sem entrar na contagem de avisos (nit 6 do Reviewer,
-        # T7 a2). Cai a baixo e e contada como linha ignorada.
+        # e a linha sumia sem entrar na contagem de avisos. Cai a baixo e e contada como linha ignorada.
         if len(celulas) == 4 and PADRAO_NUMERO.match(celulas[0]) and celulas[1] in TIPOS_DOCUMENTADOS:
             linhas.append(
                 FraseDaAmostra(
@@ -422,36 +420,34 @@ def substituir_marcadores(texto: str, nomes_projetos: Sequence[str]) -> str:
     return texto.replace(MARCADOR_PROJETO_1, nome_1).replace(MARCADOR_PROJETO_2, nome_2)
 
 
-# --- Configuracao, com degradacao clara se config.toml faltar (D10) --------
+# --- Configuracao, com degradacao clara se config.toml faltar --------
 
 
 def carregar_config_para_arnes() -> tuple[Config, str]:
     """config.toml real; se faltar ou for invalido, degrada para o exemplo.
 
-    Nunca rebenta so porque o Sponsor ainda nao criou o config.toml dele
-    (este run nao o tem) — imprime um aviso claro em vez disso, como o ambito
-    da T7 exige, e usa config.exemplo.toml (D10: dados ficticios, sem
+    Nunca rebenta so porque o utilizador ainda nao criou o config.toml dele
+    — imprime um aviso claro em vez disso e usa config.exemplo.toml (dados ficticios, sem
     validar caminhos no disco, que nao existem mesmo).
 
     A ORIGEM devolvida e so o NOME do ficheiro, nunca o caminho absoluto: esse
-    caminho leva o nome de utilizador do Sponsor e vai parar a evidencia
-    (nit 1 do Security Reviewer, mesma classe da D50(5)).
+    caminho leva o nome de utilizador da maquina e vai parar a evidencia.
     """
     try:
-        return carregar_config(), f"{CAMINHO_CONFIG_PADRAO.name} (configuracao real do Sponsor)"
+        return carregar_config(), f"{CAMINHO_CONFIG_PADRAO.name} (configuracao real do utilizador)"
     except ConfigError as erro:
         aviso = (
             f"AVISO: '{CAMINHO_CONFIG_PADRAO.name}' nao encontrado ou invalido "
             f"({erro}); a usar o exemplo versionado '{CAMINHO_EXEMPLO.name}' "
-            "(dados ficticios, D10) so para este arnes correr. Isto NAO substitui "
-            "a medicao real com a configuracao do Sponsor."
+            "(dados ficticios) so para este arnes correr. Isto NAO substitui "
+            "a medicao real com a configuracao do utilizador."
         )
         print(aviso, file=sys.stderr)
         config = carregar_config(CAMINHO_EXEMPLO, validar_caminhos=False)
         return config, f"{CAMINHO_EXEMPLO.name} (fallback; {CAMINHO_CONFIG_PADRAO.name} em falta)"
 
 
-# --- Confinamento do ficheiro de evidencia (D1/D10/D48(2)) ------------------
+# --- Confinamento do ficheiro de evidencia ------------------
 
 
 def caminho_evidencia_de_saida(
@@ -459,19 +455,19 @@ def caminho_evidencia_de_saida(
     pasta_permitida: Path | None = None,
     raiz: Path | None = None,
 ) -> Path:
-    """Valida o `--saida` vindo da linha de comandos (entrada externa, D48(2)).
+    """Valida o `--saida` vindo da linha de comandos (entrada externa).
 
     Duas regras, as duas pela mesma razao: com um `config.toml` real o ficheiro
-    de evidencia leva os NOMES dos projetos do Sponsor e os CAMINHOS ABSOLUTOS
+    de evidencia leva os NOMES dos projetos do utilizador e os CAMINHOS ABSOLUTOS
     deles (o router devolve `argumento=str(projeto.caminho)`), e este
-    repositorio vai ser publico (D1/D10).
+    repositorio e publico.
 
     1. acaba em `.md`;
-    2. fica dentro de `docs/forja/evidence/`. Nao basta "dentro do repositorio":
-       so `docs/forja/` esta no `.gitignore`, logo um `--saida docs/EVIDENCIA.md`,
+    2. fica dentro de `PASTA_EVIDENCIA_PADRAO`. Nao basta "dentro do repositorio":
+       so essa pasta esta no `.gitignore` para `.md`, logo um `--saida docs/EVIDENCIA.md`,
        `--saida README.md` ou `--saida tests/voz/resultado.md` cairia em pasta
-       VERSIONADA. E foi provado na tentativa 1 que sem regra nenhuma o ficheiro
-       chegava a escrever-se FORA do repositorio.
+       VERSIONADA. E foi provado que sem regra nenhuma o ficheiro chegava a
+       escrever-se FORA do repositorio.
 
     Mesma forma e mesma intencao de `jarvis/audio_util.py::caminho_wav_de_saida`.
     Devolve o caminho absoluto ja normalizado; levanta `ValueError` legivel se
@@ -480,7 +476,7 @@ def caminho_evidencia_de_saida(
     pasta = (PASTA_EVIDENCIA_PADRAO if pasta_permitida is None else Path(pasta_permitida)).resolve()
     # Um caminho relativo resolve-se contra a RAIZ do repositorio, como em
     # `caminho_wav_de_saida`, e NAO contra a pasta permitida: senao um
-    # `--saida docs/EVIDENCIA.md` (um dos exemplos do SECURITY-REJECT) era
+    # `--saida docs/EVIDENCIA.md` (um dos exemplos da revisao de seguranca) era
     # aceite em silencio a escrever noutro sitio que nao o que quem escreveu o
     # comando estava a pensar. Fora da pasta permitida recusa-se, ponto.
     raiz_para_relativos = (RAIZ if raiz is None else Path(raiz)).resolve()
@@ -492,14 +488,14 @@ def caminho_evidencia_de_saida(
         raise ValueError(
             f"saida '{valor}': a evidencia so se escreve em ficheiros "
             f"{SUFIXO_DE_EVIDENCIA_PERMITIDO} (este ficheiro leva os nomes e os caminhos "
-            "reais dos projetos do Sponsor, D1/D10)"
+            "reais dos projetos do utilizador)"
         )
     if not caminho.is_relative_to(pasta):
         raise ValueError(
             f"saida '{valor}' cai fora de '{pasta}' (resolvida para {caminho}); a evidencia "
-            "desta medicao leva nomes e caminhos reais do Sponsor e so pode ser escrita na "
+            "desta medicao leva nomes e caminhos reais do utilizador e so pode ser escrita na "
             "unica pasta deste repositorio que o .gitignore apanha para ficheiros .md "
-            "(docs/forja/evidence/) — D1/D10"
+            "(docs/forja/evidence/)"
         )
     return caminho
 
@@ -509,15 +505,14 @@ PADRAO_NOME_DE_PASTA = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def pasta_de_audio_de_saida(nome: str | None, base: Path | None = None) -> Path:
-    """Valida o `--pasta-audio` (entrada externa, D48(2)) e devolve a pasta.
+    """Valida o `--pasta-audio` (entrada externa) e devolve a pasta.
 
     `None` devolve a pasta de sempre (`audio/medir-voz/`), para as corridas que
     nao fazem A/B nao mudarem de comportamento. Com nome, so um nome SIMPLES e
     aceite: nem barras, nem `..`, nem caminho absoluto — a pasta tem de cair
     dentro de `audio/`, a unica que o `.gitignore` cobre para WAV, pela mesma
     razao de `jarvis/audio_util.py::caminho_wav_de_saida` (o audio da medicao
-    leva as frases do Sponsor lidas em voz alta e o repositorio e publico,
-    D1/D10).
+    leva as frases do utilizador lidas em voz alta e o repositorio e publico).
     """
     base = PASTA_AUDIO_TEMPORARIO if base is None else Path(base)
     if nome is None or nome == "":
@@ -549,7 +544,7 @@ def _palavras_para_wer(texto: str) -> list[str]:
 def calcular_wer(referencia: str, hipotese: str) -> ResultadoWer:
     """WER = distancia de edicao (Levenshtein) ao nivel da palavra / N palavras
     da referencia. Programacao dinamica O(n*m), so a biblioteca padrao (sem
-    jiwer nem qualquer dependencia nova, D3/T7).
+    jiwer nem qualquer dependencia nova).
 
     Referencia vazia: WER 0.0 se a hipotese tambem for vazia (nada a errar),
     senao 1.0 (100%: tudo o que saiu e insercao sobre uma referencia vazia).
@@ -606,7 +601,7 @@ def percentil(valores: Sequence[float], fracao: float) -> float:
 def calcular_agregados(linhas: Sequence[LinhaMedida]) -> Agregados:
     """Os tres numeros do fim: acerto de intencao, WER macro e WER de corpus.
 
-    Nota sobre uma frase de referencia VAZIA (nit 7 do Reviewer, T7 a2): no WER
+    Nota sobre uma frase de referencia VAZIA: no WER
     de corpus ela soma os erros ao numerador e zero ao denominador, porque e
     isso que a definicao diz (erros ÷ palavras de referencia) — palavras a mais
     onde nao devia haver nenhuma sao insercoes e contam. No WER macro a mesma
@@ -636,7 +631,7 @@ def calcular_agregados(linhas: Sequence[LinhaMedida]) -> Agregados:
 def duracao_do_wav(caminho: Path) -> float:
     """Duracao em segundos de um WAV ja escrito, lida do cabecalho (stdlib).
 
-    Precisa-se dela quando o audio e REUTILIZADO (D66, ponto 7): nessa corrida
+    Precisa-se dela quando o audio e REUTILIZADO: nessa corrida
     nao ha `gerar_wav` para a devolver, e usar a duracao que o faster-whisper
     reporta seria medir a coluna «áudio (s)» com outra regua do que a corrida
     com que se vai comparar.
@@ -664,7 +659,7 @@ def medir_uma_frase(
 ) -> LinhaMedida:
     """Sintese -> transcricao -> encaminhador, para UMA frase da amostra.
 
-    `prefixo` (D53, T1): colado SO ao texto que vai para o Piper ("hey
+    `prefixo`: colado SO ao texto que vai para o Piper ("hey
     jarvis, " + frase, por exemplo). A intencao ESPERADA continua a ser
     calculada por `encaminhar()` sobre a frase SEM prefixo — a fonte da
     verdade nunca muda por causa de um prefixo de sintese; um prefixo com
@@ -673,23 +668,23 @@ def medir_uma_frase(
     passa a ser o texto REALMENTE sintetizado (com prefixo, se houver):
     e o que a transcricao tem de bater para dar WER zero.
 
-    `modelo` (D53, T1): passado a `transcrever(modelo_preferido=...)`; por
-    omissao continua a ser `transcrever_ficheiro.MODELO_PREFERIDO` (D39), o
-    mesmo modelo que corria antes desta task existir.
+    `modelo`: passado a `transcrever(modelo_preferido=...)`; por
+    omissao continua a ser `transcrever_ficheiro.MODELO_PREFERIDO`, o
+    mesmo modelo que corria antes desta opcao existir.
 
-    `com_som` (D61, T5): False por omissao — nenhum dispositivo de audio e
+    `com_som`: False por omissao — nenhum dispositivo de audio e
     aberto, so o WAV temporario e escrito e lido de volta. True toca cada
     frase nas colunas enquanto mede, so quando pedido de forma explicita.
 
-    `reutilizar_audio` + `lingua_fixa` (D66, ponto 7): as duas metades do A/B
+    `reutilizar_audio` + `lingua_fixa`: as duas metades do A/B
     CONTROLADO. O Piper e estocastico — sintetizar outra vez a mesma frase da
     outro audio, com outra duracao e outra transcricao —, por isso comparar
     duas corridas que re-sintetizam muda DUAS variaveis ao mesmo tempo e nao
     prova nada sobre a lingua. Com `reutilizar_audio=True` a sintese nao
     acontece: le-se o WAV que ja esta em `pasta_audio` (escrito por uma corrida
     anterior com `manter_audio=True`) e mede-se a MESMA amostra de audio. Com
-    `lingua_fixa="pt"` a transcricao usa a lingua fixa (o produto, T8
-    criterio 6) e com `lingua_fixa=None` corre a deteccao da S10. As duas
+    `lingua_fixa="pt"` a transcricao usa a lingua fixa (o produto) e com
+    `lingua_fixa=None` corre a deteccao automatica. As duas
     juntas dao a unica comparacao em que a lingua e a unica variavel.
     Se o WAV nao existir, levanta `FileNotFoundError` — e um erro do metodo de
     medicao, nao uma frase que correu mal, e tem de se ver.
@@ -779,10 +774,10 @@ def linha_falhada(
     """A linha que fica na evidencia quando UMA frase rebenta.
 
     Sem isto, uma excecao na frase 19 deitava fora as 18 ja medidas e o proprio
-    entregavel (nit 3 do Reviewer). A frase conta como falhada: sem acerto de
+    entregavel. A frase conta como falhada: sem acerto de
     intencao e com WER de 100% (perderam-se todas as palavras da referencia).
 
-    `prefixo` (T1): so afeta o texto mostrado/usado como referencia de WER
+    `prefixo`: so afeta o texto mostrado/usado como referencia de WER
     (`frase_esperada`), pela mesma razao de `medir_uma_frase` — nunca entra
     no calculo da intencao esperada.
     """
@@ -819,50 +814,50 @@ def linha_falhada(
 
 # --- Relatorio / evidencia ---------------------------------------------------
 
-AVISO_D34 = (
-    "**AVISO (D34): esta medicao usou AUDIO SINTETICO** (voz Piper do jarvis, "
+AVISO_AUDIO_SINTETICO = (
+    "**AVISO: esta medicao usou AUDIO SINTETICO** (voz Piper do jarvis, "
     "gerada por `scripts/gerar_wav.py` e transcrita de volta por "
     "`scripts/transcrever_ficheiro.py`). Isto testa a CADEIA (sintese -> "
     "transcricao -> encaminhador) e NAO mede o reconhecimento da voz do "
-    "Sponsor. **Fica proibido propor a troca para ingles com base nestes "
+    "utilizador. **Fica proibido propor a troca para ingles com base nestes "
     "numeros** — essa proposta so pode acontecer depois de medir a voz humana "
-    "dele (protocolo completo em `tests/voz/frases-pt.md`, D7), e mesmo ai fica "
-    "na fila do Sponsor com o default 'manter portugues'."
+    "dele (protocolo completo em `tests/voz/frases-pt.md`), e mesmo ai a "
+    "decisao e do utilizador, com o default 'manter portugues'."
 )
 
-#: T1/D53: registado no cabecalho de TODA corrida, PT ou EN — a voz Piper so
-#: existe em pt-PT (S11), por isso mesmo a amostra `frases-en.md` sai lida com
+#: Registado no cabecalho de TODA corrida, PT ou EN — a voz Piper so
+#: existe em pt-PT, por isso mesmo a amostra `frases-en.md` sai lida com
 #: sotaque/prosodia portugueses. Limite do teste da cadeia, nunca uma medida
-#: do ingles do Sponsor (D34/D58).
+#: do ingles do utilizador.
 AVISO_VOZ_PT_PT = (
-    "**AVISO (S11): toda a sintese desta medição usa a voz Piper pt-PT** "
+    "**AVISO: toda a sintese desta medição usa a voz Piper pt-PT** "
     "(`pt_PT-tugao-medium`) — não existe voz inglesa neste run. Mesmo quando a "
     "amostra é `frases-en.md`, o áudio sintetizado sai com sotaque e prosódia "
     "portugueses. Isto é um limite do TESTE DA CADEIA (síntese -> transcrição -> "
-    "encaminhador), nunca uma medida de como o Sponsor fala inglês (D34)."
+    "encaminhador), nunca uma medida de como o utilizador fala inglês."
 )
 
 AVISO_PRIVACIDADE = (
-    "**AVISO (D1/D10): este ficheiro pode conter dados privados do Sponsor.** Com um "
+    "**AVISO: este ficheiro pode conter dados privados do utilizador.** Com um "
     "`config.toml` real, as colunas de frase e de intencao levam os NOMES dos projetos dele e os "
     "CAMINHOS ABSOLUTOS no disco (o encaminhador devolve o caminho do projeto no argumento). So e "
-    "seguro porque `docs/forja/` esta no `.gitignore` e este ficheiro nunca e versionado — o "
-    "repositorio vai ser publico. **Nao copiar excertos daqui para nenhum ficheiro versionado** "
+    "seguro porque a pasta de evidencia esta no `.gitignore` e este ficheiro nunca e versionado — o "
+    "repositorio e publico. **Nao copiar excertos daqui para nenhum ficheiro versionado** "
     "(codigo, testes, README, relatorios commitados) sem trocar os nomes e os caminhos por "
     "marcadores, como `tests/voz/frases-pt.md` faz."
 )
 
 
 def linha_com_lingua_terceira(linha: LinhaMedida) -> bool:
-    """True quando o argmax LIVRE desta frase caiu fora de {pt, en} (D66)."""
+    """True quando o argmax LIVRE desta frase caiu fora de {pt, en}."""
     return bool(linha.lingua_top1) and linha.lingua_top1 not in LINGUAS_RESTRITAS
 
 
 def coluna_da_lingua(linha: LinhaMedida) -> str:
-    """A celula da lingua detetada (T8/D58b): lingua, probabilidade, hesitacao.
+    """A celula da lingua detetada: lingua, probabilidade, hesitacao.
 
     Quando o argmax LIVRE caiu fora de {pt, en}, a celula leva a marca
-    `lingua-terceira(<codigo> descodificou)` (D66, ponto 3). A marca diz a
+    `lingua-terceira(<codigo> descodificou)`. A marca diz a
     verdade inteira e e contavel: a terceira lingua nao entra na escolha do
     PRODUTO (esta coluna, o log, o encaminhador) mas foi ELA que descodificou
     o audio desta linha — por isso a transcricao ao lado pode estar noutro
@@ -907,17 +902,17 @@ def escrever_evidencia(
 
     `caminho_saida` TEM de vir de `caminho_evidencia_de_saida` (o `main` so
     escreve caminhos ja validados); aqui repete-se a validacao para que nenhum
-    outro chamador consiga escrever fora de `docs/forja/evidence/`.
+    outro chamador consiga escrever fora de `PASTA_EVIDENCIA_PADRAO`.
 
-    `caminho_amostra`/`modelo`/`prefixo` (T1/D53): so para o CABECALHO da
+    `caminho_amostra`/`modelo`/`prefixo`: so para o CABECALHO da
     evidencia dizer qual das quatro combinacoes (PT/EN x com/sem prefixo)
     esta corrida mediu; `None`/`""` cai para a amostra pt-PT por omissao e
     para "nenhum" prefixo, sem quebrar chamadas antigas.
 
-    `lingua_fixa`/`pasta_audio`/`audio_reutilizado` (D66, ponto 7): o
+    `lingua_fixa`/`pasta_audio`/`audio_reutilizado`: o
     cabecalho tem de dizer COM QUE LINGUA a transcricao correu e SOBRE QUE
     CONJUNTO DE WAV, senao duas corridas comparaveis a olho podem nao ser
-    comparaveis de facto — foi exatamente o defeito da tentativa 1 da T8, em
+    comparaveis de facto — foi exatamente um defeito anterior, em
     que o arnes re-sintetizava o audio e a comparacao ficava com duas
     variaveis a mudar ao mesmo tempo.
     """
@@ -932,9 +927,9 @@ def escrever_evidencia(
         amostra_para_mostrar = str(caminho_amostra_efetivo)
 
     partes: list[str] = []
-    partes.append("# Medição sintética (D53/T1: PT/EN × com/sem prefixo)")
+    partes.append("# Medição sintética (PT/EN × com/sem prefixo)")
     partes.append("")
-    partes.append(AVISO_D34)
+    partes.append(AVISO_AUDIO_SINTETICO)
     partes.append("")
     partes.append(AVISO_VOZ_PT_PT)
     partes.append("")
@@ -956,15 +951,15 @@ def escrever_evidencia(
     if lingua_fixa:
         partes.append(
             f"- **Língua da transcrição: FIXA `language={lingua_fixa!r}`** (`--lingua {lingua_fixa}`) "
-            f"— é o que o produto faz desde a reversão do critério 6 da T8, e é a perna A do "
+            f"— é o que o produto faz desde a reversão da deteção, e é a perna A do "
             f"A/B. A deteção automática está desligada nesta corrida."
         )
     else:
         partes.append(
             "- **Língua da transcrição: AUTOMÁTICA (`language=None`, `--lingua auto`)** — deteção "
-            "frase a frase com argmax restrito a {pt, en} (T8/D58b/S10). **Não é o que o "
+            "frase a frase com argmax restrito a {pt, en}. **Não é o que o "
             "produto faz**: o A/B controlado mostrou o acerto de intenção em português a "
-            "descer com a deteção ligada e o critério 6 da T8 reverteu-a. Esta corrida é a "
+            "descer com a deteção ligada e por isso foi revertida. Esta corrida é a "
             "perna B do A/B — a medição que sustenta essa decisão."
         )
     if pasta_audio is not None:
@@ -1011,7 +1006,7 @@ def escrever_evidencia(
     partes.append("")
     partes.append(
         "| nº | tipo | frase esperada | transcrição | intenção esperada | "
-        "intenção obtida | acerto | WER | língua (T8) | áudio (s) | transcrição (ms) |"
+        "intenção obtida | acerto | WER | língua | áudio (s) | transcrição (ms) |"
     )
     partes.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for linha in linhas:
@@ -1054,7 +1049,7 @@ def escrever_evidencia(
         f"- **Linhas divergentes (tipo documentado na tabela != tipo calculado por "
         f"`encaminhar()` sobre a frase sem prefixo): {agregados.n_divergentes}/{n}** — sem "
         "este número, uma amostra cujas frases `local` ainda não têm lista branca (ex.: "
-        "`frases-en.md` antes da T7/D58) aparecia com acerto de intenção alto só por "
+        "`frases-en.md` antes da lista branca inglesa) aparecia com acerto de intenção alto só por "
         "construção: se a tabela documenta `local` mas o router (com razão) manda a frase "
         "como `claude`, a intenção OBTIDA também bate `claude` contra `claude` assim que a "
         "transcrição reproduzir a frase, o que conta como acerto sem medir o que a amostra "
@@ -1073,13 +1068,13 @@ def escrever_evidencia(
             f"máximo {max(latencias):.0f} ms, para {duracao_audio_total:.1f} s de áudio "
             f"sintetizado no total."
         )
-        # T8: o custo de latência da deteção automática de língua mede-se aqui,
-        # contra o orçamento escrito na D6 (2,0 s p50 / 3,5 s p95 para uma
+        # O custo de latência da deteção automática de língua mede-se aqui,
+        # contra o orçamento de latência (2,0 s p50 / 3,5 s p95 para uma
         # frase de ~5 s). As frases desta amostra são bem mais curtas do que 5 s
         # (ver a coluna «áudio (s)»), por isso este número é uma cota SUPERIOR
-        # confortável: se já passa aqui, passa com margem no caso da D6.
+        # confortável: se já passa aqui, passa com margem no caso real.
         partes.append(
-            f"- **Latência da transcrição, percentis (D6: ≤ 2000 ms p50, ≤ 3500 ms p95): "
+            f"- **Latência da transcrição, percentis (orçamento: ≤ 2000 ms p50, ≤ 3500 ms p95): "
             f"p50 {statistics.median(latencias):.0f} ms, p95 "
             f"{percentil(latencias, 0.95):.0f} ms** — "
             f"p50 {'DENTRO' if statistics.median(latencias) <= 2000 else 'FORA'} do orçamento, "
@@ -1095,8 +1090,8 @@ def escrever_evidencia(
                 f"{max(totais):.0f} ms na pior frase, {statistics.median(totais):.0f} ms de "
                 f"mediana. O arnês carrega o modelo UMA vez para as {n} frases, por isso só a "
                 f"primeira paga o carregamento: estes números não são comparáveis com as "
-                f"latências a frio medidas na T3, e não substituem a medição de latência do "
-                f"caminho vivo que a D2/D11/D33 pedem (ali a frase vem do microfone, não de um "
+                f"latências a frio, e não substituem a medição de latência do "
+                f"caminho vivo (ali a frase vem do microfone, não de um "
                 f"WAV já pronto)."
             )
     medidas_com_lingua = [linha for linha in linhas if linha.lingua not in ("?", "")]
@@ -1114,15 +1109,15 @@ def escrever_evidencia(
             partes.append(
                 f"- **Deteção automática de língua: DESLIGADA nesta corrida.** A transcrição "
                 f"correu com `language={lingua_fixa!r}` fixo — é o que o produto faz desde a "
-                f"reversão do critério 6 da T8, e é a perna A do A/B (D66, ponto 7). Sem "
+                f"reversão da deteção, e é a perna A do A/B. Sem "
                 f"`language=None` não há `info.all_language_probs` e não há nada a medir: a "
-                f"coluna «língua (T8)» escreve `{lingua_fixa} FIXA (sem deteção)` em todas as "
+                f"coluna «língua» escreve `{lingua_fixa} FIXA (sem deteção)` em todas as "
                 f"linhas, sem probabilidade nenhuma, porque nenhuma foi medida. Os números "
                 f"desta corrida que contam são o acerto de intenção, o WER e a latência."
             )
         else:
             partes.append(
-                f"- **Deteção automática de língua (T8/D58b, argmax restrito a {{pt, en}}, limiar "
+                f"- **Deteção automática de língua (argmax restrito a {{pt, en}}, limiar "
                 f"0,50): pt em {n_pt}/{len(medidas_com_lingua)} frases, en em {n_en}, "
                 f"hesitou (probabilidade não acima do limiar) em {n_hesitou}.** Probabilidade "
                 f"mediana da língua escolhida: {statistics.median(probabilidades):.2f} "
@@ -1144,20 +1139,20 @@ def escrever_evidencia(
             partes.append(
                 f"- **`lingua-terceira`: {n_top1_terceira}/{len(medidas_com_lingua)} frases** "
                 f"({marcadas}). É o número de frases cujo argmax LIVRE (as ~100 línguas do "
-                f"Whisper) caiu fora de {{pt, en}}. O que isso quer dizer, exatamente (D66, "
-                f"ponto 3): a terceira língua **não entra na escolha do PRODUTO** — nem na "
-                f"coluna «língua (T8)» desta tabela, nem no log, nem em nenhuma decisão do "
+                f"Whisper) caiu fora de {{pt, en}}. O que isso quer dizer, exatamente: "
+                f"a terceira língua **não entra na escolha do PRODUTO** — nem na "
+                f"coluna «língua» desta tabela, nem no log, nem em nenhuma decisão do "
                 f"encaminhador, que só vê o argmax RESTRITO a {{pt, en}} — mas foi **ela que "
                 f"DESCODIFICOU o áudio** dessas linhas, porque o parâmetro `language=` da API "
-                f"pública do faster-whisper aceita um código único e não uma lista de candidatas "
-                f"(S10). É por isso que a transcrição dessas linhas pode aparecer noutro "
+                f"pública do faster-whisper aceita um código único e não uma lista de candidatas. "
+                f"É por isso que a transcrição dessas linhas pode aparecer noutro "
                 f"alfabeto. A frase segue o caminho normal: **nunca é descartada nem "
-                f"re-transcrita** (D66, ponto 2 — duas das linhas afetadas na T8 tinham como "
+                f"re-transcrita** (duas das linhas afetadas numa medição tinham como "
                 f"destino CORRETO o Claude Code e continuaram a contar `sim`)."
             )
         partes.append(
             f"- A língua detetada NUNCA escolhe lista branca: o encaminhamento casa sempre "
-            f"contra as DUAS (T7/D58b), por isso nenhuma linha desta tabela falha o acerto de "
+            f"contra as DUAS, por isso nenhuma linha desta tabela falha o acerto de "
             f"intenção por causa da língua — incluindo as marcadas `lingua-terceira`."
         )
 
@@ -1185,15 +1180,15 @@ def escrever_evidencia(
     )
     partes.append("")
     partes.append(
-        f"Limiares de referência da D7 (aplicam-se à medição REAL com a voz do "
-        f"Sponsor, não a esta passagem sintética): >= 90% de acerto de intenção "
+        f"Limiares de referência (aplicam-se à medição REAL com a voz do "
+        f"utilizador, não a esta passagem sintética): >= 90% de acerto de intenção "
         f"e WER <= 15% -> português fica; entre 75% e 90% -> português fica com "
         f"melhorias baratas antes de medir outra vez; < 75% -> repetir a MESMA "
-        f"amostra em inglês e levar a comparação ao Sponsor pela fila, default "
+        f"amostra em inglês e levar a comparação ao utilizador, default "
         f"'manter português'."
     )
     partes.append("")
-    partes.append(AVISO_D34)
+    partes.append(AVISO_AUDIO_SINTETICO)
     partes.append("")
 
     garantir_pasta(caminho_saida.parent)
@@ -1228,7 +1223,7 @@ def construir_parser() -> argparse.ArgumentParser:
             "docs/forja/evidence/medicao-sintetica-<timestamp>.md). Um caminho relativo conta a "
             "partir da raiz do repositorio; qualquer caminho fora dessa pasta, ou sem sufixo .md, "
             "e recusado com codigo 1 e sem escrever nada: a evidencia leva nomes e caminhos reais "
-            "do Sponsor e so docs/forja/ esta fora do Git (D1/D10)"
+            "do utilizador e so essa pasta esta fora do Git"
         ),
     )
     parser.add_argument(
@@ -1265,8 +1260,8 @@ def construir_parser() -> argparse.ArgumentParser:
         metavar="{pt,en,auto}",
         help=(
             f"lingua com que se transcreve (default: '{LINGUA_FIXA_DO_PRODUTO}', o que o "
-            "produto faz desde a reversao do criterio 6 da T8). 'auto' liga a detecao frase a "
-            "frase da S10 (language=None + argmax restrito a {pt, en}): e a perna B do A/B, e "
+            "produto faz desde a reversao da deteccao). 'auto' liga a detecao frase a "
+            "frase (language=None + argmax restrito a {pt, en}): e a perna B do A/B, e "
             "foi ela que mostrou o acerto de intencao em portugues a descer"
         ),
     )
@@ -1308,13 +1303,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = construir_parser().parse_args(argv)
 
     print("=== jarvis - medir_voz (amostra sintetica, PT/EN x com/sem prefixo, D7/D34/D53) ===")
-    print(AVISO_D34)
+    print(AVISO_AUDIO_SINTETICO)
     print(AVISO_VOZ_PT_PT)
     print()
 
     # O caminho de saida e validado ANTES de sintetizar o que quer que seja:
     # um destino invalido tem de falhar em milissegundos e sem escrever nada,
-    # nao depois de 20 frases (bloqueador 1 do Security Reviewer, T7 a1).
+    # nao depois de 20 frases.
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     try:
         caminho_saida = caminho_evidencia_de_saida(
@@ -1327,7 +1322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     # 'auto' e a UNICA forma de pedir `language=None`: quem nao diz nada mede
-    # o produto (lingua fixa), que e o que o criterio 6 da T8 deixou ligado.
+    # o produto (lingua fixa), que e o que fica ligado por omissao.
     lingua_fixa = None if args.lingua == "auto" else args.lingua
 
     try:
@@ -1350,13 +1345,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"frases          = {len(frases)}")
     print(f"modelo          = {args.modelo}")
     print(f"prefixo         = {args.prefixo!r}" if args.prefixo else "prefixo         = (nenhum)")
-    print(f"com som         = {'sim (D61 opt-in)' if args.com_som else 'nao (so ficheiro, D61)'}")
+    print(f"com som         = {'sim (opt-in)' if args.com_som else 'nao (so ficheiro)'}")
     print(
         "lingua          = "
         + (
-            f"FIXA {lingua_fixa!r} (o produto, T8 criterio 6; perna A do A/B)"
+            f"FIXA {lingua_fixa!r} (o produto; perna A do A/B)"
             if lingua_fixa
-            else "AUTOMATICA (language=None, argmax restrito a {pt, en}, S10; perna B do A/B)"
+            else "AUTOMATICA (language=None, argmax restrito a {pt, en}; perna B do A/B)"
         )
     )
     print(
@@ -1436,7 +1431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"linhas divergentes = {agregados.n_divergentes}/{agregados.n_frases}")
     print(f"evidencia escrita em: {caminho_saida.relative_to(RAIZ)}")
     print()
-    print(AVISO_D34)
+    print(AVISO_AUDIO_SINTETICO)
 
     if interrompido:
         print("INTERROMPIDO: a evidencia acima so cobre as frases medidas ate a interrupcao.")

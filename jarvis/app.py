@@ -2,7 +2,7 @@ r"""Orquestrador do jarvis: ouve, transcreve, encaminha, age e responde.
 
 O processo de consola da D11/D30: arranca-se a mao, nao tem interface grafica,
 nao e servico do Windows, nao arranca com o sistema, e fechar a janela desliga
-o microfone E cala a voz (D60: Ctrl+C, saida do processo e o comando "cala-te"
+o microfone E cala a voz (Ctrl+C, saida do processo e o comando "cala-te"
 passam todos pelo mesmo `jarvis.voz.calar_agora`, que mata a sintese em curso
 antes de parar a reproducao, e depois disso nada novo e falado).
 
@@ -10,7 +10,7 @@ A consola deixa obvio a olho quando esta a ouvir (o cabecalho e a linha de
 estado) e e, ao mesmo tempo, a prova: cada frase escreve um unico registo com
 timestamps e latencias, na consola E em `logs/jarvis-<data>.log`.
 
-Dois modos, o MESMO pipeline (TECHNOLOGY.md S1/S5):
+Dois modos, o MESMO pipeline:
 
   (a) microfone ao vivo — `AudioToTextRecorder` com `use_microphone=True`,
       `wakeword_backend="oww"` e o modelo pre-treinado `hey_jarvis`, VAD do
@@ -18,44 +18,44 @@ Dois modos, o MESMO pipeline (TECHNOLOGY.md S1/S5):
 
   (b) `--wav <ficheiro>` — o mesmo `AudioToTextRecorder`, com
       `use_microphone=False`, alimentado por `feed_audio()` com os frames do
-      WAV ao ritmo real (D33: prova sem microfone humano).
+      WAV ao ritmo real (prova sem microfone humano).
 
 AS CINCO ETAPAS, o que cada uma mede e de onde vem o tempo:
 
-  1/5 palavra de ativacao — openWakeWord (modelo `hey_jarvis`, S2). Ao vivo e
+  1/5 palavra de ativacao — openWakeWord (modelo `hey_jarvis`). Ao vivo e
       a porta do RealtimeSTT (`on_wakeword_detected`). No modo ficheiro ver
       "PORTA DA PALAVRA DE ATIVACAO" mais abaixo.
   2/5 transcricao — faster-whisper `medium` (`--modelo` troca-o), medida do FIM
       DA FALA (VAD a fechar a frase) ate o texto existir, que e a latencia que
-      o Sponsor sente (D6).
-  3/5 encaminhamento — `jarvis.router.encaminhar` (T4), determinista (D9).
-  4/5 accao local (T5) ou entrega ao Claude Code pelo canal da T2 (D49).
-  5/5 resposta falada — `jarvis.voz.falar` (T5, Piper pt-PT), com o recuo
-      documentado para texto na consola se a voz falhar (D35.4).
+      o utilizador sente.
+  3/5 encaminhamento — `jarvis.router.encaminhar`, determinista.
+  4/5 accao local ou entrega ao Claude Code pelo canal (`jarvis.canal_claude`).
+  5/5 resposta falada — `jarvis.voz.falar` (Piper pt-PT), com o recuo
+      documentado para texto na consola se a voz falhar.
 
 Mais a latencia TOTAL e, sempre que uma frase e descartada sem accao, uma
-linha explicita `FALSO DESPERTAR DESCARTADO` (D5/D6): um falso despertar nunca
+linha explicita `FALSO DESPERTAR DESCARTADO`: um falso despertar nunca
 executa uma accao nem gasta um token.
 
 PORTA DA PALAVRA DE ATIVACAO NO MODO FICHEIRO. O backend `oww` deteta mesmo a
 partir de ficheiro — esta provado neste repositorio com um WAV que comeca por
-"hey jarvis" (`--exigir-wake-word`). Mas os WAV de prova da T3
+"hey jarvis" (`--exigir-wake-word`). Mas os WAV de prova
 (`audio/t-horas.wav`, `audio/t-ruido.wav`) nao trazem palavra de ativacao
 nenhuma, por isso o modo `--wav` corre por omissao com a porta ABERTA e injeta
-a partir da etapa 2, exatamente como o criterio da T6 previu. Nao se finge a
+a partir da etapa 2. Nao se finge a
 etapa 1: o MESMO modelo openWakeWord corre sobre os MESMOS frames em paralelo
 (`MonitorWakeWord`) e a etapa 1 regista o que ele mediu de facto — o instante
 da deteccao, ou o score maximo que o ficheiro atingiu e a razao de nao ter
 disparado. Com `--exigir-wake-word` a porta fecha-se e o pipeline so transcreve
 depois de a palavra de ativacao disparar, como ao vivo.
 
-O QUE ESTE PROCESSO NUNCA FAZ: nao liga o microfone sem o Sponsor o arrancar
-(D30); nao poe texto vindo do microfone, de ficheiro ou da configuracao numa
-linha de comandos do Windows (D48.2 — as accoes locais recebem caminhos ja
+O QUE ESTE PROCESSO NUNCA FAZ: nao liga o microfone sem o utilizador o arrancar;
+nao poe texto vindo do microfone, de ficheiro ou da configuracao numa
+linha de comandos do Windows (as accoes locais recebem caminhos ja
 resolvidos da config e a frase vai ao Claude Code por stdin em JSON); nao liga
 o `initial_prompt` da transcricao, que fica DESLIGADO no caminho vivo e cujo
-estado aparece no log de cada frase (D51); e nao envia nada para fora do PC
-alem da frase que o router mandar ao Claude Code pelo canal ja decidido (D49).
+estado aparece no log de cada frase; e nao envia nada para fora do PC
+alem da frase que o router mandar ao Claude Code pelo canal ja decidido.
 
 Uso:
 
@@ -111,10 +111,10 @@ from jarvis.router import ResultadoRouter, encaminhar
 # --- Constantes do envelope (nada configuravel por texto vindo de fora) -----
 
 #: Pasta dos logs. Ja esta no .gitignore (`logs/`): nenhuma transcricao entra
-#: no repositorio publico (D1/D10).
+#: no repositorio publico.
 PASTA_LOGS = RAIZ / "logs"
 
-#: Modelos do openWakeWord descarregados para models/ (D14e, ver docs/MODELOS.md).
+#: Modelos do openWakeWord descarregados para models/ (ver docs/MODELOS.md).
 PASTA_MODELOS_OWW = RAIZ / "models" / "openwakeword"
 MODELO_WAKE_WORD = PASTA_MODELOS_OWW / "hey_jarvis_v0.1.onnx"
 MODELO_MELSPEC = PASTA_MODELOS_OWW / "melspectrogram.onnx"
@@ -125,13 +125,13 @@ MODELO_EMBEDDING = PASTA_MODELOS_OWW / "embedding_model.onnx"
 #: pelo mesmo numero.
 SENSIBILIDADE_WAKE_WORD = 0.6
 
-#: Transcricao (D39/S3): `medium` por omissao. A lista e FECHADA pela mesma
+#: Transcricao: `medium` por omissao. A lista e FECHADA pela mesma
 #: razao de scripts/transcrever_ficheiro.py: sem ela, `--modelo alguem/repo-mau`
 #: mandava o faster-whisper descarregar pesos arbitrarios do Hugging Face para
-#: models/, fora do registo da D14e.
+#: models/, fora do registo de docs/MODELOS.md.
 #:
-#: `large-v3-turbo` entrou na lista na T9 (S8/D65) para poder ser MEDIDO contra
-#: o `medium` nas quatro combinacoes da D53. Entrar na lista fechada nao e
+#: `large-v3-turbo` entrou na lista para poder ser MEDIDO contra
+#: o `medium` nas quatro combinacoes (pt/en, com/sem prefixo). Entrar na lista fechada nao e
 #: adocao: o default continua a ser decidido pelos numeros (ver docs/MODELOS.md).
 MODELO_STT = "medium"
 MODELOS_STT_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
@@ -150,7 +150,7 @@ SILENCIO_DEPOIS_DO_FICHEIRO_S = 1.5
 #: tudo. Esgotado, a frase e abortada e o log escreve o falso despertar.
 ESPERA_MAXIMA_DEPOIS_DO_FICHEIRO_S = 8.0
 # O contrato do que chega a voz (limites, prefixo de origem, filtro por exclusao
-# e frases de recurso) vive em jarvis/resposta_falada.py (D48.4/D59): a sessao
+# e frases de recurso) vive em jarvis/resposta_falada.py: a sessao
 # filha do Claude Code corre sem ferramentas e pode alucinar que as usou, por
 # isso o log leva a resposta INTEIRA em bruto e a voz so o que passa o filtro.
 # Este modulo importa de la e nao define limites proprios.
@@ -219,7 +219,7 @@ class LogDaSessao:
         self.caminho = caminho_do_log(quando, pasta)
         self.consola = consola if consola is not None else sys.stdout
         self._relogio_de_parede = relogio_de_parede
-        # RLock, nao Lock (bloqueador 1 do Security Reviewer, T4/T12): um
+        # RLock, nao Lock (achado de revisao de seguranca): um
         # SIGINT corre na thread principal entre bytecodes: se cair enquanto
         # essa mesma thread esta dentro de `_escrever` (a tranca ja detida),
         # `ao_ctrl_c` -> `Jarvis.calar_agora` -> `voz.calar_agora` volta a
@@ -285,7 +285,7 @@ class RegistoDaFrase:
     inicio: float = field(default=0.0)
     marcas: list[Marca] = field(default_factory=list)
     #: Instante em que o VAD fechou a frase. E a referencia da etapa 2 e da
-    #: latencia total que o Sponsor sente (D6).
+    #: latencia total que o utilizador sente.
     fim_da_fala: float | None = None
     inicio_da_fala: float | None = None
     descartada: bool = False
@@ -420,7 +420,7 @@ class MonitorWakeWord:
 def prova_da_wake_word(caminho: Path, sensibilidade: float = SENSIBILIDADE_WAKE_WORD) -> dict:
     """Corre o openWakeWord DIRETAMENTE sobre um WAV e devolve o que mediu.
 
-    E a prova a parte da etapa 1 que o criterio da T6 pede quando o WAV do
+    E a prova a parte da etapa 1 quando o WAV do
     pipeline nao tem palavra de ativacao: mesmo modelo, mesmo limiar, um
     ficheiro que comeca por "hey jarvis".
     """
@@ -438,7 +438,7 @@ def prova_da_wake_word(caminho: Path, sensibilidade: float = SENSIBILIDADE_WAKE_
     }
 
 
-# --- Injeccao de ficheiro (S5): os frames do WAV no MESMO pipeline ----------
+# --- Injeccao de ficheiro: os frames do WAV no MESMO pipeline ----------
 
 
 def frames_do_wav(
@@ -447,8 +447,8 @@ def frames_do_wav(
     """Frames PCM16 mono de 16 kHz, do tamanho que o RealtimeSTT consome.
 
     Aceita qualquer WAV PCM de 16 bits: reamostra para 16 kHz e junta os canais
-    quando preciso (os WAV da T3 ja sao mono/16 kHz, mas um WAV gravado pelo
-    microfone do Sponsor pode nao ser). O ultimo chunk e completado com
+    quando preciso (os WAV de prova ja sao mono/16 kHz, mas um WAV gravado pelo
+    microfone do utilizador pode nao ser). O ultimo chunk e completado com
     silencio para todos terem o mesmo tamanho — o `feed_audio` do RealtimeSTT
     so entrega ao pipeline buffers completos.
     """
@@ -487,7 +487,7 @@ def duracao_do_chunk_s(bytes_por_chunk: int = BYTES_POR_CHUNK) -> float:
 
 @dataclass
 class EstadoDoProcesso:
-    """O que so existe enquanto o jarvis esta a correr (D4.d/D4.e).
+    """O que so existe enquanto o jarvis esta a correr.
 
     `jarvis.acoes_locais.executar()` recusa `calar`, `adormecer` e `acordar` de
     proposito: uma biblioteca sem processo vivo nao tem nada para calar nem
@@ -522,7 +522,7 @@ class Jarvis:
         self.log = log
         self.estado = estado or EstadoDoProcesso()
         self._falar = falar
-        # O MESMO mecanismo dos tres gatilhos (D60(2)); entra pelo construtor
+        # O MESMO mecanismo dos tres gatilhos; entra pelo construtor
         # so para os testes o poderem espiar sem Piper nem dispositivo de som.
         self._calar = calar
         self._executar = executar
@@ -541,7 +541,7 @@ class Jarvis:
             "nada": "nada",
         }[resultado.tipo]
         # D62: o que a limpeza do residuo da palavra de ativacao tirou do
-        # inicio da frase, explicavel ao Sponsor numa frase deste log.
+        # inicio da frase, explicavel ao utilizador numa frase deste log.
         residuo = (
             f"'{resultado.residuo_removido}'" if resultado.residuo_removido else "nenhum"
         )
@@ -636,14 +636,14 @@ class Jarvis:
             # D59.3: mesmo este corte de emergencia nunca parte uma palavra ao meio. Nao havendo
             # um unico espaco dentro do limite (uma "palavra" de centenas de caracteres, que
             # nunca e linguagem natural), diz-se a frase de recurso em vez de ler meia palavra —
-            # e sem ficar calado (inaceitavel n.4). O texto inteiro ja foi para o log.
+            # e sem ficar calado. O texto inteiro ja foi para o log.
             falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or (
                 FRASE_RECURSO_SEM_CORTE_SEGURO
             )
         if voz.esta_calado():
             # Depois de um Ctrl+C (ou da saida do processo) nada novo e
             # falado: nem o resto da frase, nem uma despedida, nem esta
-            # resposta do Claude Code que acabou de chegar (D60(1)).
+            # resposta do Claude Code que acabou de chegar.
             registo.marcar(5, f"silenciado a pedido (D60): nada e falado | texto: {falado!r}")
             return
         if self.estado.mudo or not self.com_voz:
@@ -655,7 +655,7 @@ class Jarvis:
         # liga-se aqui, sempre — o interruptor continua a ser --sem-voz (que
         # ja fez `self.com_voz` chegar a False e devolver mais acima, nunca
         # chegando a esta linha) e o "cala-te"/adormecido (idem). Sem este
-        # opt-in, `jarvis.voz.falar()` recusa-se a abrir o dispositivo (D61).
+        # opt-in, `jarvis.voz.falar()` recusa-se a abrir o dispositivo.
         resultado = self._falar(falado, com_som=True)
         if resultado.falou:
             registo.marcar(5, f"falado em pt-PT (Piper): {falado!r}")
@@ -734,22 +734,21 @@ def construir_recorder(
     correria. Quem precisar de outro modelo passa `--modelo`.
     """
     if device == "cuda":
-        registar_dlls_do_torch()  # tem de correr antes do faster_whisper (D42)
+        registar_dlls_do_torch()  # tem de correr antes do faster_whisper
     from RealtimeSTT import AudioToTextRecorder
 
     opcoes = dict(
         model=modelo,
         download_root=str(PASTA_MODELOS_FASTER_WHISPER),
-        # T8, criterio 6: a lingua volta a ser FIXA aqui.
+        # A lingua e FIXA aqui.
         #
-        # A T8 ligou a deteccao automatica neste mesmo sitio (`language=None`,
+        # A deteccao automatica ja foi ligada neste mesmo sitio (`language=None`,
         # que e o que o RealtimeSTT traduz para deteccao: ele faz
         # `language=self.language if self.language else None` antes de chamar o
         # faster-whisper, audio_recorder.py:200 e :2402) e mediu-a. O A/B
         # controlado — os MESMOS 20 WAV por combinacao, transcritos com a
         # lingua fixa e com deteccao — deu o acerto de intencao em portugues a
-        # DESCER (21/40 -> 20/40), e esse e o gatilho automatico do criterio 6
-        # e da ordem de corte da D53 item 4: reverte-se.
+        # DESCER (21/40 -> 20/40), e a regra era reverter se descesse.
         #
         # A causa medida: com deteccao, o argmax LIVRE do faster-whisper (~100
         # linguas) e que descodifica, e caiu fora de {pt, en} em 3 das 20
@@ -757,7 +756,7 @@ def construir_recorder(
         # limpa, saiu em grego e deixou de ser encaminhada.
         #
         # O ingles nao depende disto: o encaminhamento casa sempre contra AS
-        # DUAS listas brancas (T7, D58b), e o mesmo A/B deu ZERO linhas
+        # DUAS listas brancas, e o mesmo A/B deu ZERO linhas
         # inglesas a mudar de acerto.
         language=LINGUA_FIXA_DO_PRODUTO,
         device=device,
@@ -770,14 +769,13 @@ def construir_recorder(
         post_speech_silence_duration=0.6,
         min_length_of_recording=0.3,
         pre_recording_buffer_duration=1.0,
-        # T10 (D53 item 2, TECHNOLOGY.md S9): `normalize_audio=True` foi
-        # medido nas quatro combinacoes da D53, nos MESMOS WAV da T9
-        # (docs/forja/evidence/ganho-{pt,en}-{sem,com}-prefixo.md vs
-        # modelo-medium-{pt,en}-{sem,com}-prefixo.md) e NAO melhorou o acerto
+        # `normalize_audio=True` foi medido nas quatro combinacoes (pt/en,
+        # com/sem prefixo), nos MESMOS WAV da medicao dos modelos, e NAO
+        # melhorou o acerto
         # de intencao em nenhuma das quatro (identico: 11/20, 10/20, 10/20,
         # 10/20) — piorou ligeiramente o WER em EN com prefixo e nao mudou o
-        # WER nas outras tres. Pela ordem de corte da D53 item 2 ("se nao
-        # melhorar os numeros, nao entra"), fica DESLIGADO por omissao. O
+        # WER nas outras tres. Pela regra "se nao melhorar os numeros, nao
+        # entra", fica DESLIGADO por omissao. O
         # mecanismo (`normalizar_pico_pcm16`, jarvis/audio_util.py) e o teste
         # ficam no repositorio, so nao ligados aqui.
     )
@@ -800,22 +798,22 @@ def construir_recorder(
 
 
 def detalhe_da_transcricao(recorder, texto: str) -> str:
-    """A linha da etapa 2: device real, modelo, prompt (D51), lingua e o texto.
+    """A linha da etapa 2: device real, modelo, prompt, lingua e o texto.
 
-    LINGUA (T8/D58b, criterio 2): escreve a lingua de CADA frase. Hoje o
-    recorder e construido com a lingua FIXA (criterio 6 da T8: o A/B controlado
+    LINGUA (criterio 2): escreve a lingua de CADA frase. Hoje o
+    recorder e construido com a lingua FIXA (o A/B controlado
     mostrou o acerto em portugues a descer com a deteccao ligada), e entao a
     linha diz `lingua=pt FIXA (...)` — sem probabilidade nenhuma, porque nao ha
     nenhuma medida e escrever `p=0.00 hesitou` daria a entender que uma
     deteccao correu e falhou.
 
-    Se o recorder for construido sem lingua (`language=None`, a deteccao que a
-    T8 mediu e que volta a ligar-se no dia em que houver numeros que a
+    Se o recorder for construido sem lingua (`language=None`, a deteccao que
+    ja foi medida e que volta a ligar-se no dia em que houver numeros que a
     sustentem), a mesma linha escreve a lingua detetada, a probabilidade e se a
-    deteccao HESITOU (probabilidade nao acima do limiar de 0,5 da S10). Os dois
+    deteccao HESITOU (probabilidade nao acima do limiar de 0,5). Os dois
     caminhos continuam testados.
 
-    ACHADO da T8, registado aqui porque e onde ele se ve: o RealtimeSTT 0.3.104
+    ACHADO da medicao da lingua, registado aqui porque e onde ele se ve: o RealtimeSTT 0.3.104
     so expoe o TOP-1 da deteccao (`detected_language` /
     `detected_language_probability`, `audio_recorder.py:1533-1534`) e deita
     fora o resto do `info` do faster-whisper — o `all_language_probs` nunca
@@ -823,10 +821,9 @@ def detalhe_da_transcricao(recorder, texto: str) -> str:
     que tambem devolve so a string. Por isso o caminho vivo aplica o argmax
     restrito a {pt, en} sobre o unico numero que tem: se o top-1 for uma
     terceira lingua, ela nao entra na escolha do produto (fica o portugues por
-    omissao, com o motivo escrito). Sem monkeypatch ao RealtimeSTT, como a S10
-    previu no ponto 1 de "Como adotar".
+    omissao, com o motivo escrito). Sem monkeypatch ao RealtimeSTT.
 
-    LINGUA-TERCEIRA (D66, ponto 3): o que o caminho vivo NAO consegue e evitar
+    LINGUA-TERCEIRA: o que o caminho vivo NAO consegue e evitar
     que essa terceira lingua descodifique o audio — o RealtimeSTT tambem chama
     o faster-whisper com `language=None`, logo o top-1 que ele devolve E a
     lingua com que o texto foi descodificado. Quando cai fora de {pt, en}, a
@@ -836,7 +833,7 @@ def detalhe_da_transcricao(recorder, texto: str) -> str:
     o caminho normal, nunca e descartada.
 
     Nada disto muda o encaminhamento: a frase casa sempre contra as DUAS
-    listas brancas (T7), hesite a deteccao ou nao.
+    listas brancas, hesite a deteccao ou nao.
     """
     # `recorder.language` e o que foi pedido na construcao (RealtimeSTT guarda
     # o argumento tal e qual): com ele preenchido nao houve deteccao nenhuma, e
@@ -860,7 +857,7 @@ def detalhe_da_transcricao(recorder, texto: str) -> str:
     )
 
 
-# --- Ruido de terceiros no encerramento (QA-close-1.md, finding 4b) ---------
+# --- Ruido de terceiros no encerramento --------------------------------------
 #
 # Onde nasce o ruido: `RealtimeSTT/audio_recorder.py:134` faz
 # `logging.error(f"Error receiving data from connection: {e}", exc_info=True)`
@@ -895,10 +892,10 @@ _RUIDO_DE_ENCERRAMENTO = ("Error receiving data from connection", "WinError 6")
 class _FiltroDoRuidoDeEncerramento(logging.Filter):
     """Descarta so o traceback conhecido do WinError 6 no shutdown do RealtimeSTT.
 
-    QA-close-1.md, finding 4b: intermitente, aparece DEPOIS de a resposta ja
+    Intermitente, aparece DEPOIS de a resposta ja
     ter sido dada, em `recorder.shutdown()`. Qualquer outro registo, de
     qualquer nivel, passa sem tocar (tem de trazer as DUAS partes da mensagem
-    exata do QA, nunca so uma).
+    exata, nunca so uma).
     """
 
     MENSAGEM_1, MENSAGEM_2 = _RUIDO_DE_ENCERRAMENTO
@@ -1044,7 +1041,7 @@ def correr_wav(
     log.linha(
         f"frase #{registo.numero} | a injetar {len(frames)} chunks de "
         f"{BYTES_POR_CHUNK} bytes ({duracao_s:.2f} s) no pipeline "
-        f"(feed_audio, use_microphone=False, S5)"
+        f"(feed_audio, use_microphone=False)"
     )
 
     # Ritmo real do audio: alimentar de rajada encheria a fila do RealtimeSTT
@@ -1206,7 +1203,7 @@ def correr_microfone(jarvis: Jarvis, *, device: str = "cuda", modelo: str = MODE
             log.bruto(">>> A OUVIR - diz \"hey jarvis\" <<<")
     except KeyboardInterrupt:
         log.bruto("")
-        # PRIMEIRO calar (D60): matar a sintese em curso e parar a reproducao,
+        # PRIMEIRO calar: matar a sintese em curso e parar a reproducao,
         # ANTES do `recorder.shutdown()` do `finally`, que demora segundos. Era
         # aqui que o jarvis so desligava o microfone e continuava a falar.
         jarvis.calar_agora("Ctrl+C (D30/D60)", definitivo=True, ja_calado=voz.esta_calado())
@@ -1273,7 +1270,7 @@ def construir_parser() -> argparse.ArgumentParser:
         "--modelo",
         default=MODELO_STT,
         choices=MODELOS_STT_PERMITIDOS,
-        help="modelo do faster-whisper (por omissao: medium, D39/S3)",
+        help="modelo do faster-whisper (por omissao: medium)",
     )
     parser.add_argument(
         "--sem-voz",
@@ -1316,13 +1313,13 @@ def main(argv: list[str] | None = None) -> int:
         f"voz={'ligada' if not args.sem_voz else 'desligada'} | device pedido={args.device}"
     )
     jarvis = Jarvis(config, log, com_voz=not args.sem_voz)
-    # Ultima rede da saida do processo (D60(2)): mesmo que o processo acabe por
+    # Ultima rede da saida do processo: mesmo que o processo acabe por
     # um caminho que nao passe pelo `finally` abaixo, nao fica um `piper.exe`
     # vivo a falar. Sem `registar`: nesse ponto o log ja pode estar fechado.
     atexit.register(voz.calar_agora, "saida do processo (atexit)", definitivo=True)
 
     def ao_ctrl_c(numero_do_sinal, _quadro):
-        """Cala ANTES de a excecao desenrolar a pilha (D60).
+        """Cala ANTES de a excecao desenrolar a pilha.
 
         Sem isto, o `KeyboardInterrupt` sobe primeiro por dentro de
         `jarvis.voz.falar()`, que larga o registo da voz ativa no seu
@@ -1353,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if handler_anterior is not None:
             signal.signal(signal.SIGINT, handler_anterior)
-        # Gatilho 3 (D60(2)): a saida do processo cala pelo MESMO mecanismo. Se
+        # Gatilho 3: a saida do processo cala pelo MESMO mecanismo. Se
         # o Ctrl+C ja calou, isto corre na mesma (nao ha nada para matar) mas
         # sem repetir as duas linhas no log.
         jarvis.calar_agora("saida do processo", definitivo=True, ja_calado=voz.esta_calado())

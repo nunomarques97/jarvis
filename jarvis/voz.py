@@ -1,8 +1,7 @@
 r"""Voz de resposta do jarvis: falar(texto) via RealtimeTTS + PiperEngine.
 
-Motor e voz decididos pelo Technology Scout (D47, TECHNOLOGY.md S4, corrige a
-D37): RealtimeTTS 0.8.5 com o PiperEngine real a falar com o `piper.exe` do
-proprio venv, voz `pt_PT-tugao-medium`. API exata, verbatim do TECHNOLOGY.md:
+Motor e voz: RealtimeTTS 0.8.5 com o PiperEngine real a falar com o `piper.exe`
+do proprio venv, voz `pt_PT-tugao-medium`. API exata:
 
     from RealtimeTTS import TextToAudioStream, PiperEngine, PiperVoice
     voice = PiperVoice(model_file=..., config_file=...)
@@ -10,31 +9,31 @@ proprio venv, voz `pt_PT-tugao-medium`. API exata, verbatim do TECHNOLOGY.md:
     stream = TextToAudioStream(engine)
 
 `piper_path` e sempre o caminho ABSOLUTO do `piper.exe` deste venv (nunca o
-PATH nem `PIPER_PATH`), pela mesma razao que scripts/gerar_wav.py (T3): o
+PATH nem `PIPER_PATH`), pela mesma razao que scripts/gerar_wav.py: o
 jarvis pode correr sem o venv ativado no PATH do processo.
 
-CODIFICACAO E SEGREDOS (repetidos aqui de scripts/gerar_wav.py, T3 — nao
+CODIFICACAO E SEGREDOS (repetidos aqui de scripts/gerar_wav.py — nao
 importados de la porque scripts/ nao e um pacote importavel, ver o aviso no
 docstring de jarvis/audio_util.py sobre a mesma fronteira):
   - PYTHONUTF8=1 / PYTHONIOENCODING=utf-8 no ambiente ANTES de sintetizar: o
     `piper.exe` le o stdin com a ANSI do processo se isto nao estiver ligado,
-    e cada acento chegava partido (bug corrigido na T3 depois de medido).
+    e cada acento chegava partido (bug corrigido depois de medido).
   - o `piper.exe` corre SEM o ambiente deste processo enquanto sintetiza
     (`ambiente_sem_segredos`), para o token de mensagens da sessao-mae do
-    Claude Code e as chaves de terceiros do Sponsor nunca chegarem a um
-    processo GPL de terceiros que le um modelo vindo da rede (D50.9).
+    Claude Code e as chaves de terceiros do utilizador nunca chegarem a um
+    processo GPL de terceiros que le um modelo vindo da rede.
 
-FALLBACK EXPLICITO (D35.4): `falar()` nunca levanta. Qualquer falha na
+FALLBACK EXPLICITO: `falar()` nunca levanta. Qualquer falha na
 sintese, na reproducao ou na escrita do ficheiro e apanhada, o texto sai
 impresso na consola como resposta de recurso, e o `ResultadoFala` devolvido
-tem `falou=False` com `motivo_falha` preenchido — e assim que o Sponsor
+tem `falou=False` com `motivo_falha` preenchido — e assim que o utilizador
 continua a "ouvir" a resposta mesmo quando a voz falha (sem voz PT local que
 sirva, sem dispositivo de audio, piper.exe em falta, modelo em falta, ...).
 
-O texto a dizer e SEMPRE o que quem chamou decidiu dizer (D48.2): este modulo
+O texto a dizer e SEMPRE o que quem chamou decidiu dizer: este modulo
 nunca le transcricao nem configuracao, so recebe uma string e fala-a.
 
-SILENCIO IMEDIATO (D60, TECHNOLOGY.md S12): `calar_agora()` e o unico
+SILENCIO IMEDIATO: `calar_agora()` e o unico
 mecanismo de silenciamento do jarvis, e os tres gatilhos (Ctrl+C, saida do
 processo e o comando "cala-te" da lista branca da D4.d) chamam-no. Ele mata o
 `piper.exe` da sintese em curso — coisa que o `stream.stop()` do RealtimeTTS
@@ -44,7 +43,7 @@ reproducao. Com `definitivo=True` (Ctrl+C, saida) o modulo fica calado e
 `falar()` passa a recusar tudo: nada novo e dito, nem o resto da frase, nem
 uma despedida, nem a resposta que estivesse a chegar do Claude Code.
 
-TESTES SILENCIOSOS POR OMISSAO (D61, TECHNOLOGY.md S13): `falar()` NUNCA abre
+TESTES SILENCIOSOS POR OMISSAO: `falar()` NUNCA abre
 um dispositivo de audio sem opt-in explicito. Chamado sem `ficheiro=` e sem
 `com_som=True`, recusa-se a tocar e devolve um erro claro (`falou=False`,
 `motivo_falha` a dizer porque) ANTES de tocar em `_construir_stream()` — nao ha
@@ -53,8 +52,8 @@ escreve o WAV com `muted=True` e nunca abre dispositivo: e o caminho de todos
 os testes, autotestes e arneses. `com_som=True` e a UNICA maneira de haver som,
 com ou sem `ficheiro=` (com os dois, toca E grava, tal como
 `scripts/gerar_wav.py --com-som`), e e o que `jarvis/app.py` liga no arranque
-real (o jarvis a serio tem de falar). NAO ha variavel de ambiente para isto
-(D61.2): so o parametro explicito e, na CLI, a flag `--com-som`.
+real (o jarvis a serio tem de falar). NAO ha variavel de ambiente para isto:
+so o parametro explicito e, na CLI, a flag `--com-som`.
 
 Uso como biblioteca:
 
@@ -62,7 +61,7 @@ Uso como biblioteca:
     resultado = falar("sao quinze e trinta", com_som=True)          # toca as colunas
     resultado = falar("sao quinze e trinta", ficheiro="audio/t-voz.wav")  # so ficheiro, nunca toca
     resultado = falar("sao quinze e trinta", ficheiro="audio/t.wav", com_som=True)  # toca E grava
-    resultado = falar("sao quinze e trinta")                        # RECUSADO (D61): sem opt-in
+    resultado = falar("sao quinze e trinta")                        # RECUSADO: sem opt-in
 
 Uso na linha de comandos (sem --ficheiro e sem --com-som, nada toca):
 
@@ -103,7 +102,7 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from jarvis.audio_util import (  # noqa: E402
-    PASTA_EVIDENCIA_FORJA,
+    PASTA_EVIDENCIA,
     PASTA_MODELOS_PIPER,
     caminho_evidencia_de_saida,
     caminho_para_mostrar,
@@ -114,18 +113,18 @@ from jarvis.audio_util import (  # noqa: E402
 from jarvis.canal_claude import verificar_executavel_seguro  # noqa: E402
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
-#: A voz decidida pelo Scout (D47/S4). Nao mudar sem uma nova decisao dele.
+#: A voz escolhida para o produto. Nao mudar sem voltar a medir.
 NOME_DA_VOZ = "pt_PT-tugao-medium"
 MODELO_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx"
 CONFIG_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx.json"
 
 #: Ambiente que obriga o interprete Python do `piper.exe` a ler o stdin em
-#: UTF-8 — o mesmo bug e a mesma correcao da T3 (scripts/gerar_wav.py).
+#: UTF-8 — o mesmo bug e a mesma correcao de scripts/gerar_wav.py.
 AMBIENTE_UTF8 = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
-#: Fragmentos que marcam uma variavel de ambiente como segredo (D50.9): o
+#: Fragmentos que marcam uma variavel de ambiente como segredo: o
 #: `piper.exe` e codigo GPL de terceiros e nao tem nada que fazer com o token
-#: vivo da sessao-mae do Claude Code nem com chaves de terceiros do Sponsor.
+#: vivo da sessao-mae do Claude Code nem com chaves de terceiros do utilizador.
 PADROES_DE_VARIAVEL_SENSIVEL = (
     "TOKEN",
     "SECRET",
@@ -147,7 +146,7 @@ def variavel_sensivel(nome: str) -> bool:
 
 @contextlib.contextmanager
 def _ambiente_sem_segredos():
-    """Tira os segredos de `os.environ` enquanto o piper.exe corre (D50.9)."""
+    """Tira os segredos de `os.environ` enquanto o piper.exe corre."""
     escondidas = {nome: valor for nome, valor in os.environ.items() if variavel_sensivel(nome)}
     for nome in escondidas:
         del os.environ[nome]
@@ -160,8 +159,8 @@ def _ambiente_sem_segredos():
 def caminho_do_piper_exe() -> Path:
     """O piper.exe DESTE venv (mesma pasta Scripts/ do interprete a correr).
 
-    Caminho absoluto de proposito (TECHNOLOGY.md S4): nunca o PATH nem
-    PIPER_PATH. `verificar_executavel_seguro` e defesa em profundidade (D48.1):
+    Caminho absoluto de proposito: nunca o PATH nem
+    PIPER_PATH. `verificar_executavel_seguro` e defesa em profundidade:
     este candidato nunca vem do PATH nem de configuracao, so aqui por
     seguranca extra.
     """
@@ -176,15 +175,15 @@ def caminho_do_piper_exe() -> Path:
 
 
 def _preparar_encoding_do_piper() -> None:
-    """Poe o ambiente em UTF-8 para o piper.exe (bug corrigido na T3).
+    """Poe o ambiente em UTF-8 para o piper.exe.
 
     Atribuicao direta, nao setdefault: um PYTHONUTF8=0 herdado do ambiente do
-    Sponsor traria o bug de volta em silencio (mesma nota de gerar_wav.py).
+    utilizador traria o bug de volta em silencio (mesma nota de gerar_wav.py).
     """
     os.environ.update(AMBIENTE_UTF8)
 
 
-# --- Silencio imediato: matar a sintese em curso (D60, TECHNOLOGY.md S12) ---
+# --- Silencio imediato: matar a sintese em curso ---
 
 #: Fasquia da D60: do pedido de paragem (Ctrl+C, saida do processo ou
 #: "cala-te") ao ultimo sample de audio, no maximo isto.
@@ -192,11 +191,11 @@ LIMITE_DE_SILENCIO_MS = 500.0
 
 
 class MorteDoPiper:
-    """A metade "sabe morrer" do motor de voz (TECHNOLOGY.md S12, opcao A).
+    """A metade "sabe morrer" do motor de voz (opcao A).
 
     O `PiperEngine` do RealtimeTTS 0.8.5 sintetiza com um `subprocess.run()`
     BLOQUEANTE e nao guarda o processo em lado nenhum
-    (`RealtimeTTS/engines/piper_engine.py:134-142`, confirmado nesta task
+    (`RealtimeTTS/engines/piper_engine.py:134-142`, confirmado
     contra a versao instalada): por isso um `TextToAudioStream.stop()` NAO
     interrompe uma sintese em curso — o `piper.exe` corre ate ao fim e so
     depois e que tudo para. Esta classe reimplementa `synthesize()` com
@@ -207,9 +206,9 @@ class MorteDoPiper:
     do RealtimeTTS (ver `_construir_stream`), e uma classe nao pode herdar de
     algo que ainda nao foi importado. A classe final compoe-se em
     `classe_do_motor_com_morte()`; assim esta logica fica testavel sozinha,
-    sem RealtimeTTS, sem Piper e sem dispositivo de audio (D61).
+    sem RealtimeTTS, sem Piper e sem dispositivo de audio.
 
-    ACHADO DE TASK, que a S12 mandava escrever se aparecesse: ha mesmo uma
+    ACHADO, registado aqui de proposito: ha mesmo uma
     corrida entre a thread que sintetiza e a que cala, por isso existe o
     `_tranca_do_processo`. Ele protege SO as atribuicoes de `_processo_atual`
     e a leitura que `matar_agora()` faz; nunca fica preso durante o
@@ -249,7 +248,7 @@ class MorteDoPiper:
         with self._tranca_do_processo:
             if self._calado:
                 # Ja houve pedido de silencio: nao se comeca nada de novo
-                # (D60(1): nem o resto da frase, nem uma despedida).
+                # (nem o resto da frase, nem uma despedida).
                 return False
             try:
                 processo = subprocess.Popen(
@@ -262,7 +261,7 @@ class MorteDoPiper:
             except FileNotFoundError:
                 print(f"Error: Piper executable not found at '{self.piper_path}'.")
                 return False
-            # ANTES do communicate() (S12): e este handle que da ao Ctrl+C
+            # ANTES do communicate(): e este handle que da ao Ctrl+C
             # alguem para matar enquanto esta thread esta bloqueada la dentro.
             self._processo_atual = processo
 
@@ -287,8 +286,7 @@ class MorteDoPiper:
     def stop(self):
         """O `stream.stop()` chama isto (text_to_stream.py:949).
 
-        A classe-base so marca um evento que o `PiperEngine` nunca le (S12,
-        achado 2); aqui mata-se mesmo o processo, para que ate um
+        A classe-base so marca um evento que o `PiperEngine` nunca le; aqui mata-se mesmo o processo, para que ate um
         `stream.stop()` sozinho corte a sintese em curso.
         """
         self.matar_agora()
@@ -312,7 +310,7 @@ class MorteDoPiper:
         try:
             if processo.poll() is not None:
                 return False
-            processo.kill()  # Windows: TerminateProcess, sem espera (S12)
+            processo.kill()  # Windows: TerminateProcess, sem espera
         except Exception:  # noqa: BLE001 - calar nunca pode levantar
             return False
         return True
@@ -323,7 +321,7 @@ _CLASSE_DO_MOTOR: type | None = None
 
 
 def classe_do_motor_com_morte(piper_engine: type) -> type:
-    """A subclasse real do `PiperEngine` que sabe morrer (S12)."""
+    """A subclasse real do `PiperEngine` que sabe morrer."""
     global _CLASSE_DO_MOTOR
     if _CLASSE_DO_MOTOR is None or not issubclass(_CLASSE_DO_MOTOR, piper_engine):
         _CLASSE_DO_MOTOR = type("PiperEngineComMorte", (MorteDoPiper, piper_engine), {})
@@ -359,7 +357,7 @@ def esta_calado() -> bool:
 
     Quem fala consulta isto A MONTANTE: depois de um Ctrl+C nada novo e
     falado, nem o resto da frase, nem uma despedida, nem a resposta que
-    estivesse a chegar do Claude Code (D60(1)).
+    estivesse a chegar do Claude Code.
     """
     with _TRANCA_DA_VOZ:
         return _calado_ate_novo_aviso
@@ -369,7 +367,7 @@ def retomar_a_voz() -> None:
     """Desfaz o silencio definitivo.
 
     O processo do jarvis nunca chama isto (depois de um Ctrl+C nada volta a
-    falar, D60(1)): existe para os testes e para quem use este modulo como
+    falar): existe para os testes e para quem use este modulo como
     biblioteca depois de ter pedido silencio.
     """
     global _calado_ate_novo_aviso
@@ -383,7 +381,7 @@ class ResultadoSilencio:
 
     #: Relogio de parede do pedido e do fim do audio: sao estes dois que vao
     #: para o log, para o intervalo se ler em milissegundos como as outras
-    #: etapas (D2/D11).
+    #: etapas.
     instante_do_pedido: datetime.datetime
     instante_do_fim_do_audio: datetime.datetime
     #: Medido com `time.perf_counter` entre os dois instantes acima.
@@ -401,7 +399,7 @@ class ResultadoSilencio:
 
 #: O RealtimeTTS grita no logger raiz quando lhe matam a sintese por baixo:
 #: chama "failed ... unknown error" ao que foi uma ordem cumprida. Mesma regra
-#: da T12 (jarvis/app.py, ruido do encerramento): descarta-se SO o ruido
+#: do ruido do encerramento em jarvis/app.py: descarta-se SO o ruido
 #: conhecido, SO durante a janela em que se esta a calar, e tudo o resto passa.
 _RUIDO_DE_QUEM_FOI_MANDADO_CALAR = (
     "failed to synthesize sentence",
@@ -494,14 +492,14 @@ def calar_agora(
 ) -> ResultadoSilencio:
     """Cala a voz JA: mata a sintese em curso e so depois para a reproducao.
 
-    E o UNICO mecanismo de silenciamento do jarvis (D60(2)): usam-no o handler
+    E o UNICO mecanismo de silenciamento do jarvis: usam-no o handler
     de Ctrl+C, a saida do processo e a accao "calar" da lista branca da D4.d (e
     o equivalente ingles quando existir). A ordem — `matar_agora()` primeiro,
-    `stream.stop()` depois — e a da S12 e nao e negociavel: parar a reproducao
+    `stream.stop()` depois — nao e negociavel: parar a reproducao
     com uma sintese viva deixaria o `stop()` a espera do `piper.exe`.
 
     `definitivo=True` (Ctrl+C, saida do processo) marca tambem o modulo como
-    calado, e a partir dai `falar()` recusa tudo (D60(1)).
+    calado, e a partir dai `falar()` recusa tudo.
 
     `registar` e uma funcao de log (tipicamente `LogDaSessao.linha`): recebe a
     linha do pedido ANTES do trabalho e a linha do fim do audio DEPOIS, que
@@ -535,7 +533,7 @@ def calar_agora(
             except Exception as erro:  # noqa: BLE001 - calar nunca pode levantar
                 falhas.append(f"matar_agora: {erro}")
 
-        # (2) e so agora a reproducao ja sintetizada (achado 4 da S12: corta em
+        # (2) e so agora a reproducao ja sintetizada (corta em
         # dezenas de ms, desde que nao haja sintese viva a bloquear o join).
         parar = getattr(stream, "stop", None)
         if callable(parar):
@@ -566,12 +564,12 @@ def calar_agora(
 
 
 def _construir_stream():
-    """Constroi o TextToAudioStream ligado ao PiperEngine real (S4)."""
+    """Constroi o TextToAudioStream ligado ao PiperEngine real."""
     # O RealtimeTTS importa o pydub (dependencia transitiva, so para outros
     # motores que este jarvis nunca usa) e o pydub avisa em stderr que nao
-    # encontra o ffmpeg (QA-close-1.md, finding 4a): o caminho de voz real e
+    # encontra o ffmpeg: o caminho de voz real e
     # o piper.exe chamado como executavel e nunca usa ffmpeg, por isso o aviso
-    # e ruido puro para o Sponsor. So este import fica silenciado, so este
+    # e ruido puro para o utilizador. So este import fica silenciado, so este
     # aviso: warnings.filters volta ao estado de antes ao sair do `with`
     # (contrato do proprio contextlib.catch_warnings), nada fica global.
     with warnings.catch_warnings():
@@ -589,13 +587,13 @@ def _construir_stream():
     piper_exe = caminho_do_piper_exe()
     _preparar_encoding_do_piper()
     voz = PiperVoice(model_file=str(MODELO_ONNX), config_file=str(CONFIG_ONNX))
-    # O motor e o PiperEngine decidido na S4, com a morte da S12 por cima: sem
+    # O motor e o PiperEngine, com o `matar_agora()` por cima: sem
     # isto, nem o Ctrl+C nem o "cala-te" conseguem interromper uma sintese em
-    # curso, porque o PiperEngine original nao guarda o processo (D60).
+    # curso, porque o PiperEngine original nao guarda o processo.
     motor = classe_do_motor_com_morte(PiperEngine)(voice=voz, piper_path=str(piper_exe))
     # tokenizer="rule-based": o default "nltk+rule-based" faz o stream2sentence
-    # descarregar punkt_tab da rede na primeira corrida (achado da T3, fora do
-    # registo de modelos da D14e); uma frase de cada vez nao precisa dele.
+    # descarregar punkt_tab da rede na primeira corrida (fora do registo de
+    # modelos de docs/MODELOS.md); uma frase de cada vez nao precisa dele.
     return TextToAudioStream(motor, language="pt", tokenizer="rule-based")
 
 
@@ -606,7 +604,7 @@ def _duracao_do_wav(caminho: Path) -> float:
     return (len(dados) / 2 / canais) / taxa
 
 
-#: `motivo_falha` de quem nao falou porque lhe mandaram calar (D60), para
+#: `motivo_falha` de quem nao falou porque lhe mandaram calar, para
 #: quem chama distinguir "a voz falhou" de "a voz obedeceu".
 MOTIVO_SILENCIADO = "silenciado a pedido (D60): nada novo e falado"
 
@@ -620,14 +618,14 @@ class ResultadoFala:
     #: Preenchido so no modo --ficheiro, com sucesso.
     caminho: Path | None = None
     duracao_s: float | None = None
-    #: Nao vazio quando falou=False (D35.4): a razao do fallback para texto.
+    #: Nao vazio quando falou=False: a razao do fallback para texto.
     motivo_falha: str = ""
 
 
 #: D61: `falar()` sem `ficheiro=` e sem `com_som=True` e um erro de teste, nao
 #: um "tentar e falhar em silencio" — recusa-se ANTES de tocar em
 #: `_construir_stream()`, por isso nenhum dispositivo de audio chega a ser
-#: considerado. Nao ha variavel de ambiente para isto (D61.2).
+#: considerado. Nao ha variavel de ambiente para isto.
 MOTIVO_SEM_OPT_IN = (
     "falar() recusado (D61): sem ficheiro= e sem com_som=True nao se abre nenhum "
     "dispositivo de audio; ouvir e sempre opt-in explicito (flag --com-som na CLI, "
@@ -640,7 +638,7 @@ def falar(
 ) -> ResultadoFala:
     """Fala `texto` em voz alta (Piper), ou grava-o num WAV se `ficheiro` for dado.
 
-    D61/S13: sem `ficheiro=` E sem `com_som=True`, esta funcao RECUSA-SE a
+    Sem `ficheiro=` E sem `com_som=True`, esta funcao RECUSA-SE a
     tocar — devolve `falou=False` com `motivo_falha=MOTIVO_SEM_OPT_IN` antes de
     tentar construir seja o que for, e portanto antes de qualquer hipotese de
     abrir um dispositivo de audio. So com `ficheiro=`, sintetiza para WAV com
@@ -649,7 +647,7 @@ def falar(
     `jarvis/app.py` liga no arranque real), com `ficheiro=` toca E grava, tal
     como `scripts/gerar_wav.py --com-som`.
 
-    NUNCA levanta (D35.4): qualquer falha na sintese, na reproducao ou na
+    NUNCA levanta: qualquer falha na sintese, na reproducao ou na
     escrita do ficheiro e apanhada aqui dentro, o texto sai impresso na
     consola como resposta de recurso, e o resultado devolvido diz porque.
     """
@@ -669,8 +667,8 @@ def falar(
 
     if esta_calado():
         # Ja houve Ctrl+C ou saida do processo: nada NOVO e falado, e nem se
-        # imprime o recurso da D35.4 — quem pediu silencio pediu silencio
-        # (D60(1)). Este e o guarda a montante de TUDO o que se segue: corre
+        # imprime o recurso da D35.4 — quem pediu silencio pediu silencio.
+        # Este e o guarda a montante de TUDO o que se segue: corre
         # antes do guarda da D61 de proposito, senao um pedido sem opt-in
         # depois do Ctrl+C ainda escrevia a frase na consola que a D60(1)
         # manda calar.
@@ -686,7 +684,7 @@ def falar(
     try:
         stream = _construir_stream()
         # Registado ANTES de falar: e por aqui que `calar_agora()`, noutra
-        # thread, chega ao motor e ao stream desta frase (D60/S12).
+        # thread, chega ao motor e ao stream desta frase.
         _guardar_voz_ativa(stream)
         try:
             stream.feed(texto_limpo)
@@ -696,7 +694,7 @@ def falar(
                     # muted=not com_som: sem opt-in (o caso de todos os testes,
                     # autotestes e arneses) escreve o WAV sem abrir dispositivo
                     # nenhum; com --com-som toca E grava, exatamente como
-                    # scripts/gerar_wav.py --com-som (D61: `--com-som` quer
+                    # scripts/gerar_wav.py --com-som (`--com-som` quer
                     # dizer a mesma coisa em todo o repositorio).
                     stream.play(muted=not com_som, output_wavfile=str(saida))
                 else:
@@ -706,7 +704,7 @@ def falar(
                 raise  # falha normal: vai para o recuo da D35.4 la em baixo
             # Ctrl+C (ou SystemExit) a subir por aqui: calar AGORA, antes de
             # o `finally` largar o registo da voz ativa — senao ficava um
-            # piper.exe vivo a acabar a frase sozinho (D60).
+            # piper.exe vivo a acabar a frase sozinho.
             calar_agora("Ctrl+C a meio da frase (D30/D60)", definitivo=True)
             raise
         finally:
@@ -730,7 +728,7 @@ def falar(
         except Exception as erro:  # noqa: BLE001 - D35.4: `falar()` nunca levanta
             # Acontece com um WAV cortado a meio por um "cala-te": o ficheiro
             # existe mas pode nao fechar como WAV valido. Nao e uma falha da
-            # voz a dizer ao Sponsor, e o resultado de ele ter mandado calar.
+            # voz a dizer ao utilizador, e o resultado de ele ter mandado calar.
             return ResultadoFala(falou=False, caminho=saida, motivo_falha=f"WAV por ler: {erro}")
         return ResultadoFala(falou=True, caminho=saida, duracao_s=duracao_s)
     return ResultadoFala(falou=True)
@@ -773,14 +771,14 @@ def _autoteste() -> int:
         (RAIZ / caminho_teste).unlink(missing_ok=True)
 
     # 3. caminho fora do repositorio e recusado ANTES de tocar no Piper
-    # (mesma regra de audio_util.caminho_wav_de_saida, D48.2).
+    # (mesma regra de audio_util.caminho_wav_de_saida).
     with tempfile.TemporaryDirectory() as pasta:
         fora_da_raiz = str(Path(pasta) / "fora.wav")
         resultado_fora = falar("nunca deveria escrever aqui", ficheiro=fora_da_raiz)
         verificar("caminho fora do repo: falou=False", resultado_fora.falou, False)
         verificar("caminho fora do repo: nada escrito", Path(fora_da_raiz).exists(), False)
 
-    # 4. fallback explicito (D35.4): um motor que rebenta nunca propaga a
+    # 4. fallback explicito: um motor que rebenta nunca propaga a
     # excecao, e o texto sai impresso na consola em vez da voz.
     # `sys.modules[__name__]` e nao `import jarvis.voz`, de proposito: corrido
     # como `python -m jarvis.voz` este ficheiro executa como `__main__`, e um
@@ -853,8 +851,8 @@ def _autoteste() -> int:
 # --- Prova de tempo do silencio, sem microfone e sem tocar som (D60(4)(b)) --
 
 #: Frase comprida (dentro do limite do contrato da resposta falada) so para a
-#: sintese demorar o suficiente a ser apanhada a MEIO, que e o pior caso da
-#: S12: com o `piper.exe` vivo, `stream.stop()` sozinho ficaria a espera dele.
+#: sintese demorar o suficiente a ser apanhada a MEIO, que e o pior caso:
+#: com o `piper.exe` vivo, `stream.stop()` sozinho ficaria a espera dele.
 FRASE_DA_PROVA = (
     "Esta frase existe so para a prova do silencio imediato: e comprida de "
     "proposito para a sintese ainda estar a meio quando o pedido de paragem "
@@ -911,7 +909,7 @@ def _esperar_por_piper_no_sistema(limite_s: float = 30.0) -> bool:
 
     E a unica forma de saber que a sintese comecou no caso "antes": o
     `PiperEngine` original nao guarda o processo em lado nenhum — que e
-    exatamente o defeito que a S12 descreve.
+    exatamente o defeito que este modulo corrige.
     """
     fim = time.perf_counter() + limite_s
     while time.perf_counter() < fim:
@@ -924,7 +922,7 @@ def _esperar_por_piper_no_sistema(limite_s: float = 30.0) -> bool:
 def _caso_sem_wrapper() -> dict:
     """O MESMO pedido de paragem com o `PiperEngine` original: o "antes".
 
-    Mede o que a S12 previu em teoria (achado 3): com a sintese em curso,
+    Mede o que se previu em teoria: com a sintese em curso,
     `stream.stop()` sozinho fica a espera que o `piper.exe` acabe a frase.
     """
     with warnings.catch_warnings():
@@ -979,7 +977,7 @@ def _um_caso_da_prova(motivo: str, *, definitivo: bool, nome_do_wav: str) -> dic
 
     def falar_em_ficheiro() -> None:
         # ficheiro= sem com_som: muted=True no RealtimeTTS, NUNCA abre
-        # dispositivo de saida de audio (D61/S13). Esta prova nao faz barulho.
+        # dispositivo de saida de audio. Esta prova nao faz barulho.
         resultado["fala"] = falar(FRASE_DA_PROVA, ficheiro=str(caminho))
 
     thread = threading.Thread(target=falar_em_ficheiro, name="prova-silencio", daemon=True)
@@ -1031,24 +1029,24 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
     o "cala-te" da lista branca (nao definitivo) e o Ctrl+C / saida do
     processo (definitivo, depois do qual nada novo e falado).
     """
-    # Confinamento do --evidencia a docs/forja/evidence/ (bloqueador 2 do
-    # Security Reviewer, T4/T12): validado JA, antes de gastar tempo a
+    # Confinamento do --evidencia a PASTA_EVIDENCIA (achado de revisao de
+    # seguranca): validado JA, antes de gastar tempo a
     # sintetizar seja o que for, para um caminho invalido nunca chegar a
     # `garantir_pasta`/`write_text` (que criavam pastas e escreviam fora do
-    # repo com os privilegios do Sponsor).
+    # repo com os privilegios do utilizador).
     try:
         destino = (
             caminho_evidencia_de_saida(caminho_pedido)
             if caminho_pedido
-            else PASTA_EVIDENCIA_FORJA / f"silencio-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
+            else PASTA_EVIDENCIA / f"silencio-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
         )
     except ValueError as erro:
         print(f"FALHOU (confinamento do --evidencia, D1/D10): {erro}", file=sys.stderr)
         return 1
     garantir_pasta(destino.parent)
 
-    print("=== jarvis - prova do silencio imediato (D60) - sem som, sem microfone ===")
-    # O "antes": o mesmo pedido de paragem sem o wrapper da S12, para o numero
+    print("=== jarvis - prova do silencio imediato - sem som, sem microfone ===")
+    # O "antes": o mesmo pedido de paragem sem o wrapper que mata o piper.exe, para o numero
     # da fasquia ter com o que ser comparado.
     try:
         antes = _caso_sem_wrapper()
@@ -1062,28 +1060,28 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
         _um_caso_da_prova("Ctrl+C (D30/D60)", definitivo=True, nome_do_wav="_prova_silencio_ctrlc.wav")
     )
 
-    # Depois do Ctrl+C nada NOVO e falado (D60(1)): nem uma despedida.
+    # Depois do Ctrl+C nada NOVO e falado: nem uma despedida.
     depois = falar("Adeus, ate a proxima.", ficheiro="audio/_prova_silencio_depois.wav")
     escreveu_alguma_coisa = (RAIZ / "audio" / "_prova_silencio_depois.wav").is_file()
     (RAIZ / "audio" / "_prova_silencio_depois.wav").unlink(missing_ok=True)
 
     agora = datetime.datetime.now()
     partes: list[str] = []
-    partes.append("# Evidencia de tempo do silencio imediato (T4, D60)\n")
+    partes.append("# Evidencia de tempo do silencio imediato\n")
     partes.append(
         f"Gerado por `.venv\\Scripts\\python -m jarvis.voz --prova-silencio` em "
         f"{_agora_com_ms(agora)}.\n"
     )
     partes.append(
         "Voz REAL (Piper, `pt_PT-tugao-medium`) pelo caminho de FICHEIRO: nenhum dispositivo de\n"
-        "saida de audio foi aberto e nenhum microfone foi usado (D61/S13 — `falar(..., ficheiro=)`\n"
+        "saida de audio foi aberto e nenhum microfone foi usado (`falar(..., ficheiro=)`\n"
         "sem `com_som` toca com `muted=True`). Os WAV de prova sao apagados no fim; a pasta `audio/` ja e\n"
         "ignorada pelo Git.\n"
     )
     partes.append(
         f"Fasquia da D60: <= {LIMITE_DE_SILENCIO_MS:.0f} ms entre o pedido de paragem e o fim do audio.\n"
     )
-    partes.append("\n## Antes: o mesmo pedido sem o wrapper da S12\n")
+    partes.append("\n## Antes: o mesmo pedido sem o wrapper que mata o piper.exe\n")
     if "erro" in antes:
         partes.append(f"- nao medido nesta corrida: {antes['erro']}\n")
     else:
@@ -1100,7 +1098,7 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
         duracao_escrita = "sem WAV" if duracao is None else f"{duracao:.2f} s"
         partes.append(f"\n## Gatilho: {caso['motivo']}\n")
         partes.append(
-            f"- sintese apanhada VIVA a meio (pior caso da S12): "
+            f"- sintese apanhada VIVA a meio (pior caso): "
             f"{'sim' if caso['apanhou_a_sintese'] else 'nao'}\n"
             f"- `piper.exe` morto por `matar_agora()`: {'sim' if caso['matou_sintese'] else 'nao'}\n"
             f"- reproducao parada por `stream.stop()`: {'sim' if caso['parou_reproducao'] else 'nao'}\n"
@@ -1153,9 +1151,9 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # T11: unico ponto de entrada que ainda nao forcava a consola para UTF-8.
+    # Forca a consola para UTF-8, como os outros pontos de entrada.
     # Sem isto, `python -m jarvis.voz --help` rebenta com UnicodeEncodeError
-    # numa consola em codepage 850 (a do Sponsor, QA-close-1.md).
+    # numa consola em codepage 850.
     forcar_consola_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("texto", nargs="?", help="frase a dizer em voz alta, em portugues europeu")

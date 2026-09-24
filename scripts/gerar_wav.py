@@ -1,18 +1,18 @@
-r"""Gera um WAV pt-PT com a voz Piper, para provar o jarvis sem microfone (D33).
+r"""Gera um WAV pt-PT com a voz Piper, para provar o jarvis sem microfone.
 
-Motor: RealtimeTTS 0.8.5, PiperEngine real (D47/TECHNOLOGY.md S4) a falar com o
-`piper.exe` do proprio venv — a API exata que o Scout deixou escrita:
+Motor: RealtimeTTS 0.8.5, PiperEngine real a falar com o
+`piper.exe` do proprio venv — a API exata:
 
     from RealtimeTTS import TextToAudioStream, PiperEngine, PiperVoice
     voice = PiperVoice(model_file=..., config_file=...)
     engine = PiperEngine(voice=voice, piper_path=<caminho absoluto do venv>)
     stream = TextToAudioStream(engine)
 
-O texto da linha de comandos e entrada externa (D48(2)): o PiperEngine do
+O texto da linha de comandos e entrada externa: o PiperEngine do
 RealtimeTTS ja o entrega ao `piper.exe` por stdin, nunca por argv nem por um
 shell (`subprocess.run(cmd_list, input=texto.encode(...), shell=False)`, lido
 em RealtimeTTS/engines/piper_engine.py) — este script nunca constroi uma linha
-de comandos a mao. `verificar_executavel_seguro` (jarvis.canal_claude, D48(1))
+de comandos a mao. `verificar_executavel_seguro` (jarvis.canal_claude)
 e reaproveitado so como defesa em profundidade, e faz exatamente uma coisa:
 recusa um alvo com extensao que o Windows mandaria ao cmd.exe (.cmd/.bat/.ps1).
 Nao verifica que o alvo e o piper-tts — quem garante isso e a origem do
@@ -20,11 +20,11 @@ caminho, `Path(sys.executable).resolve().parent / "piper.exe"`, que nunca vem
 do PATH nem de configuracao.
 
 A voz `pt_PT-tugao-medium` sintetiza nativamente a 22050 Hz (ver
-models/piper/pt_PT-tugao-medium.onnx.json). O criterio da T3 pede um WAV mono
+models/piper/pt_PT-tugao-medium.onnx.json). A transcricao pede um WAV mono
 de 16 kHz; a reamostragem final e feita so com audioop (stdlib, sem
 dependencia nova) em jarvis.audio_util.reamostrar_pcm16.
 
-CODIFICACAO DO TEXTO (bug corrigido na tentativa 2, ver
+CODIFICACAO DO TEXTO (bug corrigido, ver
 `preparar_encoding_do_piper`): o `piper.exe` e um console script Python que le
 o texto de `sys.stdin` em modo texto (piper/__main__.py: `texts = sys.stdin`),
 ou seja descodificado com a codificacao ANSI do processo — cp1252 nesta
@@ -32,11 +32,11 @@ maquina. O PiperEngine manda-lhe UTF-8. Sem correcao, cada `a`/`c` acentuado
 chegava partido em dois caracteres e a voz soava os NOMES deles ("a til",
 "paragrafo"), com exit 0 e sem aviso nenhum.
 
-TESTES SILENCIOSOS POR OMISSAO (D61, TECHNOLOGY.md S13): por omissao este
+TESTES SILENCIOSOS POR OMISSAO: por omissao este
 script NUNCA abre um dispositivo de audio — so escreve o WAV pedido
 (`muted=True`, como sempre fez). Ouvir o que foi gerado, alem de o escrever, e
-`--com-som`, sempre opt-in explicito e nunca uma variavel de ambiente
-(D61.2). `--autoteste` nunca usa `--com-som`: a regressao continua muda.
+`--com-som`, sempre opt-in explicito e nunca uma variavel de ambiente.
+`--autoteste` nunca usa `--com-som`: a regressao continua muda.
 
 Uso:
     .venv\Scripts\python scripts/gerar_wav.py "que horas sao" --saida audio/t-horas.wav
@@ -83,13 +83,13 @@ CONFIG_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx.json"
 #: tambem ajuda o piper a ler o .onnx.json); PYTHONIOENCODING e o cinto e os
 #: suspensorios para o caso de o modo UTF-8 vir desligado por politica.
 #: Atribuicao direta e nao setdefault de proposito: um PYTHONUTF8=0 herdado do
-#: ambiente do Sponsor traria o bug de volta em silencio.
+#: ambiente do utilizador traria o bug de volta em silencio.
 AMBIENTE_UTF8 = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 #: Fragmentos que marcam uma variavel de ambiente como segredo. O `piper.exe`
 #: e codigo de terceiros (GPL, carrega um ONNX vindo da rede) e nao tem nada
 #: que fazer com o token vivo da sessao-mae do Claude Code nem com as chaves de
-#: terceiros que o ambiente do Sponsor traz (D50(9): menor privilegio).
+#: terceiros que o ambiente do utilizador traz (menor privilegio).
 PADROES_DE_VARIAVEL_SENSIVEL = (
     "TOKEN",
     "SECRET",
@@ -126,7 +126,7 @@ def ambiente_sem_segredos():
     que a D48(5) tira de proposito aos filhos do canal — e as chaves de
     terceiros da D50(9) chegavam todos ao `piper.exe`.
 
-    Gestor de contexto e nao limpeza global de proposito: a T4 vai chamar isto
+    Gestor de contexto e nao limpeza global de proposito: o jarvis chama isto
     de dentro de um processo vivo e nao pode ficar com o ambiente mutilado
     depois de sintetizar uma frase.
 
@@ -144,12 +144,12 @@ def ambiente_sem_segredos():
 def caminho_do_piper_exe() -> Path:
     """O piper.exe DESTE venv (mesma pasta Scripts/ do interprete a correr).
 
-    Caminho absoluto de proposito (TECHNOLOGY.md S4): o jarvis pode correr sem
+    Caminho absoluto de proposito: o jarvis pode correr sem
     o venv ativado no PATH do processo, e o PiperEngine cai para "piper.exe"
     sem caminho nenhum se nao lhe disserem onde procurar.
     """
     candidato = Path(sys.executable).resolve().parent / "piper.exe"
-    verificar_executavel_seguro(candidato)  # defesa em profundidade (D48.1)
+    verificar_executavel_seguro(candidato)  # defesa em profundidade
     if not candidato.is_file():
         raise FileNotFoundError(
             f"piper.exe nao encontrado em '{candidato}'. Instalar com: "
@@ -216,7 +216,7 @@ def sintetizar_para_wav_bruto(
 ) -> int:
     """Escreve o WAV que sai do Piper, na taxa nativa da voz. Devolve a taxa em Hz.
 
-    `com_som` (D61, opt-in explicito, nunca variavel de ambiente): False por
+    `com_som` (opt-in explicito, nunca variavel de ambiente): False por
     omissao — so escreve `caminho_bruto`, nenhum dispositivo de audio e aberto
     (`StreamPlayer.open_stream` nem tenta quando `muted=True`). Com
     `com_som=True` toca a serio nas colunas AO MESMO TEMPO que escreve o
@@ -226,7 +226,7 @@ def sintetizar_para_wav_bruto(
     from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
 
     # Repetido aqui de proposito (a verificacao fica em cache, nao custa nada):
-    # quem reutilizar esta funcao a partir da T5/T7 sem passar por gerar_wav()
+    # quem reutilizar esta funcao sem passar por gerar_wav()
     # tem de apanhar a mesma garantia de codificacao.
     preparar_encoding_do_piper()
 
@@ -240,7 +240,7 @@ def sintetizar_para_wav_bruto(
     voz = PiperVoice(model_file=str(MODELO_ONNX), config_file=str(CONFIG_ONNX))
     motor = PiperEngine(voice=voz, piper_path=str(piper_exe))
     # muted=not com_som: por omissao (com_som=False) nunca abre um dispositivo
-    # de saida de audio (D61/S13); so com --com-som explicito e que este
+    # de saida de audio; so com --com-som explicito e que este
     # script toca alguma coisa alem de escrever o ficheiro.
     # tokenizer="rule-based": o default "nltk+rule-based" manda o stream2sentence
     # fazer `nltk.download("punkt_tab")` na primeira corrida — 4,3 MB vindos da
@@ -250,7 +250,7 @@ def sintetizar_para_wav_bruto(
     stream = TextToAudioStream(motor, muted=not com_som, language="pt", tokenizer="rule-based")
     stream.feed(texto)
     # O unico sitio onde nasce o processo do piper.exe: e aqui que o ambiente
-    # deste processo tem de estar sem segredos (D50(9)).
+    # deste processo tem de estar sem segredos.
     with ambiente_sem_segredos():
         stream.play(muted=not com_som, output_wavfile=str(caminho_bruto))
     _, taxa, _ = ler_wav_pcm16(caminho_bruto)
@@ -260,7 +260,7 @@ def sintetizar_para_wav_bruto(
 def gerar_wav(texto: str, saida: Path, *, com_som: bool = False) -> tuple[Path, float, int]:
     """Sintetiza `texto` em `saida` (16 kHz mono). Devolve (caminho, duracao_s, bytes).
 
-    `com_som` (D61): False por omissao, nunca abre dispositivo de audio; True
+    `com_som`: False por omissao, nunca abre dispositivo de audio; True
     toca a serio nas colunas ALEM de escrever `saida`, so quando pedido de
     forma explicita (`--com-som` na CLI).
     """
@@ -281,7 +281,7 @@ def gerar_wav(texto: str, saida: Path, *, com_som: bool = False) -> tuple[Path, 
         if canais != 1:
             raise ValueError(
                 f"o Piper devolveu {canais} canais e este script escreve um cabecalho "
-                "mono (criterio da T3: WAV mono de 16 kHz)"
+                "mono (a transcricao pede WAV mono de 16 kHz)"
             )
         dados_16k = reamostrar_pcm16(dados, taxa_nativa, TAXA_AMOSTRAGEM_PADRAO, canais)
         escrever_wav_pcm16(saida, dados_16k, TAXA_AMOSTRAGEM_PADRAO, canais=canais)
@@ -299,14 +299,14 @@ def gerar_wav(texto: str, saida: Path, *, com_som: bool = False) -> tuple[Path, 
 #: (o Piper passa a soar os nomes dos caracteres: "a til", "paragrafo", ...).
 #: E o unico literal com acentos do repositorio e esta escrito como texto, nao
 #: com escapes: o teste tem de mandar ao Piper os mesmos bytes que uma frase
-#: real do Sponsor, e o ficheiro esta em UTF-8 (a codificacao de origem por
+#: real do utilizador, e o ficheiro esta em UTF-8 (a codificacao de origem por
 #: omissao no Python 3). O comentario ao lado da a leitura em ASCII.
 FRASE_ACENTUADA = "Olá, são três horas e trinta."  # "Ola, sao tres horas e trinta."
 FRASE_SEM_ACENTOS = "Ola, sao tres horas e trinta."
 
 #: Acima deste racio duracao(acentuada)/duracao(sem acentos) o texto chegou
 #: partido ao Piper. Medido nesta maquina: 1.0x-1.1x com a correcao, 5.2x sem
-#: ela (7.89 s contra 1.52 s, numeros do veredicto da tentativa 1).
+#: ela (7.89 s contra 1.52 s).
 RACIO_MAXIMO_DE_DURACAO = 2.0
 
 
@@ -317,7 +317,7 @@ def _autoteste() -> int:
        mecanismo exato do `piper.exe`;
     2) com o Piper a serio: sintetiza a mesma frase com e sem acentos e compara
        as duracoes — e a unica verificacao que apanha o bug de ponta a ponta, e
-       a aceitacao da T3 ("que horas sao") nao a faz porque e 100% ASCII.
+       a frase de aceitacao ("que horas sao") nao a faz porque e 100% ASCII.
     """
     falhas: list[str] = []
 
@@ -344,7 +344,7 @@ def _autoteste() -> int:
         AMBIENTE_UTF8,
     )
 
-    # 1b. Menor privilegio do filho (D50(9)): enquanto o piper corre, o
+    # 1b. Menor privilegio do filho: enquanto o piper corre, o
     # ambiente deste processo nao tem segredo nenhum — e o filho herda-o tal e
     # qual, porque o PiperEngine arranca sem `env=`. Provado com um filho real,
     # arrancado do mesmo modo, a listar o que ve. Os dois nomes de teste sao
@@ -379,7 +379,7 @@ def _autoteste() -> int:
                 "1",
             )
         verificar(
-            "ambiente: fora do bloco fica tudo como estava (a T4 corre num processo vivo)",
+            "ambiente: fora do bloco fica tudo como estava (o jarvis corre num processo vivo)",
             [os.environ.get(nome) for nome in NOMES_DE_TESTE],
             ["valor-de-teste-inventado", "valor-de-teste-inventado"],
         )
@@ -459,7 +459,7 @@ def main() -> int:
         print("ERRO: o texto nao pode ser vazio.", file=sys.stderr)
         return 1
 
-    # O caminho vem de fora (D48(2)): confinado ao repositorio e com sufixo
+    # O caminho vem de fora: confinado ao repositorio e com sufixo
     # .wav, o unico que o .gitignore apanha em toda a arvore.
     try:
         saida = caminho_wav_de_saida(args.saida)

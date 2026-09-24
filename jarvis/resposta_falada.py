@@ -1,6 +1,6 @@
-r"""Contrato da resposta falada (D59): o que chega a voz e o que fica so na consola.
+r"""Contrato da resposta falada: o que chega a voz e o que fica so na consola.
 
-Defeito que isto fecha (D59, T3): a linha 650 de logs/jarvis-2026-09-20.log trouxe o texto
+Defeito que isto fecha: a linha 650 de logs/jarvis-2026-09-20.log trouxe o texto
 interno de uma chamada de ferramenta do Claude Code (`<invoke name="Bash">...`) e a linha 652
 mostra isso LIDO EM VOZ ALTA, porque `resumo_falado` so cortava aos 240 caracteres — um corte por
 tamanho nao protege nada, so decide ONDE o texto proibido parte ao meio.
@@ -10,7 +10,7 @@ encaminhador): "linguagem natural" e definida pelo que ela NAO e. Uma linha (ou,
 todo um bloco contiguo ate a proxima linha em branco) e retirada INTEIRA da voz se contiver
 qualquer uma das categorias da D59.1.
 
-A LISTA DA D59.1 E DE TOKENS, NAO DE CASOS BEM FORMADOS (foi aqui que as tentativas 1 e 2 da T3
+A LISTA DE EXCLUSAO E DE TOKENS, NAO DE CASOS BEM FORMADOS (foi aqui que as versoes anteriores
 falharam, as duas pela mesma forma): o que chega do Claude Code vem truncado, partido em linhas,
 sem fecho e sem sintaxe valida — `<invok`, `{ok: 1`, `@@-1,2+3,4@@`, `>dir`, `$env:PATH`,
 `|a|b`, `publico.pt`, `Traceback (most recent call last)` sem dois pontos. Por isso a exclusao
@@ -40,8 +40,8 @@ esquema, tracebacks (Python e JavaScript), linhas de log e linhas so de simbolos
 
 Uma PALAVRA MAIOR DO QUE O LIMITE FALADO tambem sai: nunca e linguagem natural (nem caberia numa
 frase falada) e era por ela que uma linha unica muito grande punha os padroes em retrocesso
-quadratico — 22,5 s para 30 000 caracteres, medidos na revisao da tentativa 2, o "ficar a
-espera" do inaceitavel n.4. Com o teto por palavra, nenhum padrao ve nunca um token grande e o
+quadratico — 22,5 s para 30 000 caracteres, medidos numa versao anterior: o jarvis ficava a
+espera. Com o teto por palavra, nenhum padrao ve nunca um token grande e o
 custo passa a linear no tamanho do texto.
 
 Uma LINHA MAIOR DO QUE ~2000 CARACTERES sai tambem, e sai ANTES de qualquer padrao correr: uma
@@ -53,13 +53,13 @@ falada (e so depois cortada aos 200). Confundir os dois manda prosa limpa para a
 recurso, que e ao mesmo tempo inventar conteudo ("codigo ou dados tecnicos" sobre prosa) e quebrar
 a regra de que o recurso so entra quando nao sobra nada falavel.
 
-NUNCA TRUNCAR PARA DENTRO DO PROIBIDO (D59.2): um pedaco proibido e removido inteiro (a linha, ou
+NUNCA TRUNCAR PARA DENTRO DO PROIBIDO: um pedaco proibido e removido inteiro (a linha, ou
 o bloco tecnico contiguo a que pertence, ou o bloco de tres crases inteiro); a resposta so cai
 para a frase de recurso quando isso esvazia tudo o que havia para dizer. Cortar aos N caracteres
 nunca e protecao, so decide onde a fatia proibida parte ao meio — foi assim que o defeito
 aconteceu.
 
-O FILTRO E O ULTIMO A FALAR, NAO O PRIMEIRO (tentativa 1 da T3 falhou aqui): filtrar linha a
+O FILTRO E O ULTIMO A FALAR, NAO O PRIMEIRO (uma versao anterior falhou aqui): filtrar linha a
 linha e so depois JUNTAR as linhas sobreviventes com um espaco remonta conteudo proibido a
 jusante do filtro — `Esta tudo bem <invoke` + `name="Bash">` volta a dar a tag inteira da linha
 652 do log. Por isso a exclusao e reaplicada ao texto JA JUNTO numa linha (antes do prefixo e do
@@ -67,27 +67,26 @@ corte) e outra vez ao texto JA CORTADO: se alguma dessas verificacoes falhar, na
 voz, cai a frase de recurso. Nada chega as colunas sem ter passado o filtro na forma exata em que
 vai ser lido.
 
-LIMITES (D59.3): 200 caracteres de conteudo falado, 280 no total ja com o prefixo de origem. O
+LIMITES: 200 caracteres de conteudo falado, 280 no total ja com o prefixo de origem. O
 corte, quando o conteudo ainda excede o limite depois do filtro, e sempre no fim de uma frase
 (`.`, `!` ou `?` seguido de espaco ou do fim do texto — o ponto de `3.14` ou de `jarvis.app` NAO
 e fim de frase e nunca corta ali) ou, nao havendo, no fim de uma palavra — nunca a meio de uma
 palavra.
 
-FRASE DE RECURSO (D59.4): quando nao sobra nada falavel, o jarvis nunca fica calado. Ha tres
+FRASE DE RECURSO: quando nao sobra nada falavel, o jarvis nunca fica calado. Ha tres
 frases fixas, conforme o caso: a resposta chegou mesmo vazia; a resposta so tinha conteudo
 tecnico (o filtro comeu tudo); ou — ja na rede de emergencia de `jarvis.app.responder`, para
 respostas de qualquer origem — nao havia um unico sitio seguro onde cortar. As duas primeiras
 nomeiam a origem (so elas sabem qual e); as tres dizem onde esta a resposta completa. A consola
-e o log (D59.6) levam sempre o texto inteiro, em bruto.
+e o log levam sempre o texto inteiro, em bruto.
 
-PREFIXO DE ORIGEM (D59.5, cumpre a D48.4): diz de quem e a frase e que ela nao esta verificada —
-a sessao filha do Claude Code corre sem ferramentas (D48.3) e pode alucinar que as usou.
+PREFIXO DE ORIGEM (cumpre a D48.4): diz de quem e a frase e que ela nao esta verificada —
+a sessao filha do Claude Code corre sem ferramentas e pode alucinar que as usou.
 
 O LADO SEGURO E CALAR O PEDACO, NAO ARRISCAR: quando uma frase natural tem um sinal destes
 (`Alterei o app.py`, `Ve em publico.pt`), ela sai e fica a frase de recurso, que diz onde esta a
-resposta completa. Ler marcacao em voz alta e o inaceitavel n.7 do PRODUCT-PROFILE ("parece
-avariado, e parecer avariado e pior do que estar calado"); a frase de recurso garante que
-calado, de facto, ele nunca fica (inaceitavel n.4).
+resposta completa. Ler marcacao em voz alta parece avariado, e parecer avariado e pior do que
+estar calado; a frase de recurso garante que calado, de facto, ele nunca fica.
 """
 
 from __future__ import annotations
@@ -98,7 +97,7 @@ import re
 MAXIMO_CARACTERES_FALADOS = 200
 #: D59.3 (era 400): corte duro de qualquer resposta falada, ja com o prefixo, seja de onde for.
 MAXIMO_ABSOLUTO_FALADO = 280
-#: D48.4/D59.5: nomeia a origem e diz que a frase nao esta verificada. Pode encurtar-se (D59.5);
+#: D48.4/D59.5: nomeia a origem e diz que a frase nao esta verificada. Pode encurtar-se;
 #: fica como estava porque ja cabe largamente dentro do limite (40 caracteres).
 PREFIXO_DA_RESPOSTA_DO_CLAUDE = "Resposta do Claude Code, não verificada:"
 
@@ -117,12 +116,12 @@ FRASE_RECURSO_SO_TECNICO = (
 #: do Claude Code) grande demais e sem um unico espaco onde cortar — uma "palavra" de centenas de
 #: caracteres nunca e linguagem natural. Nao nomeia o Claude Code porque tambem serve as
 #: respostas locais; diz de onde vem ("a resposta") e onde esta inteira, e nunca deixa o jarvis
-#: calado (inaceitavel n.4).
+#: calado.
 FRASE_RECURSO_SEM_CORTE_SEGURO = (
     "Não tenho nada que se possa ler em voz alta; a resposta completa está na consola."
 )
 
-# --- padroes de exclusao (D59.1), categoria a categoria da lista do contrato -------------------
+# --- padroes de exclusao, categoria a categoria da lista do contrato -------------------
 #
 # Regra de escrita destes padroes: cada um tem de apanhar tambem a forma MALFORMADA ou PARCIAL da
 # sua categoria, porque e assim que o texto chega de um modelo truncado. Nenhum padrao pode ter
@@ -132,7 +131,7 @@ FRASE_RECURSO_SEM_CORTE_SEGURO = (
 #: CATEGORIA 1 (tags XML/HTML), 3 (JSON/dicionarios), 5 (caminhos do Windows e UNC), 7 (tabelas
 #: markdown) e parte da 4 (`@@`, `&&`) e da 10: caracteres que nunca ocorrem em linguagem falada.
 #: Um so basta. E a rede que apanha `</`, `/>`, `<invok`, `&lt;invoke&gt;`, `{ok: 1`, `[1, 2, 3`,
-#: `|a|b`, `C:\Users`, `name=Bash>`, `resumo_falado`, `2>&1` e as cores de terminal.
+#: `|a|b`, `C:\Temp`, `name=Bash>`, `resumo_falado`, `2>&1` e as cores de terminal.
 _PADRAO_CARACTER_DE_CODIGO = re.compile(r"[<>{}\[\]|\\=_&@~^\t\x00-\x08\x0b-\x1f\x7f]")
 
 #: CATEGORIA 1 (o que resta): inicio de tag com ou sem fecho na mesma linha. Ja implicado pelo
@@ -143,7 +142,7 @@ _PADRAO_ENTIDADE_HTML = re.compile(r"&#?\w{1,8};")
 
 #: CATEGORIA 2 (tres crases): duas ou mais crases seguidas sao sempre uma cerca de codigo, mesmo
 #: quando o modelo escreve duas em vez de tres ou nao a fecha. A crase SOZINHA continua a ser so
-#: marcacao markdown e e retirada do texto (`linha X` e falada como "linha X", D48).
+#: marcacao markdown e e retirada do texto (`linha X` e falada como "linha X").
 _PADRAO_CRASE_DUPLA = re.compile(r"``")
 #: CATEGORIA 2: a mesma cerca escrita com aspas triplas (o delimitador de um bloco de codigo em
 #: Python) — `\"\"\"` ou `'''`, aberta ou fechada.
@@ -191,22 +190,22 @@ _PADRAO_LINHA_DE_COMANDO = re.compile(
 )
 
 #: CATEGORIA 6: a linha comeca por `$` ou `>`, com ou sem espaco a seguir — `>dir`, `>>> print(1)`
-#: e `$env:PATH` sao exatamente a sintaxe de consola que o inaceitavel n.7 proibe ler em voz alta.
-#: (A tentativa 2 exigia um espaco a seguir ao simbolo; a D59.1 nao o exige.)
+#: e `$env:PATH` sao exatamente a sintaxe de consola que nunca se le em voz alta.
+#: (Nao se exige espaco a seguir ao simbolo.)
 _PADRAO_PROMPT = re.compile(r"^\s*[$>]")
 #: CATEGORIA 6: variavel de shell em qualquer sitio da linha (`$env:PATH`, `$PWD`, `${HOME}`,
 #: `$(comando)`, `%USERPROFILE%`). `$50` e dinheiro e nao casa: exige-se letra, `_`, `{` ou `(`.
 _PADRAO_VARIAVEL_SHELL = re.compile(r"\$[A-Za-z_{(]|%\w+%")
 
 #: CATEGORIA 5: caminho do Windows com letra de unidade, com barra invertida OU normal
-#: (`C:\Users`, `c:/Users`), e a letra de unidade sozinha no fim da linha (o que sobra quando o
+#: (`C:\Temp`, `c:/temp`), e a letra de unidade sozinha no fim da linha (o que sobra quando o
 #: caminho se parte em linhas).
 _PADRAO_CAMINHO_WINDOWS = re.compile(r"(?<![\w:])[A-Za-z]:(?=[\\/])|(?<![\w:])[A-Za-z]:\s*$")
 #: CATEGORIA 5: caminho UNC de rede. Ja implicado pela barra invertida; fica escrito por clareza.
 _PADRAO_CAMINHO_UNC = re.compile(r"\\\\[\w.$-]")
 #: CATEGORIA 5: caminho com barra normal em todas as formas que nao sao "e/ou" nem uma data:
 #: absoluto (`/usr/local`), relativo (`./scripts`, `../x`), de home (`~/bin`), com duas barras
-#: (`docs/forja/RUN`, exige uma letra para nao apanhar `20/09/2026`), com extensao depois da barra
+#: (`docs/notas/RUN`, exige uma letra para nao apanhar `20/09/2026`), com extensao depois da barra
 #: (`jarvis/app.py`) ou terminado em barra (`tests/fixtures/`).
 _PADRAO_CAMINHO_POSIX = re.compile(
     r"(?:(?<=\s)|^)(?:\.{1,2}|~)?/[\w.-]"
@@ -215,7 +214,7 @@ _PADRAO_CAMINHO_POSIX = re.compile(
     r"|(?<![\w.-])[\w.-]+/(?=\s|$)"
 )
 #: CATEGORIA 5: nome de ficheiro de codigo/dados mesmo sem pasta nenhuma (`app.py`, `notas.md`):
-#: ler uma extensao em voz alta e exatamente o "parece avariado" do inaceitavel n.7.
+#: ler uma extensao em voz alta e exatamente o que faz o jarvis parecer avariado.
 _PADRAO_FICHEIRO_SEM_PASTA = re.compile(
     r"(?<![\w.-])[\w-]+\.(?:py|pyc|pyd|pyi|ipynb|js|mjs|cjs|ts|tsx|jsx|json|jsonl|md|txt|log"
     r"|ya?ml|toml|cfg|ini|conf|csv|tsv|xml|html?|css|scss|sh|bash|zsh|bat|cmd|ps1|psm1|exe|dll"
@@ -242,11 +241,11 @@ _PADRAO_URL = re.compile(
 #: seja qual for o dominio de topo.
 _PADRAO_URL_COM_CAMINHO = re.compile(r"(?<![\w-])[\w-]+\.[A-Za-z]{2,10}/\S")
 #: CATEGORIA 8: URL sem esquema, sem `www` e sem caminho (`publico.pt`, `exemplo.co.uk`). A lista
-#: de dominios de topo poe o mundo do Sponsor (`.pt`) a frente e junta-lhe os genericos.
+#: de dominios de topo poe o dominio do utilizador (`.pt`) a frente e junta-lhe os genericos.
 #: SEM `re.IGNORECASE` de proposito, com a variante em maiusculas escrita a parte: assim
 #: `PUBLICO.PT` cai na mesma, e duas frases coladas sem espaco ("acabei.Depois") nao caem — uma
-#: maiuscula seguida de minuscula nunca e um dominio de topo. Era exatamente aqui que a
-#: tentativa 2 deixava passar `publico.pt`: a lista nao tinha `.pt`.
+#: maiuscula seguida de minuscula nunca e um dominio de topo. Era exatamente aqui que uma
+#: versao anterior deixava passar `publico.pt`: a lista nao tinha `.pt`.
 _DOMINIOS_DE_TOPO = (
     "pt com org net io dev ai app eu co uk es fr br us ca nl au "
     "info biz tv xyz site online cloud tech store blog news live link page gov edu mil "
@@ -325,8 +324,8 @@ _CRASE_TRIPLA = "```"
 #: nao caberia numa frase falada e `cortar_no_limite` nem a conseguiria cortar. Verificar isto
 #: ANTES dos padroes e tambem o que mantem o filtro linear (ver o cabecalho do modulo).
 MAXIMO_CARACTERES_POR_PALAVRA = MAXIMO_CARACTERES_FALADOS
-#: Teto por LINHA do texto de entrada (nao por palavra e NAO pela resposta junta), pedido
-#: explicitamente pelo veredicto da tentativa 2 alem do teto por palavra: nenhuma frase falada
+#: Teto por LINHA do texto de entrada (nao por palavra e NAO pela resposta junta), alem do
+#: teto por palavra: nenhuma frase falada
 #: tem ~2000 caracteres numa unica linha, e verificar isto PRIMEIRO, antes de qualquer padrao
 #: correr, evita que os 28 padroes cheguem sequer a ver uma linha gigante (o teto por palavra ja
 #: cobre o caso do token unico sem espacos; este cobre a linha inteira, tambem quando tem muitas
@@ -346,15 +345,15 @@ def _linha_longa_demais(linha: str) -> bool:
 
     So vale no caminho por linha (`_linhas_falaveis`), nunca sobre o texto ja junto: a juncao
     das linhas sobreviventes e a RESPOSTA inteira, nao uma linha, e prosa natural limpa de 2500
-    caracteres em varios paragrafos tem de continuar a ser falada (D59.2 e D59.4 — a frase de
+    caracteres em varios paragrafos tem de continuar a ser falada (a frase de
     recurso so entra quando nao sobra nada falavel, e dizer "codigo ou dados tecnicos" sobre
-    prosa seria inventar conteudo). Foi exatamente essa a regressao da tentativa 1 desta retoma.
+    prosa seria inventar conteudo). Foi exatamente essa uma regressao anterior.
     """
     return len(linha) > MAXIMO_CARACTERES_POR_LINHA
 
 
 def _linha_proibida(linha: str) -> bool:
-    """Uma linha e proibida se casar com QUALQUER categoria de exclusao (D59.1).
+    """Uma linha e proibida se casar com QUALQUER categoria de exclusao.
 
     O teste barato do tamanho da maior palavra corre sempre primeiro, antes de qualquer padrao.
     O teto por LINHA nao esta aqui de proposito: esta funcao e reutilizada por `texto_proibido`
@@ -366,9 +365,9 @@ def _linha_proibida(linha: str) -> bool:
 
 
 def texto_proibido(texto: str) -> bool:
-    """O mesmo filtro por exclusao aplicado a um texto JA numa unica linha (D59.1/D59.2).
+    """O mesmo filtro por exclusao aplicado a um texto JA numa unica linha.
 
-    E esta a verificacao que fecha o defeito da tentativa 1: o filtro por linha nao ve a tag
+    E esta a verificacao que fecha um defeito anterior: o filtro por linha nao ve a tag
     que a JUNCAO das linhas sobreviventes remonta (`Esta tudo bem <invoke` + `name="Bash">`).
     `resumo_falado` chama isto sobre a frase exata que vai ser lida, depois de juntar e depois
     de cortar; nada vai a voz sem passar aqui.
@@ -380,7 +379,7 @@ def texto_proibido(texto: str) -> bool:
 
 
 def _sem_blocos_de_tres_crases(texto: str) -> str:
-    """Tira blocos ```...``` inteiros. Uma crase tripla por fechar descarta o resto (D59.2):
+    """Tira blocos ```...``` inteiros. Uma crase tripla por fechar descarta o resto:
     o que vem depois dela nunca se sabe se e seguro, por isso nao se arrisca.
     """
     sem_fechados = re.sub(r"```.*?```", " ", texto, flags=re.S)
@@ -388,7 +387,7 @@ def _sem_blocos_de_tres_crases(texto: str) -> str:
 
 
 def _linhas_falaveis(texto: str) -> list[str]:
-    """As linhas que sobram depois do filtro por exclusao (D59.1/D59.2).
+    """As linhas que sobram depois do filtro por exclusao.
 
     Varrimento por BLOCO, nao so por linha: uma vez que uma linha e proibida, as linhas
     seguintes ficam tambem de fora ate a proxima linha em branco — e assim que uma tabela git
@@ -423,7 +422,7 @@ def texto_falavel(resposta: str) -> str:
     texto natural a volta) e depois outra vez sobre o resultado JA JUNTO. Sem a segunda, duas
     linhas inocentes uma a uma voltam a formar a tag da linha 652 do log depois do filtro; com
     ela, um texto junto que volte a casar com uma categoria proibida devolve "" e quem chama cai
-    na frase de recurso (D59.2: inteiro ou nada, nunca meio).
+    na frase de recurso (inteiro ou nada, nunca meio).
     """
     sem_blocos = _sem_blocos_de_tres_crases(resposta or "")
     linhas = _linhas_falaveis(sem_blocos)
@@ -438,12 +437,12 @@ _PONTUACAO_DE_FIM_DE_FRASE = ".!?"
 
 
 def _ultimo_fim_de_frase(texto: str, limite: int) -> int:
-    """Indice da ultima pontuacao dentro de `limite` que e MESMO um fim de frase (D59.3).
+    """Indice da ultima pontuacao dentro de `limite` que e MESMO um fim de frase.
 
     E fim de frase so quando o caracter seguinte, no texto INTEIRO (nao na janela), e espaco ou
     nao existe. Sem esta verificacao, o ponto de `A versao 3.14` ou de `jarvis.app` passa por
-    fim de frase e a voz diz "a versão três vírgula" — o corte a meio da palavra que o criterio
-    3 proibe, e o "parece avariado" do inaceitavel n.7.
+    fim de frase e a voz diz "a versão três vírgula" — um corte a meio da palavra, que faz o
+    jarvis parecer avariado.
     """
     for indice in range(min(limite, len(texto)) - 1, 0, -1):
         if texto[indice] not in _PONTUACAO_DE_FIM_DE_FRASE:
@@ -455,7 +454,7 @@ def _ultimo_fim_de_frase(texto: str, limite: int) -> int:
 
 
 def cortar_no_limite(texto: str, limite: int) -> str:
-    """Corta `texto` a `limite` caracteres sem nunca partir uma palavra ao meio (D59.3).
+    """Corta `texto` a `limite` caracteres sem nunca partir uma palavra ao meio.
 
     Prefere o fim de uma frase de verdade (ver `_ultimo_fim_de_frase`); nao havendo, corta no
     fim da ultima palavra completa e acrescenta "...". Se nem um espaco existir dentro do limite
@@ -482,12 +481,12 @@ def cortar_no_limite(texto: str, limite: int) -> str:
 
 
 def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS) -> str:
-    """O que a voz le de uma resposta do Claude Code (D59, fecha o defeito da linha 650/652).
+    """O que a voz le de uma resposta do Claude Code (fecha o defeito da linha 650/652).
 
     So linguagem natural chega a voz (filtro por exclusao, `texto_falavel`); um pedaco proibido
     nunca se le em parte — ou sai inteiro, ou a resposta cai para a frase de recurso fixa; o
     corte por tamanho nunca parte uma palavra ao meio; a origem fica sempre nomeada, como frase
-    nao verificada (D48.4/D59.5). Quem quiser a resposta inteira, em bruto, le o log (D59.6) —
+    nao verificada. Quem quiser a resposta inteira, em bruto, le o log —
     esta funcao nunca e chamada para o que vai para o log.
     """
     original = resposta or ""
@@ -504,6 +503,6 @@ def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS) -> str
     falado = f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} {cortado}"
     if len(falado) > MAXIMO_ABSOLUTO_FALADO:
         # ultima rede, nunca deve disparar dado o limite de conteudo acima — mas se disparar,
-        # corta-se pela mesma regra, nunca a meio de uma palavra (D59.3).
+        # corta-se pela mesma regra, nunca a meio de uma palavra.
         falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or FRASE_RECURSO_SO_TECNICO
     return falado

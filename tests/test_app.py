@@ -1,8 +1,7 @@
 r"""Testes do orquestrador (jarvis/app.py), unittest da biblioteca padrao.
 
-Mesma convencao de tests/test_router.py e tests/test_acoes.py: sem pytest (nao
-ha decisao do Technology Scout para uma framework de testes fora da biblioteca
-padrao).
+Mesma convencao de tests/test_router.py e tests/test_acoes.py: sem pytest
+(nenhuma framework de testes fora da biblioteca padrao).
 
 NENHUM destes testes toca em hardware: sem GPU, sem microfone, sem Piper, sem
 Claude Code. O que eles protegem:
@@ -12,15 +11,14 @@ Claude Code. O que eles protegem:
     e uma mudanca silenciosa no formato invalida a prova;
   * a ARITMETICA das latencias, com um relogio falso (nunca `time.sleep`);
   * a linha `FALSO DESPERTAR DESCARTADO` e, sobretudo, que uma frase descartada
-    NAO executa accao nenhuma e NAO abre o canal do Claude Code — que e a
-    prioridade nao funcional 2 do PRODUCT-PROFILE e o criterio (2) da T6;
-  * um comando local nunca abrir o canal do Claude Code (zero tokens, D4/D5);
+    NAO executa accao nenhuma e NAO abre o canal do Claude Code;
+  * um comando local nunca abrir o canal do Claude Code (zero tokens);
   * o estado do processo (calar, adormecer, acordar), que so existe aqui
     porque `jarvis.acoes_locais.executar()` as recusa de proposito;
   * a injeccao de ficheiro: o corte em chunks do tamanho que o RealtimeSTT
     consome, o preenchimento do ultimo chunk, a reamostragem e a juncao de
-    canais (D33/S5);
-  * o resumo falado de uma resposta do Claude Code (D48.4): nomeia a origem e
+    canais;
+  * o resumo falado de uma resposta do Claude Code: nomeia a origem e
     nunca a le inteira como facto.
 
 Corre com:
@@ -169,7 +167,7 @@ class JarvisDeTeste:
 
 
 class TestFormatoDoLog(unittest.TestCase):
-    """O formato e o entregavel (D2/D11): se muda, a prova deixa de casar."""
+    """O formato e o entregavel: se muda, a prova deixa de casar."""
 
     def test_linha_de_etapa_tem_frase_etapa_latencia_e_detalhe(self) -> None:
         self.assertEqual(
@@ -250,7 +248,7 @@ class TestLatencias(unittest.TestCase):
 
 
 class TestFalsoDespertar(unittest.TestCase):
-    """Criterio (2) da T6 e prioridade nao funcional 2 do PRODUCT-PROFILE."""
+    """Um falso despertar nao executa nada nem abre o canal do Claude Code."""
 
     def test_transcricao_vazia_regista_a_linha_e_nao_faz_nada(self) -> None:
         teste = JarvisDeTeste()
@@ -363,7 +361,7 @@ class TestResumoFalado(unittest.TestCase):
 
 
 class TestEstadoDoProcesso(unittest.TestCase):
-    """calar / adormecer / acordar: so existem num processo vivo (D4.d/D4.e)."""
+    """calar / adormecer / acordar: so existem num processo vivo."""
 
     def test_adormecer_ignora_as_frases_seguintes_ate_acordar(self) -> None:
         teste = JarvisDeTeste()
@@ -409,7 +407,7 @@ class TestEstadoDoProcesso(unittest.TestCase):
 
 
 class TestInjeccaoDeFicheiro(unittest.TestCase):
-    """S5/D33: os frames do WAV no mesmo pipeline, sem microfone."""
+    """Os frames do WAV no mesmo pipeline, sem microfone."""
 
     def test_corta_em_chunks_do_tamanho_do_realtimestt(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:
@@ -471,7 +469,7 @@ class _HandlerDeCaptura(logging.Handler):
 
 
 class TestSilenciadorDoRuidoDoShutdown(unittest.TestCase):
-    """Metade do processo pai (QA-close-1.md, finding 4b): so o WinError 6
+    """Metade do processo pai: so o WinError 6
     conhecido e descartado; tudo o resto do logger raiz continua a passar, e o
     logger fica exatamente como estava antes de o context manager correr.
 
@@ -612,7 +610,7 @@ class TestSilenciadorNoProcessoFilho(unittest.TestCase):
 
 
 class TestConfiguracaoEmFalta(unittest.TestCase):
-    """Sem config.toml o jarvis continua, mas NUNCA adivinha um projeto (D4)."""
+    """Sem config.toml o jarvis continua, mas NUNCA adivinha um projeto."""
 
     def test_sem_ficheiro_avisa_e_segue_sem_projetos(self) -> None:
         log = LogFalso()
@@ -638,7 +636,7 @@ class TestConfiguracaoEmFalta(unittest.TestCase):
             self.assertEqual(teste.canais_abertos, 0)
 
 
-# --- T8/D58b/S10: lingua no caminho VIVO -----------------------------------
+# --- Lingua no caminho VIVO -------------------------------------------------
 
 
 class RecorderFalso:
@@ -652,9 +650,9 @@ class RecorderFalso:
 
 
 class TestLinguaNoLogDaFrase(unittest.TestCase):
-    """Criterio 2 da T8: cada frase do log diz lingua, probabilidade e hesitacao.
+    """Cada frase do log diz lingua, probabilidade e hesitacao.
 
-    ACHADO da T8 provado aqui: o RealtimeSTT 0.3.104 so expoe o TOP-1
+    ACHADO provado aqui: o RealtimeSTT 0.3.104 so expoe o TOP-1
     (`detected_language`/`detected_language_probability`), por isso o caminho
     vivo aplica o argmax restrito ao unico numero que tem — e uma terceira
     lingua no topo continua a nao decidir nada.
@@ -679,7 +677,7 @@ class TestLinguaNoLogDaFrase(unittest.TestCase):
         self.assertIn("limiar", detalhe)
 
     def test_terceira_lingua_no_topo_nao_decide_e_fica_marcada_no_log(self) -> None:
-        # D66, ponto 3 (B1 da tentativa 2): a lingua do PRODUTO continua a ser
+        # A lingua do PRODUTO continua a ser
         # `pt`, mas a linha de log tem de dizer que foi o espanhol a
         # descodificar — e o caminho vivo tambem corre com language=None.
         detalhe = detalhe_da_transcricao(RecorderFalso("es", 0.80), "que horas sao")
@@ -700,7 +698,7 @@ class TestLinguaNoLogDaFrase(unittest.TestCase):
         self.assertIn("hesitou", detalhe)
 
     def test_o_resto_da_linha_nao_mudou(self) -> None:
-        # O formato do log e o entregavel (D2/D11): device, modelo e prompt
+        # O formato do log e o entregavel: device, modelo e prompt
         # continuam onde estavam.
         detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.9), "x")
         self.assertIn("device=cuda", detalhe)
@@ -709,11 +707,11 @@ class TestLinguaNoLogDaFrase(unittest.TestCase):
 
 
 class TestRecorderPedeDeteccaoDeLingua(unittest.TestCase):
-    """Criterio 6 da T8 no caminho vivo: a lingua do recorder e a do produto.
+    """No caminho vivo, a lingua do recorder e a do produto.
 
-    A T8 ligou aqui a deteccao (`language=None`) e mediu-a; o A/B controlado
-    deu o acerto de intencao em portugues a descer (21/40 -> 20/40) e o gatilho
-    automatico do criterio 6 / D53 item 4 mandou reverter. O que este teste
+    A deteccao (`language=None`) foi ligada aqui e medida; o A/B controlado
+    deu o acerto de intencao em portugues a descer (21/40 -> 20/40) e a regra
+    mandou reverter. O que este teste
     trava e a REVERSAO: o recorder pede a lingua do produto e nao um `None`
     solto — e pede-a pela constante, para nao haver dois sitios a dizer qual e.
     """
@@ -744,7 +742,7 @@ class TestRecorderPedeDeteccaoDeLingua(unittest.TestCase):
         recorder = RecorderFalso(LINGUA_FIXA_DO_PRODUTO, 1.0)
         recorder.language = LINGUA_FIXA_DO_PRODUTO
         detalhe = detalhe_da_transcricao(recorder, "que horas sao")
-        self.assertIn("lingua=pt FIXA (sem deteccao, T8 criterio 6)", detalhe)
+        self.assertIn("lingua=pt FIXA (sem deteccao)", detalhe)
         self.assertNotIn("p=1.00", detalhe)
         self.assertNotIn("hesitou", detalhe)
         # A justificacao inteira da reversao (~190 caracteres) nao se repete
@@ -754,7 +752,7 @@ class TestRecorderPedeDeteccaoDeLingua(unittest.TestCase):
         self.assertIn("texto: 'que horas sao'", detalhe)
 
     def test_o_mecanismo_de_deteccao_continua_ligavel_e_testado(self) -> None:
-        # A reversao desligou a deteccao no produto, nao a apagou (D66/T9):
+        # A reversao desligou a deteccao no produto, nao a apagou:
         # com um recorder sem lingua, o caminho vivo volta a ler o top-1.
         detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.93), "x")
         self.assertIn("lingua=en p=0.93 decidida", detalhe)

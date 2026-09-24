@@ -1,9 +1,9 @@
-r"""Forca a consola do proprio processo jarvis para UTF-8 (T11).
+r"""Forca a consola do proprio processo jarvis para UTF-8.
 
 Fecha o finding 3 (menor) do QA de fecho: `python -m jarvis.acoes_locais horas`
 sem `PYTHONUTF8`/`PYTHONIOENCODING` no ambiente imprime `resposta = S?o 9
 horas...` porque `sys.stdout.encoding` herda a codepage da consola (cp1252 ou
-850 no Windows). A T3 ja tinha resolvido esta classe de bug para o AMBIENTE DO
+850 no Windows). Esta classe de bug ja estava resolvida para o AMBIENTE DO
 PROCESSO FILHO do Piper (`AMBIENTE_UTF8` em scripts/gerar_wav.py e
 jarvis/voz.py), mas nunca para o PROPRIO stdout/stderr do jarvis.
 
@@ -15,7 +15,7 @@ jarvis/acoes_locais.py, scripts/*.py) sem arrastar audio nem voz.
 modulo nao pode ter efeitos colaterais. Cada ponto de entrada chama-a
 explicitamente como primeira instrucao do seu `main()`.
 
-NAO substitui `AMBIENTE_UTF8` (ambiente do processo filho, T3) nem
+NAO substitui `AMBIENTE_UTF8` (ambiente do processo filho) nem
 `texto_para_a_consola` (jarvis/app.py, rede de seguranca que degrada com "?"
 em vez de rebentar quando o stream nao suporta `reconfigure`) — os dois
 continuam a fazer falta e ficam intactos.

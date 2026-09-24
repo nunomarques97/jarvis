@@ -1,7 +1,7 @@
 r"""Auxiliar de tests/test_app.py — NAO e um ficheiro de testes (o nome nao casa
 com o padrao `test*.py` do `unittest discover`, de proposito).
 
-Reproduz, com processos de verdade, o finding 4b do QA (QA-close-1.md): o
+Reproduz, com processos de verdade, o ruido do encerramento: o
 RealtimeSTT emite `Error receiving data from connection: [WinError 6] ...` com
 `logging.error(..., exc_info=True)` no logger raiz de um PROCESSO FILHO
 (`RealtimeSTT/audio_recorder.py:134`, arrancado por `mp.Process` em

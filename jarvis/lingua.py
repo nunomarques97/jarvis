@@ -1,19 +1,19 @@
-r"""Decisao da lingua de uma frase, restrita a {pt, en} (D58b, TECHNOLOGY.md S10).
+r"""Decisao da lingua de uma frase, restrita a {pt, en}.
 
 Este modulo NAO transcreve nada e NAO abre modelo nenhum: recebe as
 probabilidades por lingua que o `faster_whisper` ja devolveu no MESMO
 `transcribe()` (`info.all_language_probs`) e aplica-lhes a regra do produto.
 
-ESTADO DE HOJE, a ler antes do resto (T8, criterio 6): **a deteccao esta
-DESLIGADA no produto**. A T8 ligou-a nos dois caminhos e mediu-a com um A/B
+ESTADO DE HOJE, a ler antes do resto: **a deteccao esta
+DESLIGADA no produto**. Foi ligada nos dois caminhos e medida com um A/B
 controlado (os mesmos 20 WAV transcritos com `language="pt"` e com
 `language=None`); o acerto de intencao em PORTUGUES desceu — 21/40 linhas
-certas com lingua fixa contra 20/40 com deteccao — e isso dispara o gatilho
-automatico do criterio 6 e da ordem de corte da D53 item 4. O produto voltou a
+certas com lingua fixa contra 20/40 com deteccao — e a regra era reverter se
+o portugues descesse. O produto voltou a
 `language="pt"` (`LINGUA_FIXA_DO_PRODUTO`, abaixo) e o que corre em producao e
 `lingua_fixada()`. Tudo o que esta a seguir continua vivo, testado e a um
 argumento de distancia (`lingua_fixa=None`, `--lingua auto`), para se poder
-voltar a medir com voz inglesa real (S11) ou com modelo maior (T9).
+voltar a medir com voz inglesa real ou com modelo maior.
 
 A regra, em tres linhas:
 
@@ -22,26 +22,26 @@ A regra, em tres linhas:
      conhece ~100) nunca entra na escolha do PRODUTO — a que vai para o log,
      para a coluna da evidencia e para qualquer decisao do encaminhador.
 
-     LIMITE, escrito aqui porque a tentativa 1 da T8 escreveu o contrario
-     (D66, ponto 3): quando o argmax livre cai fora de {pt, en}, foi ESSA
+     LIMITE, escrito aqui porque uma versao anterior dizia o contrario:
+     quando o argmax livre cai fora de {pt, en}, foi ESSA
      terceira lingua que DESCODIFICOU o audio. O parametro `language=` da API
      publica do faster-whisper aceita um codigo unico, nao uma lista de
-     candidatas (TECHNOLOGY.md S10), por isso `language=None` deixa a
+     candidatas, por isso `language=None` deixa a
      biblioteca decidir livremente com que lingua decodifica
      (`faster_whisper/transcribe.py:880-904`) e a restricao so e possivel em
      pos-processamento — e isso e o que este modulo faz. A frase segue o
      caminho normal, nunca e descartada nem re-transcrita, e fica MARCADA
-     `lingua-terceira` (D66, pontos 2 e 4).
+     `lingua-terceira` (pontos 2 e 4).
   2. **Limiar 0,5**, o default da propria biblioteca
      (`WhisperModel.transcribe(language_detection_threshold=0.5)`): se a lingua
      escolhida nao passar o limiar, a deteccao `hesitou`. Nao ha terceiro
      estado e nao ha "lingua desconhecida": `lingua` e SEMPRE `"pt"` ou
      `"en"`, porque o produto tem sempre de responder alguma coisa.
   3. **Hesitar nao trava nada.** A lingua detetada nunca e a razao de uma frase
-     valida nao ser reconhecida (D58b): o encaminhamento casa a frase contra AS
-     DUAS listas brancas (T7, `jarvis/router.py`), com ou sem hesitacao, hoje e
+     valida nao ser reconhecida: o encaminhamento casa a frase contra AS
+     DUAS listas brancas (`jarvis/router.py`), com ou sem hesitacao, hoje e
      enquanto a regra das duas listas existir. O que este modulo entrega serve
-     para o LOG e para a lingua da resposta (D58c) — nunca para escolher lista.
+     para o LOG e para a lingua da resposta — nunca para escolher lista.
 
 Porque ha DUAS entradas:
 
@@ -52,8 +52,7 @@ Porque ha DUAS entradas:
     (`jarvis/app.py` -> RealtimeSTT), onde **so existe o top-1**: o
     RealtimeSTT 0.3.104 le `info.language`/`info.language_probability` em
     `audio_recorder.py:1533-1534` e deita fora o resto do `info`, incluindo o
-    `all_language_probs`, antes de o devolver a quem chamou `text()`. Achado
-    registado na T8 e previsto no ponto 1 de "Como adotar" da S10: o caminho
+    `all_language_probs`, antes de o devolver a quem chamou `text()`. O caminho
     vivo fica com o que o RealtimeSTT expoe, sem monkeypatch a biblioteca.
 """
 
@@ -62,42 +61,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
-#: As unicas duas linguas que podem sair daqui (D58a: as mesmas cinco accoes
+#: As unicas duas linguas que podem sair daqui (as mesmas cinco accoes
 #: nas duas linguas, zero accoes novas).
 LINGUAS_RESTRITAS = ("pt", "en")
 
-#: A lingua por omissao do PRODUTO (PRODUCT-PROFILE, prioridade 5): quando a
+#: A lingua por omissao do PRODUTO: quando a
 #: deteccao nao da nada de util, responde-se em portugues e o log diz porque.
 LINGUA_POR_OMISSAO = "pt"
 
-#: A lingua com que o produto TRANSCREVE, hoje (T8, criterio 6 / D53 item 4 /
-#: D66 ponto 8).
+#: A lingua com que o produto TRANSCREVE, hoje.
 #:
-#: A T8 ligou a deteccao automatica (`language=None`) nos dois caminhos e
-#: mediu-a. O A/B CONTROLADO — os mesmos 20 WAV transcritos duas vezes, uma com
+#: A deteccao automatica (`language=None`) foi ligada nos dois caminhos e
+#: medida. O A/B CONTROLADO — os mesmos 20 WAV transcritos duas vezes, uma com
 #: `language="pt"` e outra com `language=None`, unica variavel a lingua —
 #: mostrou o acerto de intencao em PORTUGUES a DESCER: 21/40 linhas certas com
 #: a lingua fixa contra 20/40 com deteccao (pt sem prefixo 11/20 -> 10/20, pt
-#: com prefixo 10/20 = 10/20). Esse e o gatilho automatico escrito no criterio
-#: 6 da task e na ordem de corte da D53 item 4, e dispara sem voltar a
-#: perguntar: o produto volta a `language="pt"`.
+#: com prefixo 10/20 = 10/20). A regra definida antes da medicao era reverter
+#: se o portugues descesse: o produto volta a `language="pt"`.
 #:
 #: O ingles continua a funcionar porque nunca dependeu disto: o encaminhamento
-#: casa a frase contra AS DUAS listas brancas (T7/D58b) e o mesmo A/B mostrou
+#: casa a frase contra AS DUAS listas brancas e o mesmo A/B mostrou
 #: ZERO linhas inglesas a mudar de acerto com a deteccao ligada.
 #:
 #: O mecanismo NAO foi apagado — `decidir_lingua` continua testado e ligavel
 #: com `lingua_fixa=None` (scripts) ou `--lingua auto` (arnes). E o que permite
-#: voltar a medir isto quando houver voz inglesa real (S11) ou modelo maior
-#: (T9), sem reescrever nada.
+#: voltar a medir isto quando houver voz inglesa real ou modelo maior,
+#: sem reescrever nada.
 LINGUA_FIXA_DO_PRODUTO = "pt"
 
-#: O limiar da S10 e o default da biblioteca instalada
+#: O limiar e o default da biblioteca instalada
 #: (`faster_whisper/transcribe.py:747`, `language_detection_threshold=0.5`).
 LIMIAR_CONFIANCA = 0.5
 
 #: A marca que o log e a evidencia levam quando o argmax LIVRE caiu fora de
-#: {pt, en} (D66, ponto 3). Nao e um aviso decorativo: e a unica forma de
+#: {pt, en}. Nao e um aviso decorativo: e a unica forma de
 #: alguem contar, nos ficheiros, quantas frases foram descodificadas por uma
 #: lingua que o produto nao escolheu.
 MARCA_LINGUA_TERCEIRA = "lingua-terceira"
@@ -109,7 +106,7 @@ class LinguaDetetada:
 
     `lingua` e sempre `"pt"` ou `"en"`. `hesitou` diz se o numero por tras
     dessa escolha passou o limiar — e e isso, e nao a lingua, que o log tem de
-    mostrar para a decisao ser explicavel ao Sponsor.
+    mostrar para a decisao ser explicavel ao utilizador.
     """
 
     lingua: str
@@ -119,12 +116,12 @@ class LinguaDetetada:
     prob_en: float
     #: A lingua mais provavel entre TODAS as ~100 do Whisper. Se nao for `pt`
     #: nem `en`, nao entra na escolha do produto — mas foi ela que descodificou
-    #: o audio, e a frase fica marcada `lingua-terceira` (D66).
+    #: o audio, e a frase fica marcada `lingua-terceira`.
     top1: str | None
     top1_probabilidade: float
     motivo: str
     #: False quando NAO houve deteccao nenhuma: a transcricao correu com a
-    #: lingua fixa (o produto, desde a reversao do criterio 6 da T8). Nesse
+    #: lingua fixa (o produto, desde a reversao da deteccao). Nesse
     #: caso `probabilidade` e 0.0 porque nao ha numero nenhum medido — e o log
     #: tem de dizer "FIXA", nao um `p=0.00 hesitou` que parece uma deteccao
     #: falhada.
@@ -139,8 +136,8 @@ class LinguaDetetada:
     def margem(self) -> float:
         """Distancia entre as duas candidatas, `|p(pt) - p(en)|`.
 
-        A S10 pede o numero exato medido para se poder revisitar o limiar. Nao
-        entra na decisao de `hesitou` (o criterio da task e o limiar, e so ele);
+        O numero exato medido fica para se poder revisitar o limiar. Nao
+        entra na decisao de `hesitou` (o criterio e o limiar, e so ele);
         anda no log como diagnostico.
         """
         return abs(self.prob_pt - self.prob_en)
@@ -151,8 +148,7 @@ class LinguaDetetada:
 
         Nesse caso a lingua do produto continua a ser `pt` ou `en` (argmax
         restrito), mas quem descodificou o audio foi a terceira lingua: e por
-        isso que isto nao se chama "ignorada" (D66, ponto 3 — era exatamente a
-        afirmacao falsa que o Reviewer apanhou na tentativa 1).
+        isso que isto nao se chama "ignorada" (seria uma afirmacao falsa).
         """
         return self.top1 is not None and self.top1 not in LINGUAS_RESTRITAS
 
@@ -160,20 +156,20 @@ class LinguaDetetada:
     def marca_lingua_terceira(self) -> str:
         """`lingua-terceira(<codigo> descodificou)` ou vazio.
 
-        A marca que o criterio 2 da T8 manda escrever no log de cada frase e
-        que a evidencia conta por ficheiro (D66, ponto 3).
+        A marca que se escreve no log de cada frase e
+        que a evidencia conta por ficheiro.
         """
         if not self.lingua_terceira:
             return ""
         return f"{MARCA_LINGUA_TERCEIRA}({self.top1} descodificou)"
 
     def resumo(self) -> str:
-        """Lingua, probabilidade e hesitacao, sem rotulo (criterio 2 da T8).
+        """Lingua, probabilidade e hesitacao, sem rotulo.
 
-        Escreve sempre os tres numeros que a task exige — lingua, probabilidade
+        Escreve sempre os tres numeros — lingua, probabilidade
         e se hesitou — mais a margem entre as duas candidatas, quando ela e
         conhecida, e a marca `lingua-terceira` quando o argmax livre caiu fora
-        de {pt, en} (D66).
+        de {pt, en}.
         """
         if not self.detetada:
             # Sem deteccao nao ha probabilidade, e inventar uma (ou escrever
@@ -181,12 +177,12 @@ class LinguaDetetada:
             # o que ninguem mediu.
             #
             # Forma CURTA de proposito: esta linha sai uma vez por frase, no log
-            # que o Sponsor le em direto, e a justificacao inteira da reversao
+            # que o utilizador le em direto, e a justificacao inteira da reversao
             # (~190 caracteres) nao muda de frase para frase. Fica onde se
             # consulta uma vez: em `self.motivo` (que o caminho dos scripts
             # devolve no dict como `lingua_motivo` e o autoteste imprime) e no
             # comentario de `LINGUA_FIXA_DO_PRODUTO`, com os numeros.
-            return f"{self.lingua} FIXA (sem deteccao, T8 criterio 6)"
+            return f"{self.lingua} FIXA (sem deteccao)"
         estado = "hesitou" if self.hesitou else "decidida"
         marca = f" {self.marca_lingua_terceira}" if self.lingua_terceira else ""
         if not self.probabilidades_completas:
@@ -258,7 +254,7 @@ def decidir_lingua(
     *,
     limiar: float = LIMIAR_CONFIANCA,
 ) -> LinguaDetetada:
-    """Argmax restrito a {pt, en} sobre `info.all_language_probs` (S10).
+    """Argmax restrito a {pt, en} sobre `info.all_language_probs`.
 
     `hesitou` segue a comparacao ESTRITA da propria biblioteca
     (`transcribe.py:1787`: aceita a deteccao quando `prob > limiar`), por isso
@@ -297,8 +293,8 @@ def decidir_lingua(
             f"(p={top1_prob:.2f}), fora de {{pt, en}} — nao entra na escolha do "
             f"PRODUTO (log, evidencia, encaminhador), mas foi ELE que "
             f"descodificou o audio, porque o parametro language= da API publica "
-            f"do faster-whisper aceita um codigo unico e nao uma lista "
-            f"(S10/D66); a frase segue o caminho normal"
+            f"do faster-whisper aceita um codigo unico e nao uma lista; "
+            f"a frase segue o caminho normal"
         )
     elif hesitou:
         motivo = f"probabilidade {probabilidade:.2f} nao passa o limiar {limiar:.2f}"
@@ -318,7 +314,7 @@ def decidir_lingua(
 
 
 def lingua_fixada(codigo: str = LINGUA_FIXA_DO_PRODUTO) -> LinguaDetetada:
-    """O estado da lingua quando NAO houve deteccao nenhuma (criterio 6 da T8).
+    """O estado da lingua quando NAO houve deteccao nenhuma.
 
     Desde a reversao (o A/B controlado mostrou o acerto em portugues a descer),
     o produto transcreve com `language="pt"` fixo. Nesse caso nao ha
@@ -338,7 +334,7 @@ def lingua_fixada(codigo: str = LINGUA_FIXA_DO_PRODUTO) -> LinguaDetetada:
         top1_probabilidade=0.0,
         motivo=(
             f"sem deteccao: a transcricao correu com language='{limpo}' fixo "
-            "(T8 criterio 6 / D53 item 4: o A/B controlado mostrou o acerto de "
+            "(o A/B controlado mostrou o acerto de "
             "intencao em portugues a descer com a deteccao ligada)"
         ),
         detetada=False,
@@ -367,7 +363,7 @@ def decidir_lingua_do_top1(
     RealtimeSTT tambem chama o faster-whisper com `language=None`, portanto o
     top-1 que ele devolve E a lingua com que o audio foi descodificado. Quando
     cai fora de {pt, en}, o texto que chega ao encaminhador ja veio dessa
-    terceira lingua — a marca serve para isso se ver no log (D66, ponto 3).
+    terceira lingua — a marca serve para isso se ver no log.
 
     Nos dois casos a probabilidade da OUTRA candidata e desconhecida (fica
     0.0), e o log di-lo pelo motivo — nunca se inventa um numero.
@@ -383,7 +379,7 @@ def decidir_lingua_do_top1(
         hesitou = not (prob > limiar)
         motivo = (
             "top-1 do RealtimeSTT (all_language_probs nao exposto pela "
-            "biblioteca, T8/S10)"
+            "biblioteca)"
         )
         if hesitou:
             motivo += f"; probabilidade {prob:.2f} nao passa o limiar {limiar:.2f}"
@@ -409,7 +405,7 @@ def decidir_lingua_do_top1(
             f"{MARCA_LINGUA_TERCEIRA}: top-1 '{codigo}' (p={prob:.2f}) fora de "
             f"{{pt, en}} — nao entra na escolha do PRODUTO, mas foi ELE que "
             f"descodificou o audio (o RealtimeSTT tambem transcreve com "
-            f"language=None, S10/D66); fica '{LINGUA_POR_OMISSAO}' por omissao "
+            f"language=None); fica '{LINGUA_POR_OMISSAO}' por omissao "
             f"e a frase segue o caminho normal"
         )
     return LinguaDetetada(

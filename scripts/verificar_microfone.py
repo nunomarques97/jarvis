@@ -1,19 +1,19 @@
-r"""Verifica o caminho do microfone: dispositivos, captura de 3 s, nivel RMS (D33).
+r"""Verifica o caminho do microfone: dispositivos, captura de 3 s, nivel RMS.
 
 Sem isto nao ha como confiar em nenhuma transcricao ao vivo mais tarde: e o
-unico dos tres utilitarios da T3 que toca em hardware real, por isso nunca
+unico dos tres utilitarios de audio que toca em hardware real, por isso nunca
 levanta uma excecao para fora de main() — reporta o erro e sai com codigo 1
 ("sem rebentar" e o criterio de aceitacao).
 
 Dispositivo escolhido: o nome vindo de --dispositivo, senao da variavel de
-ambiente JARVIS_NOME_MICROFONE (o sistema de configuracao fica para a T4; ate
-la, mesma convencao que jarvis.canal_claude.VARIAVEL_TITULO_JANELA), senao o
+ambiente JARVIS_NOME_MICROFONE (mesma convencao que
+jarvis.canal_claude.VARIAVEL_TITULO_JANELA), senao o
 dispositivo de entrada por omissao do sistema.
 
-Uso do PyAudio simples (nao PyAudioWPatch, que o TECHNOLOGY.md S5 preferia mas
-nao esta instalado neste venv — ver docs/MODELOS.md/relatorio): o PyAudio ja e
+Uso do PyAudio simples (nao PyAudioWPatch, que seria preferivel mas nao esta
+instalado neste venv): o PyAudio ja e
 dependencia transitiva do RealtimeSTT (`pip show pyaudio` -> `Required-by:
-realtimestt`, D36) e chega para listar dispositivos e capturar de um deles;
+realtimestt`) e chega para listar dispositivos e capturar de um deles;
 nenhuma dependencia nova.
 
 SINAL: alem do RMS, imprime-se o pico da captura. O RMS a quatro casas da
@@ -57,8 +57,8 @@ TAMANHO_DO_BLOCO = 1024
 
 #: Teto da captura. `capturar()` acumula a gravacao inteira em memoria antes de
 #: escrever o WAV (`b"".join`), por isso um `--segundos 1e9` enchia a RAM e o
-#: disco. Um minuto e muito mais do que os 3 s que este utilitario precisa, e a
-#: T4 vai reutilizar a mesma funcao.
+#: disco. Um minuto e muito mais do que os 3 s que este utilitario precisa, e o
+#: jarvis pode reutilizar a mesma funcao.
 TETO_DE_SEGUNDOS_DE_CAPTURA = 60.0
 
 
@@ -91,7 +91,7 @@ def escolher_dispositivo(pa, nome_configurado: str) -> tuple[dict, str]:
     Devolve (info, origem). A `origem` descreve o que aconteceu de facto e nao
     o que foi pedido: com um nome configurado que nao casa com dispositivo
     nenhum, a linha do log tem de dizer que se caiu no dispositivo do sistema,
-    senao a T4 escreve no log que esta a ouvir um microfone que nao escolheu.
+    senao o jarvis escreve no log que esta a ouvir um microfone que nao escolheu.
     """
     if nome_configurado:
         alvo = nome_configurado.strip().lower()
@@ -153,8 +153,8 @@ class _PyAudioFalso:
 
     Os nomes sao INVENTADOS de proposito e nunca podem ser trocados pelos que a
     listagem desta maquina imprime: este ficheiro e versionado e o repositorio
-    vai ser publico, por isso o modelo do headset ou da placa de som do Sponsor
-    ficaria no historico para sempre (D10 — o nome do microfone vive so em
+    e publico, por isso o modelo do headset ou da placa de som do utilizador
+    ficaria no historico para sempre (o nome do microfone vive so em
     configuracao local ignorada pelo Git). Ao mexer nesta lista, confirmar que
     nenhum destes nomes casa com um dispositivo real da maquina onde se esta.
     """
@@ -251,7 +251,7 @@ def _autoteste() -> int:
     verificar("segundos: nan recusado", segundos_recusados("nan"), True)
 
     # 5. O guarda do --saida visto deste script (a mecanica esta testada em
-    # jarvis.audio_util): a voz do Sponsor nao sai do repositorio nem perde o
+    # jarvis.audio_util): a voz do utilizador nao sai do repositorio nem perde o
     # sufixo que o .gitignore apanha.
     def saida_recusada(valor: str) -> bool:
         try:
@@ -266,7 +266,7 @@ def _autoteste() -> int:
         PASTA_AUDIO,
     )
     verificar("saida: travessia para fora do repo recusada", saida_recusada("audio/../../fora.wav"), True)
-    verificar("saida: a voz do Sponsor num .txt e recusada", saida_recusada("notas.txt"), True)
+    verificar("saida: a voz do utilizador num .txt e recusada", saida_recusada("notas.txt"), True)
 
     print()
     if falhas:
@@ -315,7 +315,7 @@ def main() -> int:
 
     nome_configurado = args.dispositivo or os.environ.get(VARIAVEL_NOME_MICROFONE, "").strip()
 
-    # O que se grava aqui e a VOZ do Sponsor: o caminho de saida passa pelo
+    # O que se grava aqui e a VOZ do utilizador: o caminho de saida passa pelo
     # guarda (dentro do repositorio, sufixo .wav) ANTES de se abrir o
     # microfone — um destino invalido nunca chega a gravar nada.
     try:
@@ -392,6 +392,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as erro:  # ultima rede: "sem rebentar" e o criterio da T3
+    except Exception as erro:  # ultima rede: "sem rebentar" e o criterio de aceitacao
         print(f"ERRO inesperado: {erro!r}", file=sys.stderr)
         sys.exit(1)

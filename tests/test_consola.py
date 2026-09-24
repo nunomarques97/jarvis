@@ -1,10 +1,9 @@
-r"""Testes de jarvis/consola.py (T11), unittest da biblioteca padrao (sem
-pytest: nao ha decisao do Scout para uma framework de testes fora da
-biblioteca padrao).
+r"""Testes de jarvis/consola.py, unittest da biblioteca padrao (sem
+pytest: nenhuma framework de testes fora da biblioteca padrao).
 
 Fecha o finding 3 (menor) do QA de fecho: o proprio processo jarvis nunca
 forcava a sua stdout/stderr para UTF-8, so o ambiente do processo filho do
-Piper (T3) estava coberto. Estes testes protegem o contrato do modulo FOLHA:
+Piper estava coberto. Estes testes protegem o contrato do modulo FOLHA:
 
   * um stream sem `reconfigure` (io.StringIO nos testes tem, mas um objeto
     qualquer sem o metodo nao) nao levanta;

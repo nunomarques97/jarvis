@@ -1,6 +1,6 @@
 r"""Verifica o ambiente do jarvis: torch, CUDA e uma transcricao real no GPU.
 
-Portao da Fase 2 (T1): so passa se o faster-whisper carregar o modelo no GPU e
+Portao da Fase 2: so passa se o faster-whisper carregar o modelo no GPU e
 transcrever audio sintetico. Sai com codigo 0 apenas nesse caso; qualquer queda
 para CPU sai com codigo 1 e imprime o erro completo.
 
@@ -31,7 +31,7 @@ SEGUNDOS_DE_SILENCIO = 1.0
 def registar_dlls_do_torch() -> list[str]:
     """Torna as DLLs de CUDA que vieram no wheel do torch visiveis ao CTranslate2.
 
-    Tudo dentro do .venv: nada e instalado ou registado no Windows (D14f).
+    Tudo dentro do .venv: nada e instalado ou registado no Windows.
     """
     registadas: list[str] = []
     if os.name != "nt":

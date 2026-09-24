@@ -2,12 +2,12 @@ r"""Canal do jarvis para uma sessao do Claude Code: a escada da D40/D8.
 
 Objetivo: entregar uma frase de texto a uma sessao do Claude Code que corre neste
 PC e trazer a resposta de volta para o processo do jarvis, sem nada sair da
-maquina alem do que o proprio Claude Code ja envia com a subscricao do Sponsor.
+maquina alem do que o proprio Claude Code ja envia com a subscricao do utilizador.
 
-A escada, por ordem (D40, TECHNOLOGY.md S6). O primeiro degrau que funcionar e o
+A escada, por ordem. O primeiro degrau que funcionar e o
 escolhido; esta gravado em DEGRAU_ESCOLHIDO:
 
-  1   Remote Control da app  -> VETADO (D40/D31). Passa pelo relay da API da
+  1   Remote Control da app  -> VETADO. Passa pelo relay da API da
       Anthropic, por isso nao e tentado nem investigado. Nao existe codigo para
       este degrau de proposito.
   2a  CLI `claude` em stream-json sobre subprocess.Popen (pipes do Windows).
@@ -19,13 +19,13 @@ escolhido; esta gravado em DEGRAU_ESCOLHIDO:
   4   `claude -p --resume <session-id>` por frase: divida assumida (processo
       novo por frase, mais lento), mas nao precisa de instalar nada.
 
-Estado provado neste PC (T2, 2026-09-20): o degrau 2a entregou a frase
+Estado provado neste PC (2026-09-20): o degrau 2a entregou a frase
 "responde apenas OK" a uma sessao real e capturou a resposta em ~1,9 s, o
 processo ficou vivo e a segunda frase confirmou que a sessao-ponte mantem o
 contexto. O degrau 4 tambem passa e fica como plano B (arrancar um processo por
-frase e a divida que a D8 previu). Prova em docs/forja/evidence/.
+frase e uma divida assumida). A prova fica em `scripts/testar_canal.py`.
 
-REGRA DE SEGURANCA DESTE MODULO (D48, depois do SECURITY-REJECT da tentativa 1):
+REGRA DE SEGURANCA DESTE MODULO (depois de uma revisao de seguranca):
 o alvo e sempre o `claude.exe` real, NUNCA o shim `claude.CMD` do npm. Um .CMD
 faz o Windows arrancar o cmd.exe, que volta a parsear a linha de comandos: a
 lista de argumentos do subprocess deixa de proteger (uma frase com aspas e `&`
@@ -72,21 +72,21 @@ from typing import Any, Callable, Iterable
 
 RAIZ = Path(__file__).resolve().parent.parent
 
-# --- Contratos fixos desta task -------------------------------------------
+# --- Contratos fixos --------------------------------------------------------
 
-#: Frase exata com que a escada e provada (criterio da T2).
+#: Frase exata com que a escada e provada.
 FRASE_DE_TESTE = "responde apenas OK"
 
-#: Limite de tempo por degrau, em segundos (criterio da T2).
+#: Limite de tempo por degrau, em segundos.
 TIMEOUT_POR_DEGRAU_S = 60.0
 
-#: Degrau em vigor, gravado depois do teste real da T2 neste PC.
+#: Degrau em vigor, gravado depois do teste real neste PC.
 #: Alterar isto e uma decisao: exige correr scripts/testar_canal.py outra vez.
 DEGRAU_ESCOLHIDO = "2a"
 
 #: Titulo (ou parte do titulo) da janela do terminal onde a sessao do Claude
-#: Code esta aberta, usado pelo degrau 3. O sistema de configuracao e a T4;
-#: ate ela existir, le-se desta variavel de ambiente com o default abaixo.
+#: Code esta aberta, usado pelo degrau 3. Le-se desta variavel de ambiente,
+#: com o default abaixo.
 VARIAVEL_TITULO_JANELA = "JARVIS_TITULO_JANELA"
 TITULO_JANELA_PADRAO = "claude"
 
@@ -139,7 +139,7 @@ SUBCAMINHO_NPM_DO_EXE = ("node_modules", "@anthropic-ai", "claude-code", "bin")
 
 
 def verificar_executavel_seguro(caminho: str | Path) -> str:
-    """Recusa um alvo que o Windows executaria atraves de um shell (D48.1).
+    """Recusa um alvo que o Windows executaria atraves de um shell.
 
     Devolve o caminho como string se for seguro; levanta ValueError se for um
     .cmd/.bat/.ps1/... Nunca ha fallback: um shim e um erro, nao uma alternativa.
@@ -192,7 +192,7 @@ def candidatos_do_cli(nome: str = "claude", ambiente: dict[str, str] | None = No
 def localizar_cli(nome: str = "claude", ambiente: dict[str, str] | None = None) -> str:
     """Caminho do EXECUTAVEL REAL do Claude Code, ou levanta FileNotFoundError.
 
-    Regra permanente do projeto (D48.1, depois do SECURITY-REJECT da T2 a1):
+    Regra permanente do projeto (depois de uma revisao de seguranca):
     o `shutil.which('claude')` devolve em Windows o shim `claude.CMD` do npm, e
     arrancar um .CMD poe o cmd.exe a reparsear a linha de comandos inteira. Por
     isso o shim NUNCA e devolvido, em nenhum degrau da escada: resolve-se o
@@ -213,14 +213,14 @@ def localizar_cli(nome: str = "claude", ambiente: dict[str, str] | None = None) 
 
 #: Formato estrito de um session-id do Claude Code (UUID v4 canonico). Um
 #: session-id e a unica coisa que ainda entra em argv no degrau 4, e vem de
-#: fora (da saida do CLI, ou um dia da configuracao da T4): valida-se sempre.
+#: fora (da saida do CLI, ou um dia da configuracao): valida-se sempre.
 PADRAO_SESSION_ID = re.compile(
     r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
 
 
 def validar_session_id(valor: str) -> str:
-    """Devolve o session-id se for um UUID; levanta ValueError se nao for (D48)."""
+    """Devolve o session-id se for um UUID; levanta ValueError se nao for."""
     if not isinstance(valor, str) or not PADRAO_SESSION_ID.match(valor):
         raise ValueError(
             f"session-id recusado: {valor!r} nao e um UUID. So um UUID pode ir para a "
@@ -230,7 +230,7 @@ def validar_session_id(valor: str) -> str:
 
 
 def verificar_sem_quebras_de_linha(valor: str, campo: str = "texto") -> str:
-    """Recusa CR, LF e NUL em texto externo que va para argv ou stdin (D48)."""
+    """Recusa CR, LF e NUL em texto externo que va para argv ou stdin."""
     for caractere, nome in (("\r", "CR"), ("\n", "LF"), ("\x00", "NUL")):
         if caractere in valor:
             raise ValueError(
@@ -606,7 +606,7 @@ def degrau_2a_subprocess_stream_json(
                 "processo ainda vivo depois da resposta: "
                 + ("sim" if canal.vivo else "nao")
             )
-            # Segunda frase: prova que a sessao-ponte mantem o contexto (D40).
+            # Segunda frase: prova que a sessao-ponte mantem o contexto.
             if canal.vivo:
                 segunda = canal.perguntar_detalhado(
                     "qual foi a frase exata que eu te disse antes desta?", limite_s
@@ -773,8 +773,7 @@ def degrau_2b_pywinpty(
 def titulo_da_janela_configurado(ambiente: dict[str, str] | None = None) -> str:
     """Titulo da janela do terminal com a sessao aberta.
 
-    A configuracao do jarvis e a T4; ate ela existir, o valor vem da variavel
-    de ambiente JARVIS_TITULO_JANELA, com TITULO_JANELA_PADRAO como default.
+    O valor vem da variavel de ambiente JARVIS_TITULO_JANELA, com TITULO_JANELA_PADRAO como default.
     """
     origem = os.environ if ambiente is None else ambiente
     valor = (origem.get(VARIAVEL_TITULO_JANELA) or "").strip()
@@ -790,7 +789,7 @@ def teclas_seguras(frase: str) -> str:
 
     No type_keys, `^ + % ~ ( ) { } [ ]` sao sintaxe; um literal escreve-se entre
     chaves. Sem isto, uma frase com parentesis ou com um `+` faria a automacao
-    premir teclas em vez de escrever o que o Sponsor disse.
+    premir teclas em vez de escrever o que o utilizador disse.
     """
     saida = []
     for caractere in frase:
@@ -1016,12 +1015,12 @@ def degrau_4_claude_p_resume(
 ) -> ResultadoDegrau:
     """Degrau 4: um processo `claude -p --resume <id>` por frase.
 
-    Divida assumida (D8/D40): mantem contexto porque o --resume recarrega o
+    Divida assumida: mantem contexto porque o --resume recarrega o
     historico do disco, mas paga o arranque de um processo em cada frase. Se nao
     receber um session-id, faz primeiro uma chamada `claude -p` normal e le o id
     real da saida JSON (nunca se inventa um id).
 
-    Seguranca (D48, depois do SECURITY-REJECT da T2 a1): o alvo e o `claude.exe`
+    Seguranca (depois de uma revisao de seguranca): o alvo e o `claude.exe`
     real (nunca o shim .CMD), a frase vai por stdin e nunca em argv, o
     session-id tem de ser um UUID, e uma frase com CR/LF e recusada. Uma frase
     com aspas e `&` chega ao modelo como texto e nao executa nada.
@@ -1110,7 +1109,7 @@ def degrau_4_claude_p_resume(
 
 
 def degrau_1_remote_control() -> ResultadoDegrau:
-    """Degrau 1: VETADO pela D40/D31. Nao ha tentativa nenhuma, por decisao."""
+    """Degrau 1: VETADO. Nao ha tentativa nenhuma, por decisao."""
     return ResultadoDegrau(
         degrau="1",
         nome="Remote Control da app do Claude Code",
@@ -1118,19 +1117,19 @@ def degrau_1_remote_control() -> ResultadoDegrau:
         estado="VETADO",
         erro="",
         notas=[
-            "Vetado pela D40 (Technology Scout, TECHNOLOGY.md S6) e pela D31: as mensagens "
+            "Vetado por decisao do projeto: as mensagens "
             "da app passam pela API da Anthropic, que as reencaminha para o processo local "
             "por uma ligacao HTTPS de saida ja aberta. E um relay de terceiros, e a D31 "
             "exige um canal 100% local, sem conta, sem emparelhamento e sem relay.",
             "Por isso nao foi tentado, nem investigado, nem existe codigo para ele neste "
-            "modulo (o proibido da T2).",
+            "modulo.",
         ],
     )
 
 
 # --- A escada e o transporte em vigor -------------------------------------
 
-#: Ordem da escada (D40). O degrau 1 nao entra: esta vetado.
+#: Ordem da escada. O degrau 1 nao entra: esta vetado.
 ORDEM_DA_ESCADA = ("2a", "2b", "3", "4")
 
 DEGRAUS: dict[str, Callable[..., ResultadoDegrau]] = {
@@ -1142,7 +1141,7 @@ DEGRAUS: dict[str, Callable[..., ResultadoDegrau]] = {
 
 
 def transporte_em_vigor() -> str:
-    """O degrau escolhido, provado em T2 neste PC: '2a'."""
+    """O degrau escolhido, provado neste PC: '2a'."""
     return DEGRAU_ESCOLHIDO
 
 

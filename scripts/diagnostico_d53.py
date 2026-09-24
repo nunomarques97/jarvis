@@ -1,14 +1,13 @@
-r"""Diagnostico da fasquia D53 (T13): isola CADEIA vs ENCAMINHAMENTO em tres pernas.
+r"""Diagnostico da fasquia de 90%: isola CADEIA vs ENCAMINHAMENTO em tres pernas.
 
-O acerto de intencao das quatro combinacoes da D53 esta em 55/50/50/50%
-(`docs/forja/evidence/ganho-{pt,en}-{sem,com}-prefixo.md`), muito abaixo dos
-90%. A D53 diz que, em audio sintetico limpo, qualquer valor abaixo de 90% e
-DEFEITO DE CADEIA OU DE ENCAMINHAMENTO. Este script produz a evidencia que
+O acerto de intencao das quatro combinacoes (pt/en, com/sem prefixo) esta em
+55/50/50/50%, muito abaixo dos 90%. Em audio sintetico limpo, qualquer valor
+abaixo de 90% e DEFEITO DE CADEIA OU DE ENCAMINHAMENTO. Este script produz a evidencia que
 diz ONDE esta o defeito, ANTES de tentar corrigir seja o que for.
 
 Nao mede nada por si proprio que o arnes ja saiba medir: reutiliza
 `scripts/medir_voz.py` (amostra, marcadores, config, WER) e
-`jarvis.router.encaminhar()`. Nada aqui toca som (D61): nenhuma sub-corrida
+`jarvis.router.encaminhar()`. Nada aqui toca som: nenhuma sub-corrida
 leva `--com-som` e a perna B corre sempre `jarvis.app --wav ... --sem-voz`.
 
 Tres subcomandos, um por perna:
@@ -26,7 +25,7 @@ Tres subcomandos, um por perna:
             (`pre_recording_buffer_duration=1.0` e
             `post_speech_silence_duration=0.6`, jarvis/app.py::construir_recorder).
             Sem re-sintetizar nada: o A/B da perna C corre sobre os MESMOS
-            WAV (D66, ponto 7), com o padding como unica variavel.
+            WAV, com o padding como unica variavel.
 
   perna-b   PARIDADE ARNES vs CAMINHO VIVO. Corre, um por um, o comando
             EXATO do produto sobre cada WAV — `python -m jarvis.app --wav
@@ -302,7 +301,7 @@ def escrever_perna_a(
             f"| {'sim' if linha.acertou else 'NAO'} |"
         )
     partes.append("")
-    partes.append("## Agregados (os quatro que a task pede)")
+    partes.append("## Agregados (os quatro)")
     partes.append("")
     total_acertos = 0
     total_linhas = 0
@@ -356,7 +355,7 @@ def acrescentar_silencio(origem: Path, destino: Path, cabeca_s: float, cauda_s: 
 
     Devolve (duracao_original_s, duracao_nova_s). Nao re-sintetiza nada e nao
     toca numa unica amostra do audio original: o A/B da perna C tem o padding
-    como unica variavel (D66, ponto 7).
+    como unica variavel.
     """
     with wave.open(str(origem), "rb") as entrada:
         canais = entrada.getnchannels()
@@ -450,13 +449,13 @@ def _correr_ate_a_etapa_3(comando: Sequence[str], limite_s: float) -> str:
     PORQUE SE PARA (dito aqui e repetido na evidencia, para ninguem ter de
     adivinhar): a perna B mede a TRANSCRICAO (etapa 2) e a DECISAO DO
     ENCAMINHADOR (etapa 3). A etapa 4 de uma frase que vai para o Claude Code
-    abre uma sessao-ponte real do CLI `claude` e gasta tokens do Sponsor — e
+    abre uma sessao-ponte real do CLI `claude` e gasta tokens do utilizador — e
     nesta amostra 19 das 20 frases acabam em `decisao=claude`. Deixar as 20
     corridas irem ate ao fim custaria ~27 minutos de espera e 20 sessoes do
     Claude Code para produzir ZERO linhas de informacao nova sobre o que esta
     perna mede. As etapas 1, 2 e 3 correm INTEIRAS e sem nenhuma alteracao: o
     comando e o do produto, tal e qual, e o que se faz a seguir e o mesmo que
-    o Sponsor faria com um Ctrl+C depois de ver a decisao no ecra (D60).
+    o utilizador faria com um Ctrl+C depois de ver a decisao no ecra.
     Uma corrida COMPLETA, com etapa 4 e 5 incluidas, fica na evidencia como
     prova de que o caminho inteiro corre.
     """
@@ -586,7 +585,7 @@ def correr_taxa(frases: Sequence[str], pasta: Path, device: str) -> list[dict[st
     resultados: list[dict[str, object]] = []
     for indice, texto in enumerate(frases, start=1):
         bruto = pasta / f"{indice:02d}-nativo.wav"
-        # com_som=False sempre: nada toca nas colunas (D61).
+        # com_som=False sempre: nada toca nas colunas.
         gerar.sintetizar_para_wav_bruto(texto, bruto, piper, com_som=False)
         dados, taxa_nativa, canais = ler_wav_pcm16(bruto)
         derivado = pasta / f"{indice:02d}-16k-ratecv.wav"
@@ -831,7 +830,7 @@ def _interpretar_numeros(valor: str) -> list[int]:
     return [int(parte) for parte in valor.split(",") if parte.strip()]
 
 
-#: Paridade parametro a parametro entre o arnes e o caminho vivo (D53, perna B).
+#: Paridade parametro a parametro entre o arnes e o caminho vivo (perna B).
 #: Cada linha: parametro | arnes (scripts/transcrever_ficheiro.py:236-250) |
 #: produto (jarvis/app.py::construir_recorder, ~740-783) | divergencia? | efeito plausivel.
 PARIDADE: tuple[tuple[str, str, str, str, str], ...] = (
@@ -854,7 +853,7 @@ PARIDADE: tuple[tuple[str, str, str, str, str], ...] = (
         "`lingua_fixa='pt'` -> `language='pt'` (transcrever_ficheiro.py:247)",
         "`language=LINGUA_FIXA_DO_PRODUTO` = `'pt'` (app.py:762)",
         "igual",
-        "nenhum (a reversão da T8 tocou nos dois sítios)",
+        "nenhum (a reversão da deteção de língua tocou nos dois sítios)",
     ),
     (
         "beam_size",
@@ -1104,13 +1103,13 @@ def _escrever_perna_b(
             f"- Comando por frase, o do produto: "
             f"`.venv\\Scripts\\python -m jarvis.app --wav <ficheiro> --sem-voz "
             f"--device {args.device} --modelo {args.modelo}`",
-            "- `--sem-voz` em todas as 20: nada toca nas colunas (D61).",
+            "- `--sem-voz` em todas as 20: nada toca nas colunas.",
             "- **Cada corrida foi terminada assim que a etapa 3 saiu no log.** A perna B mede a "
             "etapa 2 (transcrição) e a etapa 3 (encaminhamento); a etapa 4 de uma frase "
             "`decisao=claude` abre uma sessão-ponte real do CLI `claude` e gasta tokens do "
-            "Sponsor, e nesta amostra quase todas as linhas acabam em `claude`. As etapas 1, 2 e "
-            "3 correram INTEIRAS e sem nenhuma alteração; parar a seguir é o que o Sponsor faz "
-            "com um Ctrl+C depois de ver a decisão (D60). Uma corrida COMPLETA (etapas 1 a 5, "
+            "utilizador, e nesta amostra quase todas as linhas acabam em `claude`. As etapas 1, 2 e "
+            "3 correram INTEIRAS e sem nenhuma alteração; parar a seguir é o que o utilizador faz "
+            "com um Ctrl+C depois de ver a decisão. Uma corrida COMPLETA (etapas 1 a 5, "
             "incluindo a entrega ao Claude Code) está citada no fim deste ficheiro como prova de "
             "que o caminho inteiro corre.",
             "",

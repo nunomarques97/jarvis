@@ -1,4 +1,4 @@
-r"""Testes do contrato da resposta falada (jarvis/resposta_falada.py, D59, T3).
+r"""Testes do contrato da resposta falada (jarvis/resposta_falada.py).
 
 Fecha o defeito 3 do teste real: a linha 650 de logs/jarvis-2026-09-20.log trouxe o texto
 interno de uma chamada de ferramenta do Claude Code e a linha 652 mostra isso LIDO EM VOZ ALTA
@@ -55,13 +55,13 @@ class TestFixtureDaLinha650(unittest.TestCase):
 
     def test_fixture_esgota_o_filtro_e_cai_no_recurso_tecnico(self) -> None:
         # a linha 650 e so tags e saida de git: nao sobra nenhuma linguagem natural, por isso a
-        # voz tem de cair na frase de recurso (D59.4) e nao ficar em silencio (inaceitavel n.4)
+        # voz tem de cair na frase de recurso e nao ficar em silencio
         resposta = FIXTURE_LINHA_650.read_text(encoding="utf-8")
         self.assertEqual(resumo_falado(resposta), FRASE_RECURSO_SO_TECNICO)
 
 
 class TestCorpusAdversarial(unittest.TestCase):
-    """Sete casos curtos, cada um com a sua afirmacao (criterio da T3/D59.6)."""
+    """Sete casos curtos, cada um com a sua afirmacao."""
 
     def test_bloco_de_codigo_e_removido_mas_o_texto_a_volta_fica(self) -> None:
         resposta = (
@@ -117,7 +117,7 @@ class TestCorpusAdversarial(unittest.TestCase):
         self.assertEqual(falado, FRASE_RECURSO_SO_TECNICO)
 
     def test_resposta_vazia_nao_fica_em_silencio(self) -> None:
-        # inaceitavel n.4 do PRODUCT-PROFILE: ficar a espera/calado nunca e resposta
+        # ficar a espera/calado nunca e resposta
         for vazia in ("", "   ", "\n\n"):
             with self.subTest(vazia=repr(vazia)):
                 falado = resumo_falado(vazia)
@@ -243,12 +243,12 @@ class TestTextoFalavelEFuncaoPura(unittest.TestCase):
 
 
 class TestTagsSemFechoNaMesmaLinha(unittest.TestCase):
-    """Regressao do bloqueador 1 da tentativa 1 (criterio 1 da T3 / D59.1).
+    """Regressao: tags sem fecho na mesma linha.
 
     O filtro de entao exigia o `>` de fecho na MESMA linha, por isso `<invoke`, `<parameter`,
     `<function`, `<thinking` e `</invoke` sozinhos chegavam a voz. Uma resposta do Claude Code
     cortada a meio de uma chamada de ferramenta (streaming truncado, limite de tokens) acaba
-    exatamente assim. Cada uma destas afirmacoes falha no codigo da tentativa 1.
+    exatamente assim. Cada uma destas afirmacoes falhava no codigo anterior.
     """
 
     def test_inicio_de_tag_sem_fecho_nunca_chega_a_voz(self) -> None:
@@ -272,9 +272,9 @@ class TestTagsSemFechoNaMesmaLinha(unittest.TestCase):
 
 
 class TestJuncaoDepoisDoFiltroNaoRemontaProibido(unittest.TestCase):
-    """Regressao do bloqueador 1(b): o defeito D59 outra vez, pela porta do lado.
+    """Regressao: o mesmo defeito outra vez, pela porta do lado.
 
-    `texto_falavel` junta as linhas sobreviventes com um espaco DEPOIS de filtrar; na tentativa 1
+    `texto_falavel` junta as linhas sobreviventes com um espaco DEPOIS de filtrar; no codigo anterior
     nada revalidava o resultado, por isso duas linhas inocentes uma a uma voltavam a formar
     `<invoke name="Bash">` — literalmente a linha 652 do log, lida em voz alta.
     """
@@ -313,11 +313,11 @@ class TestJuncaoDepoisDoFiltroNaoRemontaProibido(unittest.TestCase):
 
 
 class TestCorteSoEmFimDeFraseVerdadeiro(unittest.TestCase):
-    """Regressao do bloqueador 2 da tentativa 1 (criterio 3 da T3 / D59.3).
+    """Regressao: corte so em fim de frase verdadeiro.
 
     `rfind(".")` nao verificava que o ponto era fim de frase: `A versao 3.14` cortava em
     `A versao 3.` ("a versão três vírgula" falado) e `jarvis.app` em `jarvis.`. O criterio diz
-    "nunca a meio de uma palavra". Cada afirmacao destas falha no codigo da tentativa 1.
+    "nunca a meio de uma palavra". Cada afirmacao destas falhava no codigo anterior.
     """
 
     def _afirmar_palavras_inteiras(self, original: str, cortado: str) -> None:
@@ -368,7 +368,7 @@ class TestCorteSoEmFimDeFraseVerdadeiro(unittest.TestCase):
 
 
 class TestFiltroNaoComeLinguagemNatural(unittest.TestCase):
-    """Um filtro que come tudo tambem e um defeito: calaria o jarvis (inaceitavel n.4).
+    """Um filtro que come tudo tambem e um defeito: calaria o jarvis.
 
     Estas frases sao o tipo de resposta que o Claude Code da em portugues normal e tem de
     chegar a voz INTEIRAS, incluindo numeros com ponto decimal, dois pontos e horas.
@@ -391,7 +391,7 @@ class TestFiltroNaoComeLinguagemNatural(unittest.TestCase):
 
 
 class TestCategoriasExtraDeExclusao(unittest.TestCase):
-    """Os casos da D59.1 que a tentativa 1 deixava passar por acaso ou nao apanhava."""
+    """Os casos de exclusao que o codigo anterior deixava passar por acaso ou nao apanhava."""
 
     def test_caminho_unc_sem_extensao_nao_chega_a_voz(self) -> None:
         self.assertEqual(resumo_falado(r"Ficou em \\servidor\partilha"), FRASE_RECURSO_SO_TECNICO)
@@ -460,13 +460,13 @@ class TestCaminhoRealDaRespostaDoClaude(unittest.TestCase):
         self.assertEqual(teste.falados, [FRASE_RECURSO_SEM_CORTE_SEGURO])
 
 
-class TestVarreduraPorCategoriaDaD59(unittest.TestCase):
-    r"""A lista do criterio 1 e de TOKENS, nao de casos bem formados.
+class TestVarreduraPorCategoria(unittest.TestCase):
+    r"""A lista de exclusao e de TOKENS, nao de casos bem formados.
 
-    As tentativas 1 e 2 da T3 foram rejeitadas pela MESMA forma de defeito: os padroes estavam
+    Duas versoes anteriores falharam pela MESMA forma de defeito: os padroes estavam
     escritos para a forma bonita de cada categoria (`<invoke name="x">`, `$ git status`,
     `www.exemplo.com`) e o que o Claude Code manda vem truncado, partido em linhas e sem fecho.
-    Esta classe percorre as categorias da D59.1 uma a uma com variantes MALFORMADAS ou PARCIAIS
+    Esta classe percorre as categorias de exclusao uma a uma com variantes MALFORMADAS ou PARCIAIS
     — as que uma resposta cortada a meio produz de facto — e exige que nenhuma chegue a voz.
     Cada caso e colado a uma frase natural ("Feito."), por isso a unica saida aceite e ou so a
     frase natural, ou a frase de recurso: nunca o token tecnico.
@@ -537,7 +537,7 @@ class TestVarreduraPorCategoriaDaD59(unittest.TestCase):
                 "On branch main",
                 "nothing to commit, working tree clean",
                 "1 file changed, 2 insertions(+), 1 deletion(-)",
-                "1d707e3 T1: amostra inglesa",  # git log --oneline
+                "1d707e3 Adiciona amostra inglesa",  # git log --oneline
                 "git status --short",
                 "Fast-forward",
             ),
@@ -564,7 +564,7 @@ class TestVarreduraPorCategoriaDaD59(unittest.TestCase):
         self._afirmar_que_nada_chega_a_voz(
             "prompt",
             (
-                ">dir",  # sem espaco a seguir ao simbolo (o buraco da tentativa 2)
+                ">dir",  # sem espaco a seguir ao simbolo (um buraco anterior)
                 ">>> print(1)",
                 "$env:PATH",
                 "$PWD",
@@ -592,7 +592,7 @@ class TestVarreduraPorCategoriaDaD59(unittest.TestCase):
         self._afirmar_que_nada_chega_a_voz(
             "urls",
             (
-                "Ve em publico.pt hoje.",  # .pt, o dominio do mundo do Sponsor
+                "Ve em publico.pt hoje.",  # .pt, o dominio do utilizador
                 "exemplo.pt/guia",
                 "exemplo.co.uk",
                 "https:/exemplo",  # esquema com uma barra so
@@ -656,10 +656,10 @@ class TestVarreduraPorCategoriaDaD59(unittest.TestCase):
         )
 
 
-class TestCasosExatosDoVeredictoDaTentativa2(unittest.TestCase):
-    """Os casos que o Reviewer reproduziu ao rejeitar a tentativa 2, um a um.
+class TestCasosExatosDaRevisao(unittest.TestCase):
+    """Os casos reproduzidos numa revisao de uma versao anterior, um a um.
 
-    Cada um destes era falado em voz alta pelo codigo da tentativa 2: `_PADRAO_PROMPT` exigia um
+    Cada um destes era falado em voz alta pelo codigo anterior: `_PADRAO_PROMPT` exigia um
     espaco a seguir ao `$`/`>`, e a lista de dominios de topo nao tinha `.pt`.
     """
 
@@ -683,7 +683,7 @@ class TestCasosExatosDoVeredictoDaTentativa2(unittest.TestCase):
                 self.assertTrue(texto_proibido(caso))
 
     def test_a_frase_natural_a_volta_do_prompt_sobrevive(self) -> None:
-        # o pedaco proibido sai INTEIRO (D59.2) e o que era linguagem natural continua a falar-se
+        # o pedaco proibido sai INTEIRO e o que era linguagem natural continua a falar-se
         self.assertEqual(resumo_falado("Feito.\n>dir"), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.")
 
     def test_o_url_partido_em_linhas_nao_se_remonta_na_juncao(self) -> None:
@@ -705,10 +705,10 @@ class TestCasosExatosDoVeredictoDaTentativa2(unittest.TestCase):
 
 
 class TestDesempenhoDoFiltro(unittest.TestCase):
-    """Inaceitavel n.4 do PRODUCT-PROFILE ("ficar a espera"), nit 1 do veredicto da tentativa 2.
+    """O filtro nunca pode deixar o jarvis "a espera".
 
-    Os padroes da tentativa 2 faziam retrocesso quadratico dentro de um token muito longo: uma
-    linha unica de 30 000 caracteres demorava 22,5 s a filtrar (medido pelo Reviewer) e 200 000
+    Os padroes de uma versao anterior faziam retrocesso quadratico dentro de um token muito longo: uma
+    linha unica de 30 000 caracteres demorava 22,5 s a filtrar (medido) e 200 000
     caracteres demoravam 319,97 s. Uma resposta assim do Claude Code deixava o jarvis calado
     durante meio minuto ou mais, que e precisamente o falhanco que o perfil proibe. O teto por
     palavra (`MAXIMO_CARACTERES_POR_PALAVRA`) corta isso antes de qualquer padrao correr.
@@ -775,7 +775,7 @@ class TestDesempenhoDoFiltro(unittest.TestCase):
         )
 
     def test_uma_linha_de_prosa_natural_quase_no_teto_continua_falavel(self) -> None:
-        # nit 1 do veredicto: a versao anterior deste teste usava uma frase de 59 caracteres,
+        # A versao anterior deste teste usava uma frase de 59 caracteres,
         # tres ordens de grandeza abaixo da fronteira, e por isso nao provava nada sobre o teto.
         # Uma LINHA de prosa limpa logo ABAIXO de MAXIMO_CARACTERES_POR_LINHA tem de passar.
         frase = "Corri os testes todos e esta tudo verde outra vez. "  # 51 caracteres
@@ -791,7 +791,7 @@ class TestDesempenhoDoFiltro(unittest.TestCase):
         self,
     ) -> None:
         # antes do teto por linha, este caso (muitas palavras curtas, nenhuma isolada acima do
-        # teto por palavra) nao era coberto pelo nit 1 da tentativa 2: crescia linearmente ate
+        # teto por palavra) nao era coberto pelo teto por palavra: crescia linearmente ate
         # perto de 1s no milhao de caracteres porque os 28 padroes corriam sobre a linha inteira.
         # Com o teto por linha a linha sai logo na primeira verificacao, antes de qualquer padrao.
         palavra_adversarial = "a" * 15 + "." + "b" * 10
@@ -826,7 +826,7 @@ def _prosa_em_paragrafos(comprimento_minimo: int) -> str:
 
 
 class TestTetoPorLinhaNaoEOTetoDaRespostaJunta(unittest.TestCase):
-    """Fronteira do teto por linha (nit 1 e bloqueador do veredicto da tentativa 1 desta retoma).
+    """Fronteira do teto por linha.
 
     O teto de ~2000 caracteres e por LINHA do texto de entrada. A juncao das linhas que sobrevivem
     ao filtro e a RESPOSTA inteira, nao uma linha: aplicar-lhe o teto mandava qualquer resposta de
@@ -855,7 +855,7 @@ class TestTetoPorLinhaNaoEOTetoDaRespostaJunta(unittest.TestCase):
 
     def test_prosa_natural_acima_do_teto_por_linha_tambem_e_falada_normalmente(self) -> None:
         # ~2100 caracteres falaveis, cada linha bem abaixo do teto: e a resposta junta que passa
-        # dos 2000. Este e o caso exato que a tentativa 1 mandava para a frase de recurso.
+        # dos 2000. Este e o caso exato que uma versao anterior mandava para a frase de recurso.
         resposta = _prosa_em_paragrafos(2100)
         falavel = texto_falavel(resposta)
         self.assertGreater(len(falavel), MAXIMO_CARACTERES_POR_LINHA)
