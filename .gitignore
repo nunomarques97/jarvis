@@ -1,12 +1,11 @@
-# Este repositório vai ser público. Nada aqui dentro pode levar conversas,
-# áudio, transcrições, segredos ou caminhos privados do Sponsor.
+# Never commit conversations, audio, transcripts, credentials or personal paths.
 
-# Conversas, sessões e estado das ferramentas de IA
+# Local tool state and conversations
 .claude/
 .claude/**
 docs/forja/
 forja/
-# CLAUDE.md tem o bloco Forja com caminhos absolutos do disco do Sponsor (D1/D10/D45)
+# Local agent instructions (contain machine-specific paths)
 /CLAUDE.md
 **/HANDOVER.md
 **/SPONSOR-QUEUE.md
@@ -14,7 +13,7 @@ forja/
 *conversa*
 *conversation*
 
-# Áudio e transcrições (é a matéria-prima deste projeto e é privada)
+# Audio and transcripts (private by nature)
 *.wav
 *.mp3
 *.flac
@@ -26,11 +25,11 @@ audio/
 transcripts/
 captures/
 
-# Configuracao privada (D10): projetos, caminhos e microfone do Sponsor.
-# config.exemplo.toml e o exemplo versionado, com dados ficticios.
+# Personal configuration: projects, paths and microphone.
+# config.exemplo.toml is the committed example with placeholder values.
 /config.toml
 
-# Credenciais
+# Credentials
 .env
 .env.*
 *.key
@@ -42,7 +41,7 @@ captures/
 credentials.json
 google-services.json
 
-# Modelos e caches pesados
+# Models and large caches
 models/
 *.bin
 *.onnx
@@ -65,12 +64,12 @@ npm-debug.log*
 dist/
 build/
 
-# Sistema e logs
+# OS files and logs
 .DS_Store
 Thumbs.db
 *.log
 logs/
 tmp/
 .forja/
-# Instrucoes locais dos agentes (caminhos do disco do Sponsor)
+# Local agent instructions
 /AGENTS.md

@@ -2,9 +2,9 @@
 
 `models/` está no `.gitignore`: os ficheiros binários nunca entram no Git. Este
 ficheiro é o registo versionado exigido pela D14e — URL de origem e sha256 de
-cada modelo, para qualquer pessoa (ou sessão futura) reconstruir o mesmo
-ambiente sem adivinhar de onde os ficheiros vieram. Sem caminhos absolutos do
-disco do Sponsor: todos os caminhos abaixo são relativos à raiz do repositório.
+cada modelo, para qualquer pessoa reconstruir o mesmo
+ambiente sem adivinhar de onde os ficheiros vieram. Sem caminhos absolutos:
+todos os caminhos abaixo são relativos à raiz do repositório.
 
 Para verificar um ficheiro já descarregado:
 
@@ -63,12 +63,12 @@ Medido na T3, em cinco WAV sintéticos de ~0,72 s da mesma frase, com o mesmo
 `initial_prompt` de vocabulário: `medium` acertou "horas" em 4, `large-v3` em 2
 e `small` em 1 — ou seja, **subir de `medium` para `large-v3` não resolve o
 problema das frases curtas isoladas** e não há razão medida para o manter. Este
-repositório não apaga nada por sua iniciativa: a proposta de apagar a pasta
-`models--Systran--faster-whisper-large-v3/` e os respetivos blobs fica no
-relatório da task, para o Sponsor decidir. Se a D7 vier a exigir o `large-v3`,
+repositório não apaga nada por sua iniciativa: a pasta
+`models--Systran--faster-whisper-large-v3/` e os respetivos blobs podem ser
+apagados à mão. Se a D7 vier a exigir o `large-v3`,
 o download volta a ser automático a partir do URL acima.
 
-O `small` já tinha sido descarregado pela T1 (`docs/forja/DECISIONS.md` D42/D43);
+O `small` já tinha sido descarregado antes;
 o `medium` foi descarregado nesta task (T3), que é a que o usa por omissão
 (fallback automático para `small` em `scripts/transcrever_ficheiro.py` se o
 `medium` não carregar ou não transcrever no device pedido). Cada pasta de
@@ -92,7 +92,7 @@ Descarregado com o comando exato da S8:
 medido, mas **NÃO é o modelo por omissão**: o preferido continua a ser o
 `medium`. A decisão saiu dos números da D53, não do gosto — A/B controlado sobre
 os MESMOS WAV (D66, ponto 7), `language='pt'` fixo nas duas pernas, quatro
-combinações da D53, evidência em `docs/forja/evidence/modelo-{medium,turbo}-*.md`:
+combinações da D53:
 
 | combinação | acerto de intenção `medium` | acerto de intenção `large-v3-turbo` |
 |---|---|---|
