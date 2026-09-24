@@ -1,32 +1,31 @@
-# jarvis - dependencias diretas, versoes fixas (D14c).
-# So o que o Technology Scout decidiu em docs/forja/TECHNOLOGY.md (D36-D39).
-# Instalar no ambiente virtual do proprio repositorio, nunca global (D14a/D14f):
+# jarvis - direct dependencies, pinned versions.
+# Install into the repository's own virtual environment, never globally:
 #   python -m venv .venv
 #   .venv\Scripts\python -m pip install -U pip
 #   .venv\Scripts\python -m pip install -r requirements.txt
-# O lock completo e resolvido esta em requirements.lock.txt.
+# The fully resolved lock is in requirements.lock.txt.
 
-# Wheels CUDA 12.8 do PyTorch: as wheels de Windows do PyPI sao CPU-only e as
-# builds CUDA antigas nao tem kernels para a arquitetura Blackwell (sm_120).
+# PyTorch CUDA 12.8 wheels: the Windows wheels on PyPI are CPU-only, and older
+# CUDA builds have no kernels for the Blackwell architecture (sm_120).
 --extra-index-url https://download.pytorch.org/whl/cu128
 
-# Base / orquestracao: captura, VAD, wake word e STT (D36, TECHNOLOGY.md S1/S5)
+# Base / orchestration: capture, VAD, wake word and STT
 RealtimeSTT==0.3.104
 
-# Transcricao local no GPU (D39, S3). Vem como dependencia do RealtimeSTT,
-# fixada aqui por ser o motor que o portao do ambiente testa.
+# Local transcription on the GPU. Comes as a RealtimeSTT dependency, pinned
+# here because it is the engine the environment check tests.
 faster-whisper==1.1.1
 
-# Palavra de ativacao "hey jarvis" (D38, S2)
+# "hey jarvis" wake word
 openwakeword==0.6.0
 
-# Voz de resposta local (D47, S4 — corrige a D37: a 0.4.9 nao tinha PiperEngine
-# nenhum). A partir da 0.7.0 o extra [piper] traz o motor real, que fala com o
-# piper.exe do proprio pacote piper-tts por baixo.
+# Local spoken reply (0.4.9 had no PiperEngine at all). From 0.7.0 the [piper]
+# extra brings the real engine, which drives the piper.exe shipped in the
+# piper-tts package.
 RealtimeTTS[piper]==0.8.5
 piper-tts==1.8.0
 
-# Dependencia do RealtimeSTT/openwakeword, fixada na build CUDA 12.8 para a
-# GPU Blackwell e para o CTranslate2 encontrar cuDNN/cuBLAS dentro do venv.
+# Dependency of RealtimeSTT/openwakeword, pinned to the CUDA 12.8 build for
+# Blackwell GPUs and so CTranslate2 finds cuDNN/cuBLAS inside the venv.
 torch==2.9.1+cu128
 torchaudio==2.9.1+cu128

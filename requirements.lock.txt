@@ -1,7 +1,7 @@
-# jarvis - lock completo do ambiente, gerado por: .venv\Scripts\python -m pip freeze
-# Reinstalar de raiz num .venv limpo:
+# jarvis - full environment lock, generated with: .venv\Scripts\python -m pip freeze
+# Reinstall from scratch in a clean .venv:
 #   .venv\Scripts\python -m pip install -r requirements.lock.txt
-# As wheels +cu128 do torch nao estao no PyPI; vem deste indice.
+# The torch +cu128 wheels are not on PyPI; they come from this index.
 --extra-index-url https://download.pytorch.org/whl/cu128
 anyio==4.15.1
 av==18.1.0
