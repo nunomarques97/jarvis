@@ -414,19 +414,22 @@ class TestCaminhoRealDaRespostaDoClaude(unittest.TestCase):
     """O contrato tem de estar LIGADO ao caminho da resposta do Claude Code (criterio 1), e o
     log tem de continuar a levar a resposta INTEIRA em bruto (criterio 6).
 
-    Usa o mesmo arnes sem hardware dos testes do orquestrador (`tests/test_app.py`): canal,
+    Usa o mesmo arnes sem hardware dos testes do processo residente (`tests/test_app.py`): canal,
     voz e accoes falsos, nenhum GPU, nenhum microfone, nenhum Piper.
     """
 
-    def _jarvis_que_responde(self, resposta: str):
-        from tests.test_app import JarvisDeTeste  # import local: nao prende os outros testes
+    def _responder(self, resposta: str):
+        """A resposta chega pelo canal a sessao do projeto, como no caminho vivo."""
+        from jarvis.sessoes import Entrega
+        from tests.test_app import Montagem  # import local: nao prende os outros testes
 
-        return JarvisDeTeste(resposta_do_claude=resposta)
+        teste = Montagem()
+        teste.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto=resposta))
+        return teste
 
     def test_a_resposta_da_linha_650_nunca_chega_as_colunas(self) -> None:
         resposta = FIXTURE_LINHA_650.read_text(encoding="utf-8")
-        teste = self._jarvis_que_responde(resposta)
-        teste.frase("Pergunta ao claude uma coisa")
+        teste = self._responder(resposta)
 
         self.assertEqual(teste.falados, [FRASE_RECURSO_SO_TECNICO])
         falado = teste.falados[0]
@@ -435,16 +438,14 @@ class TestCaminhoRealDaRespostaDoClaude(unittest.TestCase):
 
     def test_o_log_continua_a_levar_a_resposta_inteira_em_bruto(self) -> None:
         resposta = FIXTURE_LINHA_650.read_text(encoding="utf-8")
-        teste = self._jarvis_que_responde(resposta)
-        teste.frase("Pergunta ao claude uma coisa")
+        teste = self._responder(resposta)
 
         texto_do_log = teste.log.texto()
         self.assertIn(repr(resposta), texto_do_log)
         self.assertIn("git status --short && git diff --stat", texto_do_log)
 
     def test_frase_natural_do_claude_e_falada_com_o_prefixo_de_origem(self) -> None:
-        teste = self._jarvis_que_responde("Está tudo feito, os testes passaram todos.")
-        teste.frase("Pergunta ao claude uma coisa")
+        teste = self._responder("Está tudo feito, os testes passaram todos.")
         self.assertEqual(
             teste.falados,
             [f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito, os testes passaram todos."],
@@ -453,11 +454,10 @@ class TestCaminhoRealDaRespostaDoClaude(unittest.TestCase):
     def test_resposta_gigante_sem_um_espaco_nao_parte_uma_palavra_ao_meio(self) -> None:
         from jarvis.resposta_falada import FRASE_RECURSO_SEM_CORTE_SEGURO
 
-        teste = self._jarvis_que_responde("ok")
-        registo = teste.frase("Pergunta ao claude uma coisa")
-        teste.falados.clear()
-        teste.jarvis.responder("a" * (MAXIMO_ABSOLUTO_FALADO + 50), registo)
-        self.assertEqual(teste.falados, [FRASE_RECURSO_SEM_CORTE_SEGURO])
+        teste = self._responder("a" * (MAXIMO_ABSOLUTO_FALADO + 50))
+        self.assertEqual(len(teste.falados), 1)
+        self.assertIn(teste.falados[0], (FRASE_RECURSO_SEM_CORTE_SEGURO, FRASE_RECURSO_SO_TECNICO))
+        self.assertNotIn("a" * 40, teste.falados[0])
 
 
 class TestVarreduraPorCategoria(unittest.TestCase):

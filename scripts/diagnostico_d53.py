@@ -27,7 +27,10 @@ Tres subcomandos, um por perna:
             Sem re-sintetizar nada: o A/B da perna C corre sobre os MESMOS
             WAV, com o padding como unica variavel.
 
-  perna-b   PARIDADE ARNES vs CAMINHO VIVO. Corre, um por um, o comando
+  perna-b   (RETIRADA: o caminho vivo que comparava, com o RealtimeSTT, foi
+            substituido; o subcomando sai com erro e aponta para
+            scripts/medir_ponta_a_ponta.py. Fica a descricao historica.)
+            PARIDADE ARNES vs CAMINHO VIVO. Corre, um por um, o comando
             EXATO do produto sobre cada WAV — `python -m jarvis.app --wav
             <ficheiro> --sem-voz` — e le do log da sessao a transcricao
             (etapa 2) e a decisao do encaminhador (etapa 3), para comparar
@@ -691,7 +694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pc.add_argument("--cabeca", type=float, default=PADDING_CABECA_S)
     pc.add_argument("--cauda", type=float, default=PADDING_CAUDA_S)
 
-    pb = subs.add_parser("perna-b", help="corre o caminho vivo (jarvis.app --wav --sem-voz)")
+    pb = subs.add_parser("perna-b", help="retirada: o caminho vivo antigo ja nao existe")
     pb.add_argument("--pasta-audio", required=True)
     pb.add_argument("--numeros", default="1-20", help="ex.: 1-20 ou 1,5,7")
     pb.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
@@ -750,27 +753,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.perna == "perna-b":
-        config, _origem = medir.carregar_config_para_arnes()
-        pasta = medir.pasta_de_audio_de_saida(args.pasta_audio)
-        numeros = _interpretar_numeros(args.numeros)
-        caminho_arnes = Path(args.arnes)
-        if not caminho_arnes.is_absolute():
-            caminho_arnes = RAIZ / caminho_arnes
-        arnes = _ler_tabela_do_arnes(caminho_arnes)
-        caminho_saida = medir.caminho_evidencia_de_saida(args.saida)
-        print(f"=== PERNA B — caminho vivo sobre {pasta} ===")
-        linhas = correr_perna_b(
-            pasta, numeros, device=args.device, modelo=args.modelo, limite_s=args.limite_s
+        # O caminho vivo que esta perna comparava (RealtimeSTT + encaminhador)
+        # foi substituido pelo processo residente de `python -m jarvis`; a
+        # latencia e o caminho novo medem-se com scripts/medir_ponta_a_ponta.py.
+        print(
+            "ERRO: a perna B media o caminho vivo antigo (RealtimeSTT), que ja nao existe. "
+            "Usa scripts/medir_ponta_a_ponta.py para o caminho atual."
         )
-        certo_arnes, certo_vivo, iguais = _escrever_perna_b(
-            linhas, arnes, caminho_arnes, caminho_saida, pasta, config, args
-        )
-        n = len(linhas)
-        print(f"acerto arnes      = {certo_arnes}/{n}")
-        print(f"acerto caminho vivo = {certo_vivo}/{n}")
-        print(f"texto identico      = {iguais}/{n}")
-        print(f"evidencia escrita em {caminho_saida}")
-        return 0
+        return 2
 
     if args.perna == "perna-c":
         def _abs(valor: str) -> Path:

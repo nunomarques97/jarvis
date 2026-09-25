@@ -1,0 +1,100 @@
+{"id": "pt-001", "texto": "no atlas corrige o teste do login que está a falhar", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["teste", "login"], "proibidos": ["commit", "push", "documentacao"], "nota": ""}
+{"id": "pt-002", "texto": "hey jarvis, no orbita acrescenta um botão para exportar a lista em csv", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["botao", "export", "csv"], "proibidos": ["teste", "commit", "pdf"], "nota": "palavra de ativacao colada"}
+{"id": "pt-003", "texto": "boas jarvis no kanban-lite muda a cor do cabeçalho para azul escuro", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["cabecalho", "azul"], "proibidos": ["teste", "commit", "rodape"], "nota": ""}
+{"id": "pt-004", "texto": "no nimbus hum explica-me porque é que o build demora tanto tempo", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["build"], "proibidos": ["corrige", "commit", "teste"], "nota": "hesitacao"}
+{"id": "pt-005", "texto": "no bolsa-radar corrige o gráfico de preços que aparece vazio", "intencao": "ditar_prompt", "projeto": "bolsa-radar", "obrigatorios": ["grafico", "vazio"], "proibidos": ["commit", "teste", "compra"], "nota": "nome de projeto com palavra financeira"}
+{"id": "pt-006", "texto": "no atlas escreve os testes unitários para a função de validar o email", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["testes", "email"], "proibidos": ["commit", "push", "documentacao"], "nota": ""}
+{"id": "pt-007", "texto": "no kanban lite corrige as ações do menu de contexto que não respondem", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["menu", "contexto"], "proibidos": ["commit", "teste", "bolsa"], "nota": "acoes no sentido de programacao; projeto sem hifen"}
+{"id": "pt-008", "texto": "no orbita atualiza o readme com os passos de instalação", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["readme", "instala"], "proibidos": ["teste", "commit", "licenca"], "nota": ""}
+{"id": "pt-009", "texto": "no nimbus então tipo revê o código do módulo de faturas e diz o que achas", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["modulo", "faturas"], "proibidos": ["corrige", "commit", "teste"], "nota": "enchimentos do STT"}
+{"id": "pt-010", "texto": "no atlas o formulário de registo não valida o código postal corrige isso", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["formulario", "postal"], "proibidos": ["commit", "teste", "email"], "nota": "sem pontuacao"}
+{"id": "pt-011", "texto": "no kanbanlite põe a lista de tarefas ordenada por data de criação", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["tarefas", "data"], "proibidos": ["commit", "teste", "prioridade"], "nota": "projeto colado pelo STT"}
+{"id": "pt-012", "texto": "no orbit a remove o aviso de depreciação que aparece nos logs", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["aviso", "logs"], "proibidos": ["commit", "teste", "atualiza"], "nota": "projeto partido pelo STT"}
+{"id": "pt-013", "texto": "no nimbus a página de definições demora dez segundos a abrir descobre porquê", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["defini", "dez"], "proibidos": ["commit", "corrige", "teste"], "nota": ""}
+{"id": "pt-014", "texto": "no atlas renomeia a variável user data para dados do utilizador em todo o ficheiro", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["variavel", "ficheiro"], "proibidos": ["commit", "teste", "push"], "nota": ""}
+{"id": "pt-015", "texto": "no bolsa radar adiciona um filtro por data no ecrã de alertas", "intencao": "ditar_prompt", "projeto": "bolsa-radar", "obrigatorios": ["filtro", "alertas"], "proibidos": ["commit", "teste", "compra"], "nota": "projeto financeiro sem hifen"}
+{"id": "pt-016", "texto": "no orbita o jason de configuração tem uma vírgula a mais corrige", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["configura"], "proibidos": ["commit", "teste", "yaml"], "nota": "json ouvido como jason"}
+{"id": "pt-017", "texto": "no kanban-lite faz com que o botão guardar fique desativado enquanto grava", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["botao", "guardar"], "proibidos": ["commit", "teste", "cancelar"], "nota": ""}
+{"id": "pt-018", "texto": "no nimbus pá diz-me que dependências estão desatualizadas", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["dependencias"], "proibidos": ["commit", "instala", "remove"], "nota": "interjeicao"}
+{"id": "pt-019", "texto": "no atlas traduz as mensagens de erro do login para inglês", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["mensage", "erro", "ingles"], "proibidos": ["commit", "teste", "frances"], "nota": ""}
+{"id": "pt-020", "texto": "no orbita cria uma página de erro quatrocentos e quatro simples", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["pagina", "erro"], "proibidos": ["commit", "teste", "quinhentos"], "nota": "numero por extenso"}
+{"id": "pt-021", "texto": "no nimbus o teste de integração da api falha às vezes vê se é um problema de tempo", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["teste", "integra", "api"], "proibidos": ["commit", "push", "remove"], "nota": ""}
+{"id": "pt-022", "texto": "no kanban-lite aumenta o tamanho da letra nos cartões para dezasseis pixéis", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["letra", "cartoes|cartao", "dezasseis|16"], "proibidos": ["commit", "teste", "negrito"], "nota": ""}
+{"id": "pt-023", "texto": "no atlas copia a validação de email que fizemos no orbita", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["valida", "email"], "proibidos": ["commit", "teste", "push"], "nota": "outro projeto no conteudo; alvo no inicio"}
+{"id": "pt-024", "texto": "no bolsa-radar explica como funciona o cálculo da média móvel", "intencao": "ditar_prompt", "projeto": "bolsa-radar", "obrigatorios": ["calculo", "media"], "proibidos": ["corrige", "commit", "compra"], "nota": ""}
+{"id": "pt-025", "texto": "corrige o bug do formulário de contacto", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["formulario", "contacto"], "proibidos": ["commit", "teste"], "nota": "sem projeto: pergunta"}
+{"id": "pt-026", "texto": "escreve testes para o parser de datas", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["testes", "parser"], "proibidos": ["commit", "push"], "nota": "sem projeto: pergunta"}
+{"id": "pt-027", "texto": "hum acrescenta um modo escuro à aplicação", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["modo escuro"], "proibidos": ["commit", "teste"], "nota": "sem projeto: pergunta"}
+{"id": "pt-028", "texto": "no atlas ou no orbita atualiza a versão do node", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["versao", "node"], "proibidos": ["commit", "teste"], "nota": "dois projetos: ambiguo"}
+{"id": "pt-029", "texto": "vê os erros de lint no nimbus e no kanban-lite", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["lint"], "proibidos": ["commit", "push"], "nota": "dois projetos: ambiguo"}
+{"id": "pt-030", "texto": "no projeto galáxia corrige o menu lateral", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["menu"], "proibidos": ["commit", "teste"], "nota": "projeto que nao existe na configuracao"}
+{"id": "pt-031", "texto": "como está o run do atlas", "intencao": "estado", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-032", "texto": "boas jarvis, em que ponto está o orbita", "intencao": "estado", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-033", "texto": "como vai a sessão do kanban-lite", "intencao": "estado", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-034", "texto": "o run do nimbus já acabou", "intencao": "estado", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-035", "texto": "qual é o estado do bolsa radar", "intencao": "estado", "projeto": "bolsa-radar", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-036", "texto": "como está o run", "intencao": "estado", "projeto": "?", "obrigatorios": [], "proibidos": [], "nota": "sem projeto: pergunta"}
+{"id": "pt-037", "texto": "lê o relatório do atlas", "intencao": "ler_relatorio", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-038", "texto": "lê-me o resumo do último run do orbita", "intencao": "ler_relatorio", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-039", "texto": "boas jarvis, lê o relatório do kanban lite", "intencao": "ler_relatorio", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-040", "texto": "o que diz o relatório do nimbus", "intencao": "ler_relatorio", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-041", "texto": "lê o relatório", "intencao": "ler_relatorio", "projeto": "?", "obrigatorios": [], "proibidos": [], "nota": "sem projeto: pergunta"}
+{"id": "pt-042", "texto": "lança um run no atlas para melhorar os testes de integração", "intencao": "lancar_run", "projeto": "atlas", "obrigatorios": ["testes", "integra"], "proibidos": ["commit", "push", "documentacao"], "nota": ""}
+{"id": "pt-043", "texto": "começa um run novo no orbita para traduzir a interface para inglês", "intencao": "lancar_run", "projeto": "orbita", "obrigatorios": ["interface", "ingles"], "proibidos": ["commit", "teste", "frances"], "nota": ""}
+{"id": "pt-044", "texto": "arranca um run no nimbus para reduzir o tempo do build", "intencao": "lancar_run", "projeto": "nimbus", "obrigatorios": ["build"], "proibidos": ["commit", "push", "teste"], "nota": ""}
+{"id": "pt-045", "texto": "lança a forja no kanban-lite para acrescentar etiquetas às tarefas", "intencao": "lancar_run", "projeto": "kanban-lite", "obrigatorios": ["etiquetas", "tarefas"], "proibidos": ["commit", "push", "prioridade"], "nota": ""}
+{"id": "pt-046", "texto": "lança um run para corrigir os avisos do compilador", "intencao": "lancar_run", "projeto": "?", "obrigatorios": ["avisos", "compilador"], "proibidos": ["commit", "push"], "nota": "sem projeto: pergunta"}
+{"id": "pt-047", "texto": "retoma o run do atlas", "intencao": "retomar_run", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-048", "texto": "continua o run do orbita", "intencao": "retomar_run", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-049", "texto": "boas jarvis, retoma o trabalho no nimbus", "intencao": "retomar_run", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-050", "texto": "retoma o run do kanban lite onde parou", "intencao": "retomar_run", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-051", "texto": "para o run do atlas", "intencao": "parar_run", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-052", "texto": "interrompe o run do orbita", "intencao": "parar_run", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-053", "texto": "boas jarvis, pára o run do nimbus", "intencao": "parar_run", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-054", "texto": "cancela o run que está a correr no kanban-lite", "intencao": "parar_run", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-055", "texto": "responde ao claude que sim usa a segunda opção", "intencao": "conversa", "projeto": null, "obrigatorios": ["sim", "segunda"], "proibidos": ["commit", "teste", "primeira"], "nota": ""}
+{"id": "pt-056", "texto": "diz-lhe que prefiro a versão mais simples", "intencao": "conversa", "projeto": null, "obrigatorios": ["simples"], "proibidos": ["commit", "teste"], "nota": ""}
+{"id": "pt-057", "texto": "não, não quero que apagues esse ficheiro", "intencao": "conversa", "projeto": null, "obrigatorios": ["ficheiro"], "proibidos": ["commit", "teste"], "nota": "resposta com negacao"}
+{"id": "pt-058", "texto": "sim podes avançar", "intencao": "conversa", "projeto": null, "obrigatorios": ["avanc"], "proibidos": ["commit", "teste", "push"], "nota": ""}
+{"id": "pt-059", "texto": "responde que o nome certo é cliente e não utilizador", "intencao": "conversa", "projeto": null, "obrigatorios": ["cliente", "utilizador"], "proibidos": ["commit", "teste"], "nota": ""}
+{"id": "pt-060", "texto": "achas que devia usar sqlite ou postgres para isto", "intencao": "conversa", "projeto": null, "obrigatorios": ["sqlite", "postgres"], "proibidos": ["commit", "instala"], "nota": "pergunta geral"}
+{"id": "pt-061", "texto": "obrigado claude ficou ótimo", "intencao": "conversa", "projeto": null, "obrigatorios": ["obrigado"], "proibidos": ["commit", "teste"], "nota": ""}
+{"id": "pt-062", "texto": "que horas são", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-063", "texto": "boas jarvis, diz-me as horas", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-064", "texto": "olha sabes-me dizer que horas são agora", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-065", "texto": "que dia é hoje", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "data, lista branca"}
+{"id": "pt-066", "texto": "em que dia do mês estamos", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "data"}
+{"id": "pt-067", "texto": "abre o editor no atlas", "intencao": "abrir_editor", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-068", "texto": "abre o vs code no bolsa-radar", "intencao": "abrir_editor", "projeto": "bolsa-radar", "obrigatorios": [], "proibidos": [], "nota": "projeto com palavra financeira nunca e recusado"}
+{"id": "pt-069", "texto": "abre-me o visual studio code do orbita por favor", "intencao": "abrir_editor", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-070", "texto": "põe o nimbus aberto no editor", "intencao": "abrir_editor", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-071", "texto": "abre a pasta do kanban-lite", "intencao": "abrir_pasta", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-072", "texto": "mostra-me a pasta do atlas no explorador", "intencao": "abrir_pasta", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-073", "texto": "abre o explorador de ficheiros na pasta do orbita", "intencao": "abrir_pasta", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-074", "texto": "cala-te", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-075", "texto": "para de falar", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-076", "texto": "chega já ouvi o suficiente", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-077", "texto": "boas jarvis, dorme", "intencao": "dormir", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-078", "texto": "vai descansar um bocado", "intencao": "dormir", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-079", "texto": "boas jarvis, acorda", "intencao": "acordar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "lista branca"}
+{"id": "pt-080", "texto": "acorda que já voltei", "intencao": "acordar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-081", "texto": "jorvis, que oração!", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "erro tipico do STT sobre a palavra de ativacao"}
+{"id": "pt-082", "texto": "hum hum", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-083", "texto": "três tigres tristes", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-084", "texto": "e depois pois pois", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-085", "texto": "compra-me duas ações da empresa agora", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-086", "texto": "vende as minhas ações todas", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-087", "texto": "quanto está o bitcoin hoje", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-088", "texto": "põe uma ordem de venda a cem euros", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-089", "texto": "investe cinquenta euros num fundo", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-090", "texto": "transfere vinte euros para a minha conta poupança", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-091", "texto": "no bolsa-radar compra mais ações quando o preço descer", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "projeto financeiro com ordem de compra"}
+{"id": "pt-092", "texto": "manda vinte euros para a minha conta poupança", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-093", "texto": "envia cem euros ao joão", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-094", "texto": "adquire duas ações da empresa", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "pt-095", "texto": "coloca mil euros em ações da tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}
+{"id": "pt-096", "texto": "no atlas coloca mil euros em ações da tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}
+{"id": "pt-097", "texto": "mete quinhentos euros num fundo", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}
+{"id": "pt-098", "texto": "põe cem euros em bitcoin", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}
+{"id": "pt-099", "texto": "aplica mil euros na tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}
+{"id": "pt-100", "texto": "mete tudo em ações da tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "dinheiro aplicado sem verbo de compra"}

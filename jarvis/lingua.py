@@ -48,8 +48,9 @@ Porque ha DUAS entradas:
   * `decidir_lingua(all_language_probs)` — o caminho dos scripts
     (`scripts/transcrever_ficheiro.py`), onde temos o objeto `info` completo do
     faster-whisper e portanto a lista inteira de probabilidades;
-  * `decidir_lingua_do_top1(lingua, probabilidade)` — o caminho vivo
-    (`jarvis/app.py` -> RealtimeSTT), onde **so existe o top-1**: o
+  * `decidir_lingua_do_top1(lingua, probabilidade)` — feita para o caminho
+    vivo antigo (RealtimeSTT, entretanto substituido pelo ouvido residente de
+    `jarvis/ouvido.py`, que fixa a lingua do config), onde **so existia o top-1**: o
     RealtimeSTT 0.3.104 le `info.language`/`info.language_probability` em
     `audio_recorder.py:1533-1534` e deita fora o resto do `info`, incluindo o
     `all_language_probs`, antes de o devolver a quem chamou `text()`. O caminho

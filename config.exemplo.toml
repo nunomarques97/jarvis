@@ -17,3 +17,49 @@ caminho = "D:/caminho/para/projeto-um"
 [[projetos]]
 nome = "exemplo-dois"
 caminho = "D:/caminho/para/projeto-dois"
+
+# Opcional: como o jarvis ouve. Sem esta tabela valem estes mesmos valores.
+# tecla: a tecla de falar (segurar para falar, soltar para acabar); uma de
+#   ctrl-direito, alt-direito, shift-direito, scroll-lock, f13 ... f24
+#   (so teclas sem acao propria: o jarvis le a tecla mas nao a bloqueia).
+# motor: parakeet-tdt-0.6b-v3, whisper-medium ou whisper-large-v3-turbo.
+# device: cpu ou cuda. lingua: pt ou en (tambem escolhe a palavra de ativacao:
+#   "hey jarvis" em en, "boas jarvis" em pt).
+# limiar_ativacao: score minimo da palavra de ativacao (0 a 1). O valor certo
+#   para a tua voz e o teu ruido sai de scripts/avaliar_ativacao.py, que o
+#   escreve na evidencia; ate la vale 0.6.
+[ouvido]
+tecla = "ctrl-direito"
+motor = "parakeet-tdt-0.6b-v3"
+device = "cpu"
+lingua = "pt"
+limiar_ativacao = 0.6
+
+# Opcional: o interprete, o LLM local que percebe a intencao, o projeto e
+# reescreve o ditado num prompt claro antes da confirmacao. Sem esta tabela
+# valem estes mesmos valores.
+# url: o Ollama deste computador (so http em 127.0.0.1, localhost ou ::1; o
+#   texto nunca sai do PC antes de o confirmares).
+# modelo / modelo_alternativo: o alternativo entra quando o principal nao esta
+#   instalado ou nao cabe na VRAM livre. Instalar com "ollama pull <modelo>".
+# limite_s: espera maxima pelo LLM (no maximo 5); acima disso a frase fica
+#   "desconhecido" e o texto literal so segue para confirmacao.
+# confirmacao_s: quanto tempo o jarvis espera pelo "sim" depois de dizer o que
+#   percebeu (entre 3 e 120); sem resposta, o pedido e cancelado sem envio.
+[interprete]
+url = "http://127.0.0.1:11434"
+modelo = "qwen3:8b"
+modelo_alternativo = "qwen3:4b"
+limite_s = 5.0
+confirmacao_s = 20.0
+
+# Opcional: runs FORJA por voz ("como esta o run do X", "le o relatorio",
+# lancar, retomar e parar). Sem esta tabela o jarvis so ve as sessoes do
+# Claude Code. Descomenta e preenche com os teus caminhos reais.
+# caminho: a pasta da instalacao da FORJA (a que tem bin/forja.mjs).
+# perfil: o ficheiro JSON passado em --config a cada run lancado por voz.
+# provider: claude ou codex.
+# [forja]
+# caminho = "D:/caminho/para/forja"
+# perfil = "D:/caminho/para/perfil-forja.json"
+# provider = "claude"

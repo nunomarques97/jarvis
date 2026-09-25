@@ -12,6 +12,9 @@ forja/
 *transcript*
 *conversa*
 *conversation*
+# Source files of the conversation feature are code, not conversations.
+!/jarvis/conversa.py
+!/tests/test_conversa.py
 
 # Audio and transcripts (private by nature)
 *.wav
@@ -28,6 +31,10 @@ captures/
 # Personal configuration: projects, paths and microphone.
 # config.exemplo.toml is the committed example with placeholder values.
 /config.toml
+
+# Runtime state: local IPC port and per-start secret, generated MCP configs
+# and Claude Code debug logs of the sessions opened by jarvis.
+/.jarvis/
 
 # Credentials
 .env

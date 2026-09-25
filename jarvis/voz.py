@@ -1,47 +1,42 @@
-r"""Voz de resposta do jarvis: falar(texto) via RealtimeTTS + PiperEngine.
+r"""Voz de resposta do jarvis: falar(texto) pelo motor de voz residente.
 
-Motor e voz: RealtimeTTS 0.8.5 com o PiperEngine real a falar com o `piper.exe`
-do proprio venv, voz `pt_PT-tugao-medium`. API exata:
+MOTOR RESIDENTE: o motor de sintese carrega UMA vez por processo (no primeiro
+uso, ou em `aquecer()` no arranque do jarvis) e fica em memoria; cada frase e
+so inferencia, sem arrancar processo nenhum. Dois motores, os dois locais e
+dentro do processo (onnxruntime em CPU), escolhidos pela LINGUA DA VOZ
+(`lingua_da_voz()`, "pt" por omissao porque as respostas sao escritas em
+portugues), nunca pelo que estiver instalado:
 
-    from RealtimeTTS import TextToAudioStream, PiperEngine, PiperVoice
-    voice = PiperVoice(model_file=..., config_file=...)
-    engine = PiperEngine(voice=voice, piper_path=<caminho absoluto do venv>)
-    stream = TextToAudioStream(engine)
+  - "pt": Piper `pt_PT-tugao-medium` pela biblioteca `piper-tts`;
+  - "en": Kokoro-82M (`kokoro-onnx`), voz inglesa natural, quando o pacote e
+    os ficheiros do modelo em `models/kokoro/` estao presentes e a primeira
+    sintese passa; senao o Piper, com o motivo na descricao do motor.
 
-`piper_path` e sempre o caminho ABSOLUTO do `piper.exe` deste venv (nunca o
-PATH nem `PIPER_PATH`), pela mesma razao que scripts/gerar_wav.py: o
-jarvis pode correr sem o venv ativado no PATH do processo.
+Ver docs/MODELOS.md para os ficheiros, os URLs e os sha256.
 
-CODIFICACAO E SEGREDOS (repetidos aqui de scripts/gerar_wav.py — nao
-importados de la porque scripts/ nao e um pacote importavel, ver o aviso no
-docstring de jarvis/audio_util.py sobre a mesma fronteira):
-  - PYTHONUTF8=1 / PYTHONIOENCODING=utf-8 no ambiente ANTES de sintetizar: o
-    `piper.exe` le o stdin com a ANSI do processo se isto nao estiver ligado,
-    e cada acento chegava partido (bug corrigido depois de medido).
-  - o `piper.exe` corre SEM o ambiente deste processo enquanto sintetiza
-    (`ambiente_sem_segredos`), para o token de mensagens da sessao-mae do
-    Claude Code e as chaves de terceiros do utilizador nunca chegarem a um
-    processo GPL de terceiros que le um modelo vindo da rede.
+STREAMING: o texto e partido em pedacos (frase a frase, e a primeira frase
+comprida na primeira virgula); a sintese corre numa thread que enche uma fila
+e a reproducao toca cada bloco assim que chega, por isso a resposta comeca a
+soar antes de a frase inteira estar sintetizada. `ResultadoFala.primeiro_audio`
+guarda o instante do primeiro bloco: e o inicio da resposta falada.
 
 FALLBACK EXPLICITO: `falar()` nunca levanta. Qualquer falha na
 sintese, na reproducao ou na escrita do ficheiro e apanhada, o texto sai
 impresso na consola como resposta de recurso, e o `ResultadoFala` devolvido
 tem `falou=False` com `motivo_falha` preenchido — e assim que o utilizador
-continua a "ouvir" a resposta mesmo quando a voz falha (sem voz PT local que
-sirva, sem dispositivo de audio, piper.exe em falta, modelo em falta, ...).
+continua a "ouvir" a resposta mesmo quando a voz falha (sem motor carregado,
+sem dispositivo de audio, modelo em falta, ...).
 
 O texto a dizer e SEMPRE o que quem chamou decidiu dizer: este modulo
 nunca le transcricao nem configuracao, so recebe uma string e fala-a.
 
-SILENCIO IMEDIATO: `calar_agora()` e o unico
-mecanismo de silenciamento do jarvis, e os tres gatilhos (Ctrl+C, saida do
-processo e o comando "cala-te" da lista branca da D4.d) chamam-no. Ele mata o
-`piper.exe` da sintese em curso — coisa que o `stream.stop()` do RealtimeTTS
-NAO consegue fazer sozinho, porque o `PiperEngine` original sintetiza com um
-`subprocess.run()` bloqueante sem guardar o processo — e so depois para a
-reproducao. Com `definitivo=True` (Ctrl+C, saida) o modulo fica calado e
-`falar()` passa a recusar tudo: nada novo e dito, nem o resto da frase, nem
-uma despedida, nem a resposta que estivesse a chegar do Claude Code.
+SILENCIO IMEDIATO: `calar_agora()` e o unico mecanismo de silenciamento do
+jarvis, e os tres gatilhos (Ctrl+C, saida do processo e o comando "cala-te")
+chamam-no. Primeiro para a sintese da frase em curso, depois a reproducao, que
+so escreve no dispositivo em blocos de `BLOCO_DE_REPRODUCAO_S` e verifica o
+pedido entre cada um. Com `definitivo=True` (Ctrl+C, saida) o modulo fica
+calado e `falar()` passa a recusar tudo: nada novo e dito, nem o resto da
+frase, nem uma despedida, nem a resposta que estivesse a chegar do Claude Code.
 
 TESTES SILENCIOSOS POR OMISSAO: `falar()` NUNCA abre
 um dispositivo de audio sem opt-in explicito. Chamado sem `ficheiro=` e sem
@@ -73,11 +68,14 @@ para ficheiro, confinamento do caminho, e o fallback provocado de proposito):
 
     .venv\Scripts\python -m jarvis.voz --autoteste
 
-Prova de tempo do silencio (D60(4)(b)), tambem sem microfone e sem tocar som:
-escreve as duas linhas com timestamps e o intervalo em milissegundos num
-ficheiro de evidencia em docs/forja/evidence/:
+Prova de tempo do silencio, tambem sem microfone e sem tocar som: escreve as
+duas linhas com timestamps e o intervalo em milissegundos num ficheiro de
+evidencia em docs/forja/evidence/:
 
     .venv\Scripts\python -m jarvis.voz --prova-silencio
+
+A latencia (texto -> primeiro bloco de audio) mede-se com
+`scripts/medir_latencia_voz.py --verificar`.
 """
 
 from __future__ import annotations
@@ -87,8 +85,7 @@ import contextlib
 import datetime
 import io
 import logging
-import os
-import subprocess
+import re
 import sys
 import threading
 import time
@@ -110,78 +107,12 @@ from jarvis.audio_util import (  # noqa: E402
     garantir_pasta,
     ler_wav_pcm16,
 )
-from jarvis.canal_claude import verificar_executavel_seguro  # noqa: E402
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 #: A voz escolhida para o produto. Nao mudar sem voltar a medir.
 NOME_DA_VOZ = "pt_PT-tugao-medium"
 MODELO_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx"
 CONFIG_ONNX = PASTA_MODELOS_PIPER / f"{NOME_DA_VOZ}.onnx.json"
-
-#: Ambiente que obriga o interprete Python do `piper.exe` a ler o stdin em
-#: UTF-8 — o mesmo bug e a mesma correcao de scripts/gerar_wav.py.
-AMBIENTE_UTF8 = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-
-#: Fragmentos que marcam uma variavel de ambiente como segredo: o
-#: `piper.exe` e codigo GPL de terceiros e nao tem nada que fazer com o token
-#: vivo da sessao-mae do Claude Code nem com chaves de terceiros do utilizador.
-PADROES_DE_VARIAVEL_SENSIVEL = (
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "PASSWD",
-    "CREDENTIAL",
-    "APIKEY",
-    "_KEY",
-)
-
-
-def variavel_sensivel(nome: str) -> bool:
-    """True para variaveis de ambiente que um filho de terceiros nao deve ver."""
-    maiusculas = nome.upper()
-    if maiusculas.startswith("CLAUDE"):
-        return True
-    return any(padrao in maiusculas for padrao in PADROES_DE_VARIAVEL_SENSIVEL)
-
-
-@contextlib.contextmanager
-def _ambiente_sem_segredos():
-    """Tira os segredos de `os.environ` enquanto o piper.exe corre."""
-    escondidas = {nome: valor for nome, valor in os.environ.items() if variavel_sensivel(nome)}
-    for nome in escondidas:
-        del os.environ[nome]
-    try:
-        yield sorted(escondidas)
-    finally:
-        os.environ.update(escondidas)
-
-
-def caminho_do_piper_exe() -> Path:
-    """O piper.exe DESTE venv (mesma pasta Scripts/ do interprete a correr).
-
-    Caminho absoluto de proposito: nunca o PATH nem
-    PIPER_PATH. `verificar_executavel_seguro` e defesa em profundidade:
-    este candidato nunca vem do PATH nem de configuracao, so aqui por
-    seguranca extra.
-    """
-    candidato = Path(sys.executable).resolve().parent / "piper.exe"
-    verificar_executavel_seguro(candidato)
-    if not candidato.is_file():
-        raise FileNotFoundError(
-            f"piper.exe nao encontrado em '{candidato}'. Instalar com: "
-            '.venv\\Scripts\\pip install "RealtimeTTS[piper]==0.8.5" piper-tts==1.8.0 (D47)'
-        )
-    return candidato
-
-
-def _preparar_encoding_do_piper() -> None:
-    """Poe o ambiente em UTF-8 para o piper.exe.
-
-    Atribuicao direta, nao setdefault: um PYTHONUTF8=0 herdado do ambiente do
-    utilizador traria o bug de volta em silencio (mesma nota de gerar_wav.py).
-    """
-    os.environ.update(AMBIENTE_UTF8)
-
 
 # --- Silencio imediato: matar a sintese em curso ---
 
@@ -190,145 +121,7 @@ def _preparar_encoding_do_piper() -> None:
 LIMITE_DE_SILENCIO_MS = 500.0
 
 
-class MorteDoPiper:
-    """A metade "sabe morrer" do motor de voz (opcao A).
-
-    O `PiperEngine` do RealtimeTTS 0.8.5 sintetiza com um `subprocess.run()`
-    BLOQUEANTE e nao guarda o processo em lado nenhum
-    (`RealtimeTTS/engines/piper_engine.py:134-142`, confirmado
-    contra a versao instalada): por isso um `TextToAudioStream.stop()` NAO
-    interrompe uma sintese em curso — o `piper.exe` corre ate ao fim e so
-    depois e que tudo para. Esta classe reimplementa `synthesize()` com
-    `subprocess.Popen`, guarda o processo ANTES de `communicate()` bloquear, e
-    expoe `matar_agora()` para outra thread (a do Ctrl+C) o poder matar.
-
-    E um mixin de proposito: o `PiperEngine` so existe depois do import tardio
-    do RealtimeTTS (ver `_construir_stream`), e uma classe nao pode herdar de
-    algo que ainda nao foi importado. A classe final compoe-se em
-    `classe_do_motor_com_morte()`; assim esta logica fica testavel sozinha,
-    sem RealtimeTTS, sem Piper e sem dispositivo de audio.
-
-    ACHADO, registado aqui de proposito: ha mesmo uma
-    corrida entre a thread que sintetiza e a que cala, por isso existe o
-    `_tranca_do_processo`. Ele protege SO as atribuicoes de `_processo_atual`
-    e a leitura que `matar_agora()` faz; nunca fica preso durante o
-    `communicate()`, senao calar ficaria a espera da sintese — que e
-    exatamente o defeito que esta classe existe para fechar.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        self._tranca_do_processo = threading.Lock()
-        self._processo_atual: subprocess.Popen | None = None
-        self._calado = False
-        super().__init__(*args, **kwargs)
-
-    # -- o que o RealtimeTTS chama (mesma assinatura do PiperEngine)
-
-    def synthesize(self, text: str, sentence_count: int = 0) -> bool:
-        """Sintetiza `text` com o piper.exe, com o processo a jeito de morrer."""
-        # `BaseEngine.synthesize` (base_engine.py:278-290) so faz estas duas
-        # preparacoes; chamam-se a mao porque `super().synthesize()` aqui seria
-        # o `subprocess.run` bloqueante que este wrapper substitui.
-        self.stop_synthesis_event.clear()
-        self._trim_silence_start_pending = True
-
-        if not self.voice:
-            print("No voice set. Please provide a PiperVoice configuration.")
-            return False
-
-        # cmd_list verbatim do piper_engine.py:117-128 (o "--output-raw"
-        # repetido e do original: garante que o -c e lido antes dele).
-        cmd_list = [self.piper_path, "-m", self.voice.model_file, "--output-raw"]
-        if self.voice.config_file:
-            cmd_list.extend(["-c", self.voice.config_file])
-        cmd_list.append("--output-raw")
-        if getattr(self, "debug", False):
-            print(f"Running Piper with args: {cmd_list}")
-
-        with self._tranca_do_processo:
-            if self._calado:
-                # Ja houve pedido de silencio: nao se comeca nada de novo
-                # (nem o resto da frase, nem uma despedida).
-                return False
-            try:
-                processo = subprocess.Popen(
-                    cmd_list,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    shell=False,
-                )
-            except FileNotFoundError:
-                print(f"Error: Piper executable not found at '{self.piper_path}'.")
-                return False
-            # ANTES do communicate(): e este handle que da ao Ctrl+C
-            # alguem para matar enquanto esta thread esta bloqueada la dentro.
-            self._processo_atual = processo
-
-        try:
-            saida, erro = processo.communicate(input=text.encode("utf-8"))
-        finally:
-            with self._tranca_do_processo:
-                if self._processo_atual is processo:
-                    self._processo_atual = None
-
-        if self._calado:
-            # Morto a pedido, ou acabado mesmo em cima do pedido: o audio NAO
-            # entra na fila, senao seria dito depois do "cala-te".
-            return False
-        if processo.returncode != 0:
-            detalhe = (erro or b"").decode("utf-8", errors="replace")
-            print(f"Error running Piper: {detalhe}")
-            return False
-        self.queue.put(saida)
-        return True
-
-    def stop(self):
-        """O `stream.stop()` chama isto (text_to_stream.py:949).
-
-        A classe-base so marca um evento que o `PiperEngine` nunca le; aqui mata-se mesmo o processo, para que ate um
-        `stream.stop()` sozinho corte a sintese em curso.
-        """
-        self.matar_agora()
-        return super().stop()
-
-    # -- o que o jarvis chama (via `calar_agora`)
-
-    def matar_agora(self) -> bool:
-        """Mata o `piper.exe` em curso, se houver. True = matou mesmo um.
-
-        Nunca levanta e pode ser chamada de qualquer thread, as vezes que for
-        preciso: o Ctrl+C, a saida do processo e o "cala-te" podem cair todos
-        uns em cima dos outros.
-        """
-        with self._tranca_do_processo:
-            self._calado = True
-            processo = self._processo_atual
-            self._processo_atual = None
-        if processo is None:
-            return False
-        try:
-            if processo.poll() is not None:
-                return False
-            processo.kill()  # Windows: TerminateProcess, sem espera
-        except Exception:  # noqa: BLE001 - calar nunca pode levantar
-            return False
-        return True
-
-
-#: A classe composta (mixin + PiperEngine real), criada uma unica vez.
-_CLASSE_DO_MOTOR: type | None = None
-
-
-def classe_do_motor_com_morte(piper_engine: type) -> type:
-    """A subclasse real do `PiperEngine` que sabe morrer."""
-    global _CLASSE_DO_MOTOR
-    if _CLASSE_DO_MOTOR is None or not issubclass(_CLASSE_DO_MOTOR, piper_engine):
-        _CLASSE_DO_MOTOR = type("PiperEngineComMorte", (MorteDoPiper, piper_engine), {})
-    return _CLASSE_DO_MOTOR
-
-
-#: Quem esta a falar AGORA (o `TextToAudioStream` da chamada a `falar()` em
+#: Quem esta a falar AGORA (a `FalaResidente` da chamada a `falar()` em
 #: curso) e se ja foi pedido silencio definitivo. Globais de proposito: quem
 #: cala e outra thread (Ctrl+C, atexit) e nao tem o stream a mao.
 _TRANCA_DA_VOZ = threading.Lock()
@@ -465,7 +258,7 @@ def _sem_ruido_de_quem_foi_calado():
 def _linha_do_pedido(motivo: str, definitivo: bool) -> str:
     fim = "; nada novo sera falado (D60)" if definitivo else " (D60)"
     return (
-        f"SILENCIO pedido ({motivo or 'sem motivo'}): matar a sintese do piper.exe "
+        f"SILENCIO pedido ({motivo or 'sem motivo'}): parar a sintese "
         f"e so depois parar a reproducao{fim}"
     )
 
@@ -496,7 +289,7 @@ def calar_agora(
     de Ctrl+C, a saida do processo e a accao "calar" da lista branca da D4.d (e
     o equivalente ingles quando existir). A ordem — `matar_agora()` primeiro,
     `stream.stop()` depois — nao e negociavel: parar a reproducao
-    com uma sintese viva deixaria o `stop()` a espera do `piper.exe`.
+    antes de a sintese parar deixava a thread da sintese a produzir mais audio.
 
     `definitivo=True` (Ctrl+C, saida do processo) marca tambem o modulo como
     calado, e a partir dai `falar()` recusa tudo.
@@ -563,38 +356,390 @@ def calar_agora(
     return resultado
 
 
-def _construir_stream():
-    """Constroi o TextToAudioStream ligado ao PiperEngine real."""
-    # O RealtimeTTS importa o pydub (dependencia transitiva, so para outros
-    # motores que este jarvis nunca usa) e o pydub avisa em stderr que nao
-    # encontra o ffmpeg: o caminho de voz real e
-    # o piper.exe chamado como executavel e nunca usa ffmpeg, por isso o aviso
-    # e ruido puro para o utilizador. So este import fica silenciado, so este
-    # aviso: warnings.filters volta ao estado de antes ao sair do `with`
-    # (contrato do proprio contextlib.catch_warnings), nada fica global.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", category=RuntimeWarning, module=r"pydub\.utils"
-        )
-        from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
+# --- Motor residente: carregado uma vez por processo -----------------------
+#
+# A voz ja nao arranca um processo de sintese por frase (o `piper.exe` custava
+# cinco segundos de arranque a cada resposta). O motor carrega uma vez, no
+# primeiro uso ou em `aquecer()`, e fica em memoria; cada frase e so
+# inferencia. O audio sai em blocos: o primeiro pedaco da frase comeca a tocar
+# enquanto o resto ainda esta a ser sintetizado.
 
-    if not MODELO_ONNX.is_file() or not CONFIG_ONNX.is_file():
-        raise FileNotFoundError(
-            f"voz '{NOME_DA_VOZ}' nao encontrada em {PASTA_MODELOS_PIPER}. Descarregar com: "
-            f".venv\\Scripts\\python -m piper.download_voices {NOME_DA_VOZ} "
-            f"--download-dir {PASTA_MODELOS_PIPER} (a voz e 'tugão' com til; ver docs/MODELOS.md)"
+#: Fios do onnxruntime para a sintese. O valor por omissao (todos os nucleos)
+#: e o mais lento num processador hibrido: os nucleos de eficiencia atrasam
+#: cada passo da inferencia. Medido no i5-14400F (20 frases x 3, texto ->
+#: primeiro bloco): 1 fio 113 ms p50, 2 fios 71 ms, 4 fios 53 ms.
+FIOS_DA_SINTESE = 4
+
+#: Voz inglesa natural (Kokoro-82M em ONNX). So e usada para a lingua "en" e
+#: quando o pacote e os dois ficheiros do modelo estao presentes; ver
+#: docs/MODELOS.md.
+PASTA_MODELOS_KOKORO = RAIZ / "models" / "kokoro"
+MODELO_KOKORO = PASTA_MODELOS_KOKORO / "kokoro-v1.0.onnx"
+VOZES_KOKORO = PASTA_MODELOS_KOKORO / "voices-v1.0.bin"
+VOZ_KOKORO = "af_heart"
+COMANDO_KOKORO = '.venv\\Scripts\\python -m pip install "kokoro-onnx==0.6.1"'
+
+#: Linguas que a voz sabe falar: "pt" pelo Piper pt-PT, "en" pelo Kokoro.
+LINGUAS_DA_VOZ = ("pt", "en")
+
+#: A lingua das respostas do jarvis, e portanto a da voz. As respostas de hoje
+#: (horas, data, confirmacoes das accoes locais) sao escritas em portugues, por
+#: isso a voz e a portuguesa. Muda-se com `definir_lingua_da_voz()` so quando o
+#: texto das respostas passar a ser escrito noutra lingua: a voz segue a lingua
+#: do texto, nunca o motor que por acaso esteja instalado.
+_lingua_da_voz = "pt"
+
+
+def _validar_lingua(lingua: str) -> str:
+    if lingua not in LINGUAS_DA_VOZ:
+        raise ValueError(f"lingua da voz desconhecida: {lingua!r} (conhecidas: {', '.join(LINGUAS_DA_VOZ)})")
+    return lingua
+
+
+def lingua_da_voz() -> str:
+    """A lingua em que a voz fala as respostas deste processo."""
+    return _lingua_da_voz
+
+
+def definir_lingua_da_voz(lingua: str) -> None:
+    """Escolhe a lingua da voz; a frase seguinte usa o motor dessa lingua."""
+    global _lingua_da_voz
+    _lingua_da_voz = _validar_lingua(lingua)
+
+#: Tamanho de cada escrita no dispositivo de som. Entre blocos verifica-se o
+#: pedido de silencio, por isso isto e tambem o atraso maximo da reproducao a
+#: obedecer a um "cala-te".
+BLOCO_DE_REPRODUCAO_S = 0.05
+
+#: Quanto `FalaResidente.stop()` espera, no maximo, pelo fim da reproducao.
+#: Fica abaixo da fasquia do silencio para `calar_agora()` nunca a passar a espera.
+ESPERA_DO_STOP_S = 0.4
+
+#: Uma primeira frase mais comprida do que isto e partida na primeira virgula
+#: (depois do minimo), para o primeiro audio nao esperar pela frase inteira.
+MAXIMO_DO_PRIMEIRO_PEDACO = 60
+MINIMO_DO_PRIMEIRO_PEDACO = 16
+
+_FIM_DE_FRASE = re.compile(r"(?<=[.!?;])\s+")
+
+
+class MotorIndisponivel(RuntimeError):
+    """O motor pedido nao existe nesta maquina (pacote ou modelo em falta)."""
+
+
+def dividir_para_sintese(texto: str) -> list[str]:
+    """Parte o texto em pedacos que se sintetizam e tocam um a seguir ao outro.
+
+    Frase a frase; a primeira, se for comprida, e partida na primeira virgula
+    que deixe pelo menos `MINIMO_DO_PRIMEIRO_PEDACO` caracteres de cada lado.
+    Nunca muda nem perde texto: juntar os pedacos com espacos devolve o texto
+    com os espacos normalizados.
+    """
+    pedacos = [p for p in _FIM_DE_FRASE.split(" ".join((texto or "").split())) if p]
+    if pedacos and len(pedacos[0]) > MAXIMO_DO_PRIMEIRO_PEDACO:
+        primeira = pedacos[0]
+        corte = primeira.find(", ", MINIMO_DO_PRIMEIRO_PEDACO)
+        if corte > 0 and len(primeira) - corte - 2 >= MINIMO_DO_PRIMEIRO_PEDACO:
+            pedacos[0:1] = [primeira[: corte + 1], primeira[corte + 2 :]]
+    return pedacos
+
+
+def _opcoes_do_onnx():
+    import onnxruntime
+
+    opcoes = onnxruntime.SessionOptions()
+    opcoes.intra_op_num_threads = FIOS_DA_SINTESE
+    opcoes.inter_op_num_threads = 1
+    return opcoes
+
+
+class MotorPiperResidente:
+    """Voz pt-PT (Piper `pt_PT-tugao-medium`) pela biblioteca, dentro do processo."""
+
+    nome = "piper"
+    lingua = "pt"
+
+    def __init__(self, modelo: Path = MODELO_ONNX, config: Path = CONFIG_ONNX) -> None:
+        if not Path(modelo).is_file() or not Path(config).is_file():
+            raise MotorIndisponivel(
+                f"voz '{NOME_DA_VOZ}' nao encontrada em {PASTA_MODELOS_PIPER} (ver docs/MODELOS.md)"
+            )
+        try:
+            import json
+
+            import onnxruntime
+            from piper.config import PiperConfig
+            from piper.voice import PiperVoice
+        except ImportError as erro:
+            raise MotorIndisponivel(f"biblioteca piper-tts em falta: {erro}") from erro
+        sessao = onnxruntime.InferenceSession(
+            str(modelo), sess_options=_opcoes_do_onnx(), providers=["CPUExecutionProvider"]
         )
-    piper_exe = caminho_do_piper_exe()
-    _preparar_encoding_do_piper()
-    voz = PiperVoice(model_file=str(MODELO_ONNX), config_file=str(CONFIG_ONNX))
-    # O motor e o PiperEngine, com o `matar_agora()` por cima: sem
-    # isto, nem o Ctrl+C nem o "cala-te" conseguem interromper uma sintese em
-    # curso, porque o PiperEngine original nao guarda o processo.
-    motor = classe_do_motor_com_morte(PiperEngine)(voice=voz, piper_path=str(piper_exe))
-    # tokenizer="rule-based": o default "nltk+rule-based" faz o stream2sentence
-    # descarregar punkt_tab da rede na primeira corrida (fora do registo de
-    # modelos de docs/MODELOS.md); uma frase de cada vez nao precisa dele.
-    return TextToAudioStream(motor, language="pt", tokenizer="rule-based")
+        configuracao = PiperConfig.from_dict(json.loads(Path(config).read_text(encoding="utf-8")))
+        self._voz = PiperVoice(config=configuracao, session=sessao)
+        self.taxa = int(configuracao.sample_rate)
+        self.descricao = f"Piper {NOME_DA_VOZ} (pt-PT, residente, CPU)"
+
+    def sintetizar(self, texto: str):
+        """Gera blocos PCM16 mono a `self.taxa`, pedaco a pedaco."""
+        for pedaco in dividir_para_sintese(texto):
+            for bloco in self._voz.synthesize(pedaco):
+                yield bloco.audio_int16_bytes
+
+
+class MotorKokoro:
+    """Voz inglesa Kokoro-82M (kokoro-onnx), dentro do processo."""
+
+    nome = "kokoro"
+    lingua = "en"
+
+    def __init__(self, modelo: Path = MODELO_KOKORO, vozes: Path = VOZES_KOKORO) -> None:
+        try:
+            import kokoro_onnx
+        except ImportError as erro:
+            raise MotorIndisponivel(
+                f"pacote kokoro-onnx em falta; instalar com: {COMANDO_KOKORO}"
+            ) from erro
+        if not Path(modelo).is_file() or not Path(vozes).is_file():
+            raise MotorIndisponivel(
+                f"modelo Kokoro em falta em {caminho_para_mostrar(PASTA_MODELOS_KOKORO)} "
+                "(ver docs/MODELOS.md)"
+            )
+        import onnxruntime
+
+        sessao = onnxruntime.InferenceSession(
+            str(modelo), sess_options=_opcoes_do_onnx(), providers=["CPUExecutionProvider"]
+        )
+        self._kokoro = kokoro_onnx.Kokoro.from_session(sessao, str(vozes))
+        self.taxa = 24000
+        self.descricao = f"Kokoro-82M voz {VOZ_KOKORO} (en, residente, CPU)"
+
+    def sintetizar(self, texto: str):
+        """Gera blocos PCM16 mono a `self.taxa`, pedaco a pedaco."""
+        import numpy
+
+        for pedaco in dividir_para_sintese(texto):
+            amostras, taxa = self._kokoro.create(pedaco, voice=VOZ_KOKORO, speed=1.0, lang="en-us")
+            self.taxa = int(taxa)
+            yield (numpy.clip(amostras, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
+def _aquecido(motor):
+    """Sintetiza uma palavra que se deita fora: prova que o motor fala e deixa-o quente."""
+    for _bloco in motor.sintetizar("ok."):
+        pass
+    return motor
+
+
+def _carregar_motor(lingua: str | None = None):
+    """Carrega e aquece o motor da `lingua` dada (por omissao, `lingua_da_voz()`).
+
+    Portugues e sempre o Piper pt-PT: um texto portugues nunca chega a uma voz
+    inglesa, que o leria com as regras de pronuncia do ingles. Ingles e o
+    Kokoro; se o Kokoro faltar, nao carregar ou falhar a primeira sintese,
+    fica o Piper, com o motivo na descricao, para o jarvis nunca perder a voz.
+
+    Os imports das bibliotecas de sintese ficam dentro de um
+    `warnings.catch_warnings()`: o que elas registam em `warnings.filters` ao
+    carregar nao sobrevive fora daqui.
+    """
+    lingua = _validar_lingua(lingua or lingua_da_voz())
+    with warnings.catch_warnings():
+        if lingua == "en":
+            try:
+                return _aquecido(MotorKokoro())
+            except Exception as sem_kokoro:  # noqa: BLE001 - um Kokoro partido nunca tira a voz
+                motivo_kokoro = str(sem_kokoro) or type(sem_kokoro).__name__
+        motor = _aquecido(MotorPiperResidente())
+    if lingua == "en":
+        motor.descricao += f" | Kokoro indisponivel: {motivo_kokoro}"
+    return motor
+
+
+_TRANCA_DO_MOTOR = threading.Lock()
+_motores_residentes: dict[str, object] = {}
+
+
+def motor_residente(lingua: str | None = None):
+    """O motor da voz desta lingua neste processo, carregado na primeira chamada e so nela."""
+    lingua = _validar_lingua(lingua or lingua_da_voz())
+    with _TRANCA_DO_MOTOR:
+        motor = _motores_residentes.get(lingua)
+        if motor is None:
+            motor = _carregar_motor(lingua)
+            _motores_residentes[lingua] = motor
+        return motor
+
+
+def aquecer(lingua: str | None = None) -> str:
+    """Carrega e aquece o motor da lingua da voz, para a primeira resposta nao esperar.
+
+    Nao toca som nem escreve ficheiro. Devolve a descricao do motor, para o
+    log do arranque. Levanta se nao houver motor nenhum.
+    """
+    return motor_residente(lingua).descricao
+
+
+def _esquecer_motor_residente() -> None:
+    """So para os testes: o proximo uso volta a carregar o motor."""
+    with _TRANCA_DO_MOTOR:
+        _motores_residentes.clear()
+
+
+class _SaidaDeSom:
+    """O dispositivo de som do processo: aberto na primeira fala com som e mantido."""
+
+    def __init__(self) -> None:
+        self._tranca = threading.Lock()
+        self._pyaudio = None
+        self._stream = None
+        self._taxa = 0
+
+    def escrever(self, taxa: int, dados: bytes) -> None:
+        with self._tranca:
+            if self._stream is None or self._taxa != taxa:
+                self._fechar_stream()
+                import pyaudio
+
+                if self._pyaudio is None:
+                    self._pyaudio = pyaudio.PyAudio()
+                self._stream = self._pyaudio.open(
+                    format=pyaudio.paInt16, channels=1, rate=taxa, output=True
+                )
+                self._taxa = taxa
+            stream = self._stream
+        stream.write(dados)
+
+    def _fechar_stream(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop_stream()
+                self._stream.close()
+            except Exception:  # noqa: BLE001 - fechar nunca pode levantar
+                pass
+            self._stream = None
+
+
+_SAIDA_DE_SOM = _SaidaDeSom()
+
+_FIM_DOS_BLOCOS = object()
+
+
+class FalaResidente:
+    """Uma frase dita pelo motor residente.
+
+    Tem a forma que `falar()` e `calar_agora()` ja conheciam: `feed()`,
+    `play()`, `stop()` e um `engine` com `matar_agora()`. A sintese corre numa
+    thread que enche uma fila; `play()` tira blocos da fila e toca-os ou
+    escreve-os. Um pedido de silencio para os dois lados: a sintese deixa de
+    produzir e a reproducao nao escreve mais nenhum bloco.
+    """
+
+    def __init__(self, motor, saida_de_som: _SaidaDeSom | None = None) -> None:
+        self.engine = self
+        self._motor = motor
+        self._saida = saida_de_som or _SAIDA_DE_SOM
+        self._textos: list[str] = []
+        self._parar = threading.Event()
+        self._a_falar = threading.Event()
+        self._calado = False
+        self._fio_que_toca: threading.Thread | None = None
+        #: `perf_counter()` do instante em que o primeiro bloco de audio saiu
+        #: (entregue ao dispositivo ou escrito no WAV). None se nada saiu.
+        self.instante_do_primeiro_audio: float | None = None
+
+    def feed(self, texto: str) -> None:
+        self._textos.append(texto)
+
+    def _marcar_primeiro_audio(self) -> None:
+        # Marcado DEPOIS de o bloco sair (escrito no WAV ou entregue ao
+        # dispositivo, o que na primeira fala inclui abrir o dispositivo), e
+        # nao quando fica pronto na fila: o log nunca promete mais cedo do que
+        # o que sai de facto.
+        if self.instante_do_primeiro_audio is None:
+            self.instante_do_primeiro_audio = time.perf_counter()
+
+    def matar_agora(self) -> bool:
+        """Para a sintese; devolve True se havia uma frase a meio."""
+        estava = self._a_falar.is_set()
+        self._calado = True
+        self._parar.set()
+        return estava
+
+    def stop(self) -> None:
+        """Para a reproducao e espera (no maximo `ESPERA_DO_STOP_S`) que pare mesmo.
+
+        Assim a linha "fim do audio" de `calar_agora()` so e escrita depois de
+        o ultimo bloco ter saido. Chamado pela propria thread que toca (um
+        Ctrl+C tratado a meio de `play()`), nao espera: seria esperar por si
+        mesma.
+        """
+        self._parar.set()
+        if self._fio_que_toca is not threading.current_thread():
+            fim = time.perf_counter() + ESPERA_DO_STOP_S
+            while self._a_falar.is_set() and time.perf_counter() < fim:
+                time.sleep(0.002)
+
+    def _produzir(self, fila, texto: str) -> None:
+        try:
+            for bloco in self._motor.sintetizar(texto):
+                if self._parar.is_set():
+                    break
+                fila.put(bloco)
+        except BaseException as erro:  # noqa: BLE001 - passa a falha para quem toca
+            fila.put(erro)
+        finally:
+            fila.put(_FIM_DOS_BLOCOS)
+
+    def play(self, muted: bool = False, output_wavfile: str | None = None) -> None:
+        import queue
+        import wave
+
+        texto = " ".join(self._textos)
+        fila: queue.Queue = queue.Queue()
+        self._fio_que_toca = threading.current_thread()
+        self._a_falar.set()
+        produtor = threading.Thread(
+            target=self._produzir, args=(fila, texto), name="voz-sintese", daemon=True
+        )
+        produtor.start()
+        wav = None
+        try:
+            while not self._parar.is_set():
+                try:
+                    bloco = fila.get(timeout=BLOCO_DE_REPRODUCAO_S)
+                except queue.Empty:
+                    continue
+                if bloco is _FIM_DOS_BLOCOS:
+                    break
+                if isinstance(bloco, BaseException):
+                    raise bloco
+                taxa = int(self._motor.taxa)
+                if output_wavfile is not None:
+                    if wav is None:
+                        wav = wave.open(str(output_wavfile), "wb")
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(taxa)
+                    wav.writeframes(bloco)
+                if not muted:
+                    passo = max(2, int(taxa * BLOCO_DE_REPRODUCAO_S) * 2)
+                    for inicio in range(0, len(bloco), passo):
+                        if self._parar.is_set():
+                            break
+                        self._saida.escrever(taxa, bloco[inicio : inicio + passo])
+                        self._marcar_primeiro_audio()
+                else:
+                    self._marcar_primeiro_audio()
+        finally:
+            self._a_falar.clear()
+            if wav is not None:
+                wav.close()
+
+
+def _construir_stream():
+    """A frase seguinte, dita pelo motor residente (carregado so da primeira vez)."""
+    return FalaResidente(motor_residente())
 
 
 def _duracao_do_wav(caminho: Path) -> float:
@@ -620,6 +765,9 @@ class ResultadoFala:
     duracao_s: float | None = None
     #: Nao vazio quando falou=False: a razao do fallback para texto.
     motivo_falha: str = ""
+    #: `time.perf_counter()` do primeiro bloco de audio entregue ao dispositivo
+    #: ou escrito no WAV: o inicio da resposta falada. None quando nada saiu.
+    primeiro_audio: float | None = None
 
 
 #: D61: `falar()` sem `ficheiro=` e sem `com_som=True` e um erro de teste, nao
@@ -636,7 +784,7 @@ MOTIVO_SEM_OPT_IN = (
 def falar(
     texto: str, *, ficheiro: str | Path | None = None, com_som: bool = False
 ) -> ResultadoFala:
-    """Fala `texto` em voz alta (Piper), ou grava-o num WAV se `ficheiro` for dado.
+    """Fala `texto` em voz alta (motor residente), ou grava-o num WAV se `ficheiro` for dado.
 
     Sem `ficheiro=` E sem `com_som=True`, esta funcao RECUSA-SE a
     tocar — devolve `falou=False` com `motivo_falha=MOTIVO_SEM_OPT_IN` antes de
@@ -688,23 +836,22 @@ def falar(
         _guardar_voz_ativa(stream)
         try:
             stream.feed(texto_limpo)
-            with _ambiente_sem_segredos():
-                if saida is not None:
-                    garantir_pasta(saida.parent)
-                    # muted=not com_som: sem opt-in (o caso de todos os testes,
-                    # autotestes e arneses) escreve o WAV sem abrir dispositivo
-                    # nenhum; com --com-som toca E grava, exatamente como
-                    # scripts/gerar_wav.py --com-som (`--com-som` quer
-                    # dizer a mesma coisa em todo o repositorio).
-                    stream.play(muted=not com_som, output_wavfile=str(saida))
-                else:
-                    stream.play(muted=False)
+            if saida is not None:
+                garantir_pasta(saida.parent)
+                # muted=not com_som: sem opt-in (o caso de todos os testes,
+                # autotestes e arneses) escreve o WAV sem abrir dispositivo
+                # nenhum; com --com-som toca E grava, exatamente como
+                # scripts/gerar_wav.py --com-som (`--com-som` quer
+                # dizer a mesma coisa em todo o repositorio).
+                stream.play(muted=not com_som, output_wavfile=str(saida))
+            else:
+                stream.play(muted=False)
         except BaseException as interrupcao:
             if isinstance(interrupcao, Exception):
                 raise  # falha normal: vai para o recuo da D35.4 la em baixo
             # Ctrl+C (ou SystemExit) a subir por aqui: calar AGORA, antes de
             # o `finally` largar o registo da voz ativa — senao ficava um
-            # piper.exe vivo a acabar a frase sozinho.
+            # motor a acabar a frase sozinho.
             calar_agora("Ctrl+C a meio da frase (D30/D60)", definitivo=True)
             raise
         finally:
@@ -722,6 +869,7 @@ def falar(
         # cumprida — por isso `falou=False` com este motivo e nao um erro.
         return ResultadoFala(falou=False, motivo_falha=MOTIVO_SILENCIADO)
 
+    primeiro_audio = getattr(stream, "instante_do_primeiro_audio", None)
     if saida is not None:
         try:
             duracao_s = _duracao_do_wav(saida)
@@ -730,8 +878,10 @@ def falar(
             # existe mas pode nao fechar como WAV valido. Nao e uma falha da
             # voz a dizer ao utilizador, e o resultado de ele ter mandado calar.
             return ResultadoFala(falou=False, caminho=saida, motivo_falha=f"WAV por ler: {erro}")
-        return ResultadoFala(falou=True, caminho=saida, duracao_s=duracao_s)
-    return ResultadoFala(falou=True)
+        return ResultadoFala(
+            falou=True, caminho=saida, duracao_s=duracao_s, primeiro_audio=primeiro_audio
+        )
+    return ResultadoFala(falou=True, primeiro_audio=primeiro_audio)
 
 
 # --- Autoteste (sem depender de um dispositivo de audio real) --------------
@@ -742,7 +892,7 @@ def _autoteste() -> int:
 
     Nao toca em `audio/` (usa uma pasta temporaria) e nao exige um
     dispositivo de saida de som: so o ramo --ficheiro e testado a falar a
-    serio; o fallback e provocado com um motor falso, sem tocar no piper.exe.
+    serio; o fallback e provocado com um motor falso.
     """
     import tempfile
 
@@ -770,7 +920,7 @@ def _autoteste() -> int:
     finally:
         (RAIZ / caminho_teste).unlink(missing_ok=True)
 
-    # 3. caminho fora do repositorio e recusado ANTES de tocar no Piper
+    # 3. caminho fora do repositorio e recusado ANTES de tocar no motor
     # (mesma regra de audio_util.caminho_wav_de_saida).
     with tempfile.TemporaryDirectory() as pasta:
         fora_da_raiz = str(Path(pasta) / "fora.wav")
@@ -851,12 +1001,12 @@ def _autoteste() -> int:
 # --- Prova de tempo do silencio, sem microfone e sem tocar som (D60(4)(b)) --
 
 #: Frase comprida (dentro do limite do contrato da resposta falada) so para a
-#: sintese demorar o suficiente a ser apanhada a MEIO, que e o pior caso:
-#: com o `piper.exe` vivo, `stream.stop()` sozinho ficaria a espera dele.
+#: sintese demorar o suficiente a ser apanhada a MEIO, que e o pior caso.
 FRASE_DA_PROVA = (
     "Esta frase existe so para a prova do silencio imediato: e comprida de "
     "proposito para a sintese ainda estar a meio quando o pedido de paragem "
-    "chegar, e assim medir o pior caso do Piper."
+    "chegar. Tem uma segunda frase, e depois uma terceira, para haver sempre "
+    "mais audio por sintetizar."
 )
 
 
@@ -871,13 +1021,12 @@ def _agora_com_ms(quando: datetime.datetime | None = None) -> str:
 
 
 def _esperar_pela_sintese(limite_s: float = 30.0) -> bool:
-    """Espera ate o `piper.exe` desta frase estar mesmo vivo a sintetizar."""
+    """Espera ate a frase em curso ter o primeiro bloco de audio ja fora."""
     fim = time.perf_counter() + limite_s
     while time.perf_counter() < fim:
-        motor = getattr(_stream_ativo, "engine", None)
-        if getattr(motor, "_processo_atual", None) is not None:
+        if getattr(_stream_ativo, "instante_do_primeiro_audio", None) is not None:
             return True
-        time.sleep(0.01)
+        time.sleep(0.005)
     return False
 
 
@@ -887,81 +1036,6 @@ def _intervalo_entre_linhas_ms(pedido: str, fim: str) -> float:
     t0 = datetime.datetime.strptime(pedido.split(" SILENCIO")[0], formato)
     t1 = datetime.datetime.strptime(fim.split(" SILENCIO")[0], formato)
     return (t1 - t0).total_seconds() * 1000.0
-
-
-def _piper_vivo() -> str:
-    """O que o Windows diz sobre processos `piper.exe` ainda vivos."""
-    try:
-        visto = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq piper.exe", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except Exception as erro:  # noqa: BLE001 - e so evidencia extra
-        return f"nao verificado ({erro})"
-    saida = " ".join(visto.stdout.split())
-    return saida or "(sem saida)"
-
-
-def _esperar_por_piper_no_sistema(limite_s: float = 30.0) -> bool:
-    """Espera ate o Windows mostrar um `piper.exe` vivo (sem handle nenhum).
-
-    E a unica forma de saber que a sintese comecou no caso "antes": o
-    `PiperEngine` original nao guarda o processo em lado nenhum — que e
-    exatamente o defeito que este modulo corrige.
-    """
-    fim = time.perf_counter() + limite_s
-    while time.perf_counter() < fim:
-        if "piper.exe" in _piper_vivo():
-            return True
-        time.sleep(0.02)
-    return False
-
-
-def _caso_sem_wrapper() -> dict:
-    """O MESMO pedido de paragem com o `PiperEngine` original: o "antes".
-
-    Mede o que se previu em teoria: com a sintese em curso,
-    `stream.stop()` sozinho fica a espera que o `piper.exe` acabe a frase.
-    """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"pydub\.utils")
-        from RealtimeTTS import PiperEngine, PiperVoice, TextToAudioStream
-
-    piper_exe = caminho_do_piper_exe()
-    _preparar_encoding_do_piper()
-    voz_do_piper = PiperVoice(model_file=str(MODELO_ONNX), config_file=str(CONFIG_ONNX))
-    motor = PiperEngine(voice=voz_do_piper, piper_path=str(piper_exe))
-    stream = TextToAudioStream(motor, language="pt", tokenizer="rule-based")
-
-    caminho = caminho_wav_de_saida(Path("audio") / "_prova_silencio_sem_wrapper.wav")
-    garantir_pasta(caminho.parent)
-    acabou = threading.Event()
-
-    def tocar() -> None:
-        try:
-            with _ambiente_sem_segredos():
-                # muted=True: tambem aqui nao se abre dispositivo de audio.
-                stream.play(muted=True, output_wavfile=str(caminho))
-        finally:
-            acabou.set()
-
-    stream.feed(FRASE_DA_PROVA)
-    thread = threading.Thread(target=tocar, name="prova-sem-wrapper", daemon=True)
-    thread.start()
-    apanhou = _esperar_por_piper_no_sistema()
-
-    inicio = time.perf_counter()
-    stream.stop()
-    acabou.wait(timeout=120)
-    intervalo_ms = (time.perf_counter() - inicio) * 1000.0
-    caminho.unlink(missing_ok=True)
-    return {
-        "apanhou_a_sintese": apanhou,
-        "intervalo_ms": intervalo_ms,
-        "piper_vivo_depois": _piper_vivo(),
-    }
 
 
 def _um_caso_da_prova(motivo: str, *, definitivo: bool, nome_do_wav: str) -> dict:
@@ -976,8 +1050,8 @@ def _um_caso_da_prova(motivo: str, *, definitivo: bool, nome_do_wav: str) -> dic
         print(linha)
 
     def falar_em_ficheiro() -> None:
-        # ficheiro= sem com_som: muted=True no RealtimeTTS, NUNCA abre
-        # dispositivo de saida de audio. Esta prova nao faz barulho.
+        # ficheiro= sem com_som: muted=True, NUNCA abre dispositivo de saida
+        # de audio. Esta prova nao faz barulho.
         resultado["fala"] = falar(FRASE_DA_PROVA, ficheiro=str(caminho))
 
     thread = threading.Thread(target=falar_em_ficheiro, name="prova-silencio", daemon=True)
@@ -985,12 +1059,8 @@ def _um_caso_da_prova(motivo: str, *, definitivo: bool, nome_do_wav: str) -> dic
     apanhou_a_sintese = _esperar_pela_sintese()
     marca_do_pedido = time.perf_counter()
     silencio = calar_agora(motivo, definitivo=definitivo, registar=registar)
-    # A cauda: depois de `synthesize()` devolver False, o `synthesize_worker`
-    # do RealtimeTTS faz um `time.sleep(0.2)` fixo antes de sair
-    # (text_to_stream.py:811-813, ramo `len(self.engines) == 1`). Esses ~200 ms
-    # NAO produzem nem tocam um unico sample — o `piper.exe` ja morreu e o
-    # ficheiro ja nao cresce — mas contam-se aqui na mesma, para a fasquia da
-    # D60 ser medida contra o pior numero possivel e nao contra o melhor.
+    # Conta-se tambem ate `falar()` devolver: e o pior numero, porque inclui a
+    # frase a desenrolar-se depois de o motor ja ter deixado de produzir.
     thread.join(timeout=30)
     ate_a_thread_acabar_ms = (time.perf_counter() - marca_do_pedido) * 1000.0
 
@@ -1017,23 +1087,21 @@ def _um_caso_da_prova(motivo: str, *, definitivo: bool, nome_do_wav: str) -> dic
         "falou": resultado.get("fala").falou if "fala" in resultado else None,
         "motivo_falha": resultado.get("fala").motivo_falha if "fala" in resultado else "",
         "duracao_do_wav_s": duracao_do_wav,
-        "piper_vivo_depois": _piper_vivo(),
     }
 
 
 def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
-    """Evidencia de tempo da D60(4)(b): os dois timestamps e o intervalo.
+    """Evidencia de tempo do silencio: os dois timestamps e o intervalo.
 
-    Corre a voz REAL (Piper, voz pt-PT) pelo caminho de FICHEIRO, sem abrir
+    Corre a voz REAL (o motor residente) pelo caminho de FICHEIRO, sem abrir
     nenhum dispositivo de saida de audio e sem microfone. Faz os dois casos:
-    o "cala-te" da lista branca (nao definitivo) e o Ctrl+C / saida do
-    processo (definitivo, depois do qual nada novo e falado).
+    o "cala-te" (nao definitivo) e o Ctrl+C / saida do processo (definitivo,
+    depois do qual nada novo e falado).
     """
-    # Confinamento do --evidencia a PASTA_EVIDENCIA (achado de revisao de
-    # seguranca): validado JA, antes de gastar tempo a
-    # sintetizar seja o que for, para um caminho invalido nunca chegar a
-    # `garantir_pasta`/`write_text` (que criavam pastas e escreviam fora do
-    # repo com os privilegios do utilizador).
+    # Confinamento do --evidencia a PASTA_EVIDENCIA: validado JA, antes de
+    # gastar tempo a sintetizar seja o que for, para um caminho invalido nunca
+    # chegar a `garantir_pasta`/`write_text` (que criavam pastas e escreviam
+    # fora do repo com os privilegios do utilizador).
     try:
         destino = (
             caminho_evidencia_de_saida(caminho_pedido)
@@ -1041,24 +1109,22 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
             else PASTA_EVIDENCIA / f"silencio-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
         )
     except ValueError as erro:
-        print(f"FALHOU (confinamento do --evidencia, D1/D10): {erro}", file=sys.stderr)
+        print(f"FALHOU (confinamento do --evidencia): {erro}", file=sys.stderr)
         return 1
     garantir_pasta(destino.parent)
 
     print("=== jarvis - prova do silencio imediato - sem som, sem microfone ===")
-    # O "antes": o mesmo pedido de paragem sem o wrapper que mata o piper.exe, para o numero
-    # da fasquia ter com o que ser comparado.
     try:
-        antes = _caso_sem_wrapper()
-    except Exception as erro:  # noqa: BLE001 - o "antes" e contexto, nao a prova
-        antes = {"erro": str(erro)}
+        descricao = aquecer()
+    except Exception as erro:  # noqa: BLE001 - sem motor nao ha nada para calar
+        print(f"FALHOU: motor de voz por carregar: {erro}")
+        return 1
+    print(f"motor: {descricao}")
     casos = [
-        _um_caso_da_prova("cala-te (lista branca D4.d)", definitivo=False, nome_do_wav="_prova_silencio_calar.wav"),
+        _um_caso_da_prova("cala-te", definitivo=False, nome_do_wav="_prova_silencio_calar.wav"),
     ]
     retomar_a_voz()  # o caso anterior nao e definitivo; o proximo comeca limpo
-    casos.append(
-        _um_caso_da_prova("Ctrl+C (D30/D60)", definitivo=True, nome_do_wav="_prova_silencio_ctrlc.wav")
-    )
+    casos.append(_um_caso_da_prova("Ctrl+C", definitivo=True, nome_do_wav="_prova_silencio_ctrlc.wav"))
 
     # Depois do Ctrl+C nada NOVO e falado: nem uma despedida.
     depois = falar("Adeus, ate a proxima.", ficheiro="audio/_prova_silencio_depois.wav")
@@ -1073,39 +1139,27 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
         f"{_agora_com_ms(agora)}.\n"
     )
     partes.append(
-        "Voz REAL (Piper, `pt_PT-tugao-medium`) pelo caminho de FICHEIRO: nenhum dispositivo de\n"
+        f"Voz REAL ({descricao}) pelo caminho de FICHEIRO: nenhum dispositivo de\n"
         "saida de audio foi aberto e nenhum microfone foi usado (`falar(..., ficheiro=)`\n"
         "sem `com_som` toca com `muted=True`). Os WAV de prova sao apagados no fim; a pasta `audio/` ja e\n"
         "ignorada pelo Git.\n"
     )
     partes.append(
-        f"Fasquia da D60: <= {LIMITE_DE_SILENCIO_MS:.0f} ms entre o pedido de paragem e o fim do audio.\n"
+        f"Fasquia: <= {LIMITE_DE_SILENCIO_MS:.0f} ms entre o pedido de paragem e o fim do audio.\n"
     )
-    partes.append("\n## Antes: o mesmo pedido sem o wrapper que mata o piper.exe\n")
-    if "erro" in antes:
-        partes.append(f"- nao medido nesta corrida: {antes['erro']}\n")
-    else:
-        partes.append(
-            f"- `PiperEngine` original (subprocess.run bloqueante, sem handle guardado), "
-            f"sintese apanhada viva: {'sim' if antes['apanhou_a_sintese'] else 'nao'}\n"
-            f"- `stream.stop()` sozinho demorou **{antes['intervalo_ms']:.0f} ms** ate a voz "
-            f"parar mesmo (fasquia D60: {LIMITE_DE_SILENCIO_MS:.0f} ms): "
-            f"{'CUMPRIA' if antes['intervalo_ms'] <= LIMITE_DE_SILENCIO_MS else 'FALHAVA'}\n"
-            f"- `tasklist` depois: {antes['piper_vivo_depois']}\n"
-        )
     for caso in casos:
         duracao = caso["duracao_do_wav_s"]
         duracao_escrita = "sem WAV" if duracao is None else f"{duracao:.2f} s"
+        pior_ms = max(caso["intervalo_lido_ms"], caso["ate_a_thread_acabar_ms"])
         partes.append(f"\n## Gatilho: {caso['motivo']}\n")
         partes.append(
-            f"- sintese apanhada VIVA a meio (pior caso): "
+            f"- frase apanhada a meio, com o primeiro audio ja fora (pior caso): "
             f"{'sim' if caso['apanhou_a_sintese'] else 'nao'}\n"
-            f"- `piper.exe` morto por `matar_agora()`: {'sim' if caso['matou_sintese'] else 'nao'}\n"
-            f"- reproducao parada por `stream.stop()`: {'sim' if caso['parou_reproducao'] else 'nao'}\n"
+            f"- sintese parada por `matar_agora()`: {'sim' if caso['matou_sintese'] else 'nao'}\n"
+            f"- reproducao parada por `stop()`: {'sim' if caso['parou_reproducao'] else 'nao'}\n"
             f"- a thread que falava terminou: {'sim' if not caso['thread_viva'] else 'NAO'}\n"
             f"- `falar()` devolveu falou={caso['falou']} ({caso['motivo_falha'] or 'sem motivo'})\n"
             f"- duracao do WAV cortado: {duracao_escrita}\n"
-            f"- `tasklist` depois de calar: {caso['piper_vivo_depois']}\n"
         )
         partes.append("\nAs duas linhas de log com timestamps:\n\n```\n")
         partes.append(caso["linhas"][0] + "\n")
@@ -1113,19 +1167,12 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
         partes.append("```\n")
         partes.append(
             f"\n**Intervalo lido dos dois timestamps: {caso['intervalo_lido_ms']:.0f} ms** "
-            f"(medido por dentro com `perf_counter`: {caso['intervalo_medido_ms']:.0f} ms) — "
+            f"(medido por dentro com `perf_counter`: {caso['intervalo_medido_ms']:.0f} ms); "
+            f"do pedido ate `falar()` devolver: **{caso['ate_a_thread_acabar_ms']:.0f} ms** — "
             f"fasquia {LIMITE_DE_SILENCIO_MS:.0f} ms: "
-            f"{'CUMPRE' if caso['intervalo_lido_ms'] <= LIMITE_DE_SILENCIO_MS else 'FALHA'}\n"
+            f"{'CUMPRE' if pior_ms <= LIMITE_DE_SILENCIO_MS else 'FALHA'}\n"
         )
-        partes.append(
-            f"\nCom a cauda do RealtimeTTS contada por cima (o `time.sleep(0.2)` fixo do\n"
-            f"`synthesize_worker`, `text_to_stream.py:811-813`, que corre DEPOIS de a sintese\n"
-            f"ja estar morta e nao produz nem toca um unico sample), do pedido ate a thread da\n"
-            f"voz ter mesmo acabado: **{caso['ate_a_thread_acabar_ms']:.0f} ms** — fasquia "
-            f"{LIMITE_DE_SILENCIO_MS:.0f} ms: "
-            f"{'CUMPRE' if caso['ate_a_thread_acabar_ms'] <= LIMITE_DE_SILENCIO_MS else 'FALHA'}\n"
-        )
-    partes.append("\n## Depois do Ctrl+C nada novo e falado (D60(1))\n")
+    partes.append("\n## Depois do Ctrl+C nada novo e falado\n")
     partes.append(
         f"- `falar('Adeus, ate a proxima.')` devolveu falou={depois.falou} "
         f"({depois.motivo_falha})\n"
@@ -1137,10 +1184,10 @@ def _prova_de_silencio(caminho_pedido: str | None = None) -> int:
     print(f"evidencia escrita em {caminho_para_mostrar(destino)}")
 
     falhou = any(caso["intervalo_lido_ms"] > LIMITE_DE_SILENCIO_MS for caso in casos)
-    # A fasquia vale tambem contra o pior numero (com a cauda de 200 ms do
-    # RealtimeTTS contada por cima), senao a prova estaria a escolher o numero
-    # que lhe da jeito.
+    # A fasquia vale tambem contra o pior numero (ate `falar()` devolver),
+    # senao a prova estaria a escolher o numero que lhe da jeito.
     falhou = falhou or any(caso["ate_a_thread_acabar_ms"] > LIMITE_DE_SILENCIO_MS for caso in casos)
+    falhou = falhou or any(caso["thread_viva"] for caso in casos)
     falhou = falhou or depois.falou or escreveu_alguma_coisa
     falhou = falhou or any(not caso["matou_sintese"] for caso in casos)
     if falhou:
@@ -1156,7 +1203,13 @@ def main(argv: list[str] | None = None) -> int:
     # numa consola em codepage 850.
     forcar_consola_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("texto", nargs="?", help="frase a dizer em voz alta, em portugues europeu")
+    parser.add_argument("texto", nargs="?", help="frase a dizer em voz alta, na lingua da voz")
+    parser.add_argument(
+        "--lingua",
+        choices=LINGUAS_DA_VOZ,
+        default=None,
+        help="lingua do texto, que escolhe a voz (por omissao: pt, a lingua das respostas do jarvis)",
+    )
     parser.add_argument(
         "--ficheiro",
         default=None,
@@ -1199,6 +1252,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if args.lingua:
+        definir_lingua_da_voz(args.lingua)
 
     if args.autoteste:
         return _autoteste()
@@ -1212,13 +1267,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.ficheiro is None and not args.com_som:
         # D61: sem --ficheiro e sem --com-som, o comando recusa-se em vez de
         # tocar nas colunas por omissao. Nao chega a chamar falar().
-        print("=== jarvis - voz (Piper, voz pt_PT-tugao-medium) ===")
+        print("=== jarvis - voz residente ===")
         print(f"texto    = {args.texto!r}")
         print(f"RECUSADO (D61): {MOTIVO_SEM_OPT_IN}")
         print("Usa --ficheiro <caminho.wav> para gravar, ou --com-som para ouvir a serio.")
         return 1
 
-    print("=== jarvis - voz (Piper, voz pt_PT-tugao-medium) ===")
+    print("=== jarvis - voz residente ===")
     print(f"texto    = {args.texto!r}")
     t0 = time.perf_counter()
     resultado = falar(args.texto, ficheiro=args.ficheiro, com_som=args.com_som)

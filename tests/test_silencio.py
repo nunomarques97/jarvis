@@ -4,21 +4,17 @@ r"""Testes do silencio imediato: o Ctrl+C, a saida do processo e o
 unittest da biblioteca padrao, mesma convencao de tests/test_app.py e
 tests/test_voz.py (nenhuma framework de testes fora da biblioteca padrao).
 
-NENHUM destes testes abre um dispositivo de audio, arranca o Piper ou toca em
-GPU: o motor de voz e FALSO e o `subprocess.Popen` do wrapper e
-substituido por um duplo. O que eles protegem:
+NENHUM destes testes abre um dispositivo de audio, carrega um modelo de voz ou
+toca em GPU: o motor de voz e a saida de som sao FALSOS. O que eles protegem:
 
-  * o wrapper que mata o Piper (`jarvis.voz.MorteDoPiper`): o processo fica guardado
-    ANTES de `communicate()` bloquear — que e a diferenca toda entre poder e
-    nao poder interromper uma sintese em curso — e `matar_agora()` mata-o
-    mesmo, de outra thread;
+  * o motor residente cala-se a meio da frase: a sintese deixa de produzir e
+    nada mais sai para o dispositivo depois de `calar_agora()` devolver;
   * a ORDEM obrigatoria de `calar_agora()`: `matar_agora()` primeiro,
-    `stream.stop()` so depois (parar a reproducao com o `piper.exe` vivo
-    deixaria o `stop()` a espera da sintese);
+    `stream.stop()` so depois;
   * as duas linhas de log com timestamps que a D60(4)(b) exige;
   * os TRES gatilhos a passarem pelo mesmo mecanismo: handler de Ctrl+C (antes
-    de desligar o microfone, que demora segundos), saida do processo e a accao
-    "calar" da lista branca da D4.d;
+    de desligar o microfone), saida do processo e o "cala-te" ouvido pelo
+    processo residente;
   * que depois de um Ctrl+C nada novo e falado — nem o resto da frase, nem uma
     despedida, nem a resposta do Claude Code que estivesse a chegar.
 
@@ -42,240 +38,112 @@ from pathlib import Path
 from unittest import mock
 
 from jarvis import app, voz
-from jarvis.app import EstadoDoProcesso, Jarvis, LogDaSessao, RegistoDaFrase
+from jarvis.app import Jarvis, LogDaSessao
 from jarvis.audio_util import PASTA_EVIDENCIA, caminho_evidencia_de_saida
 from jarvis.config import Config
+from jarvis.interprete import Interprete
+from jarvis.ouvido import GATILHO_TECLA, Frase
+from jarvis.resposta_falada import PREFIXO_DA_RESPOSTA_DO_CLAUDE
+from jarvis.sessoes import Entrega
 from jarvis.voz import ResultadoFala
 
 ESPERA_MAXIMA_S = 10.0
 
 
-# --- duplos do Piper (nada disto arranca um processo a serio) ---------------
+# --- o motor residente cala-se de verdade (motor e saida de som falsos) -----
 
 
-class VozFalsa:
-    """O minimo de `PiperVoice` que o wrapper le."""
+class MotorLentoFalso:
+    """Um motor residente de mentira: cada bloco demora, como a inferencia."""
 
-    model_file = "modelo-de-mentira.onnx"
-    config_file = "modelo-de-mentira.onnx.json"
+    nome = "falso"
+    lingua = "pt"
+    taxa = 16000
 
+    def __init__(self, blocos: int = 60, demora_s: float = 0.03) -> None:
+        self.blocos = blocos
+        self.demora_s = demora_s
+        self.produzidos = 0
 
-class BaseFalsaDoPiper:
-    """O minimo do `PiperEngine` que o wrapper toca.
-
-    Existe para o mixin `MorteDoPiper` ser testavel sem RealtimeTTS e sem
-    Piper: os atributos sao os mesmos que a classe real da
-    (`piper_engine.py` + `base_engine.py`).
-    """
-
-    def __init__(self, voice=None, piper_path="piper-de-mentira.exe", debug=False):
-        self.voice = voice if voice is not None else VozFalsa()
-        self.piper_path = piper_path
-        self.debug = debug
-        self.queue = queue.Queue()
-        self.stop_synthesis_event = threading.Event()
-        self._trim_silence_start_pending = False
-        self.parou_na_base = False
-
-    def stop(self):
-        self.parou_na_base = True
+    def sintetizar(self, texto: str):
+        for _ in range(self.blocos):
+            time.sleep(self.demora_s)
+            self.produzidos += 1
+            yield b"\x00\x00" * 1600  # 100 ms de silencio a 16 kHz
 
 
-class MotorDeTeste(voz.MorteDoPiper, BaseFalsaDoPiper):
-    """A mesma composicao que `classe_do_motor_com_morte` faz com o real."""
+class SaidaDeSomFalsa:
+    """Faz de dispositivo: demora o tempo real de cada bloco e nunca abre nada."""
+
+    def __init__(self) -> None:
+        self.escritas = 0
+        self.depois_de_calar = 0
+        self.calado = threading.Event()
+
+    def escrever(self, taxa: int, dados: bytes) -> None:
+        if self.calado.is_set():
+            self.depois_de_calar += 1
+        self.escritas += 1
+        time.sleep(len(dados) / 2 / taxa)
 
 
-class ProcessoFalso:
-    """Um `subprocess.Popen` de mentira que se deixa matar.
-
-    `communicate()` bloqueia como o verdadeiro bloqueia enquanto o `piper.exe`
-    sintetiza, e so devolve quando alguem chamar `kill()` ou quando a "sintese"
-    acabar sozinha.
-    """
-
-    criados: list["ProcessoFalso"] = []
-
-    def __init__(self, cmd, stdin=None, stdout=None, stderr=None, shell=False):
-        self.cmd = list(cmd)
-        self.returncode = None
-        self.matado = False
-        self.entrou_no_communicate = threading.Event()
-        self._acabar = threading.Event()
-        self.handle_visivel_no_communicate = None
-        self.ao_comunicar = None
-        ProcessoFalso.criados.append(self)
-
-    def acabar_sozinho(self) -> None:
-        """Simula a sintese a terminar normalmente."""
-        self._acabar.set()
-
-    def communicate(self, input=None, timeout=None):
-        self.entrou_no_communicate.set()
-        if self.ao_comunicar is not None:
-            self.handle_visivel_no_communicate = self.ao_comunicar()
-        self._acabar.wait(timeout=ESPERA_MAXIMA_S)
-        if self.matado:
-            self.returncode = 1
-            return b"", b"morto"
-        self.returncode = 0
-        return b"AUDIO-DE-MENTIRA", b""
-
-    def kill(self):
-        self.matado = True
-        self.returncode = 1
-        self._acabar.set()
-
-    def poll(self):
-        return self.returncode
-
-
-class TestWrapperDoPiper(unittest.TestCase):
-    """O wrapper que mata o Piper, sem Piper nenhum."""
+class TestMotorResidenteCala(unittest.TestCase):
+    """`calar_agora()` apanha a frase a meio: a sintese para, a reproducao
+    para dentro da fasquia, e nada mais sai para o "dispositivo"."""
 
     def setUp(self) -> None:
-        ProcessoFalso.criados.clear()
-        self.motor = MotorDeTeste()
-        self.remendo = mock.patch("jarvis.voz.subprocess.Popen", ProcessoFalso)
-        self.remendo.start()
-        self.addCleanup(self.remendo.stop)
-
-    def _sintetizar_noutra_thread(self) -> tuple[threading.Thread, list[bool]]:
-        devolvido: list[bool] = []
-
-        def correr() -> None:
-            devolvido.append(self.motor.synthesize("uma frase comprida qualquer"))
-
-        thread = threading.Thread(target=correr, name="sintese-de-teste", daemon=True)
-        thread.start()
-        return thread, devolvido
-
-    def test_o_comando_do_piper_e_o_mesmo_da_biblioteca(self) -> None:
-        """O cmd_list tem de continuar a ser o do `piper_engine.py`."""
-        thread, devolvido = self._sintetizar_noutra_thread()
-        processo = self._esperar_pelo_processo()
-        processo.acabar_sozinho()
-        thread.join(timeout=ESPERA_MAXIMA_S)
-
-        self.assertEqual(
-            processo.cmd,
-            [
-                "piper-de-mentira.exe",
-                "-m",
-                "modelo-de-mentira.onnx",
-                "--output-raw",
-                "-c",
-                "modelo-de-mentira.onnx.json",
-                "--output-raw",
-            ],
-        )
-        self.assertEqual(devolvido, [True])
-        self.assertEqual(self.motor.queue.get_nowait(), b"AUDIO-DE-MENTIRA")
-
-    def _esperar_pelo_processo(self) -> ProcessoFalso:
-        fim = threading.Event()
-        for _ in range(int(ESPERA_MAXIMA_S * 200)):
-            if ProcessoFalso.criados and ProcessoFalso.criados[-1].entrou_no_communicate.wait(0.005):
-                return ProcessoFalso.criados[-1]
-            fim.wait(0.005)
-        self.fail("o wrapper nunca chegou a arrancar o processo de sintese")
-
-    def test_o_handle_fica_guardado_antes_do_communicate(self) -> None:
-        """O achado critico: sem isto, matar a sintese e impossivel."""
-        visto: list[object] = []
-
-        def espreitar() -> object:
-            # Corre DENTRO do communicate(), ou seja, enquanto a "sintese"
-            # ainda esta a decorrer: e neste instante que o Ctrl+C precisa de
-            # encontrar o processo guardado.
-            visto.append(self.motor._processo_atual)
-            return self.motor._processo_atual
-
-        original = ProcessoFalso.__init__
-
-        def com_espia(self_processo, *args, **kwargs):
-            original(self_processo, *args, **kwargs)
-            self_processo.ao_comunicar = espreitar
-
-        with mock.patch.object(ProcessoFalso, "__init__", com_espia):
-            thread, devolvido = self._sintetizar_noutra_thread()
-            processo = self._esperar_pelo_processo()
-            processo.acabar_sozinho()
-            thread.join(timeout=ESPERA_MAXIMA_S)
-
-        self.assertEqual(visto, [processo])
-        self.assertEqual(devolvido, [True])
-        self.assertIsNone(self.motor._processo_atual, "o handle tem de ser largado no fim")
-
-    def test_matar_agora_mata_o_processo_e_nada_vai_para_a_fila(self) -> None:
-        """Criterio (4): o processo filho e mesmo morto e nada e falado."""
-        thread, devolvido = self._sintetizar_noutra_thread()
-        processo = self._esperar_pelo_processo()
-
-        self.assertTrue(self.motor.matar_agora(), "matar_agora() tinha um processo para matar")
-        thread.join(timeout=ESPERA_MAXIMA_S)
-
-        self.assertFalse(thread.is_alive(), "a sintese ficou pendurada depois do kill")
-        self.assertTrue(processo.matado)
-        self.assertEqual(devolvido, [False])
-        self.assertTrue(self.motor.queue.empty(), "audio de uma sintese morta chegou a fila")
-
-    def test_depois_de_matar_nao_comeca_frase_nenhuma_nova(self) -> None:
-        """D60(1): nem o resto da frase, nem uma despedida."""
-        self.motor.matar_agora()
-        quantos_antes = len(ProcessoFalso.criados)
-
-        self.assertFalse(self.motor.synthesize("a frase seguinte"))
-        self.assertEqual(len(ProcessoFalso.criados), quantos_antes, "arrancou um piper novo")
-
-    def test_matar_agora_sem_nada_a_matar_nao_levanta(self) -> None:
-        self.assertFalse(self.motor.matar_agora())
-
-    def test_o_stop_do_motor_tambem_mata_a_sintese(self) -> None:
-        """`stream.stop()` chama `engine.stop()`: aqui isso mata mesmo."""
-        thread, devolvido = self._sintetizar_noutra_thread()
-        processo = self._esperar_pelo_processo()
-
-        self.motor.stop()
-        thread.join(timeout=ESPERA_MAXIMA_S)
-
-        self.assertTrue(processo.matado)
-        self.assertTrue(self.motor.parou_na_base, "o stop() da classe-base tem de correr na mesma")
-        self.assertEqual(devolvido, [False])
-
-    def test_o_pior_caso_cabe_na_fasquia_dos_500_ms(self) -> None:
-        """O buraco todo: uma sintese VIVA a meio.
-
-        O `ProcessoFalso` desta frase nunca acaba sozinho — e o equivalente a
-        um `piper.exe` que ainda ia a meio da frase. Sem o wrapper, o
-        `stream.stop()` ficava a espera dele (medido no caminho real: 2102 ms,
-        com `python -m jarvis.voz --prova-silencio`). Aqui mede-se o caminho
-        completo de `calar_agora()` — `matar_agora()` e so depois `stop()` —
-        contra a fasquia da D60, sem Piper, sem audio e sem GPU.
-        """
-        stream = StreamFalso()
-        stream.engine = self.motor  # o motor REAL, nao o duplo de voz
-        voz._guardar_voz_ativa(stream)
-        self.addCleanup(voz._guardar_voz_ativa, None)
         self.addCleanup(voz.retomar_a_voz)
+        self.addCleanup(voz._guardar_voz_ativa, None)
+        self.motor = MotorLentoFalso()
+        self.saida = SaidaDeSomFalsa()
+        self.resultado: dict[str, ResultadoFala] = {}
 
-        thread, devolvido = self._sintetizar_noutra_thread()
-        processo = self._esperar_pelo_processo()
-        self.assertFalse(processo.matado, "a sintese tem de estar viva quando o pedido chega")
+    def _falar_numa_thread(self) -> threading.Thread:
+        construir = lambda: voz.FalaResidente(self.motor, self.saida)  # noqa: E731
 
+        def falar() -> None:
+            with mock.patch.object(voz, "_construir_stream", construir):
+                self.resultado["fala"] = voz.falar("uma frase comprida", com_som=True)
+
+        fio = threading.Thread(target=falar, daemon=True)
+        fio.start()
+        limite = time.perf_counter() + ESPERA_MAXIMA_S
+        while self.saida.escritas == 0 and time.perf_counter() < limite:
+            time.sleep(0.002)
+        self.assertGreater(self.saida.escritas, 0, "a frase nunca comecou a tocar")
+        return fio
+
+    def _calar(self, motivo: str, definitivo: bool) -> voz.ResultadoSilencio:
         linhas: list[str] = []
-        resultado = voz.calar_agora("Ctrl+C (D30/D60)", definitivo=True, registar=linhas.append)
-        thread.join(timeout=ESPERA_MAXIMA_S)
-
-        self.assertTrue(processo.matado, "o processo filho ficou vivo")
-        self.assertFalse(thread.is_alive(), "a sintese ficou pendurada: o buraco continua")
-        self.assertEqual(devolvido, [False], "uma sintese morta nunca devolve sucesso")
-        self.assertTrue(self.motor.queue.empty(), "audio de uma sintese morta chegou a fila")
-        self.assertLessEqual(
-            resultado.intervalo_ms,
-            voz.LIMITE_DE_SILENCIO_MS,
-            f"calar demorou {resultado.intervalo_ms:.0f} ms com a sintese viva",
-        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            fio = self._falar_numa_thread()
+            silencio = voz.calar_agora(motivo, definitivo=definitivo, registar=linhas.append)
+            self.saida.calado.set()
+            produzidos = self.motor.produzidos
+            fio.join(timeout=ESPERA_MAXIMA_S)
+        self.assertFalse(fio.is_alive(), "falar() nao devolveu depois de calar")
         self.assertEqual(len(linhas), 2, linhas)
+        self.assertTrue(silencio.matou_sintese)
+        self.assertLessEqual(silencio.intervalo_ms, voz.LIMITE_DE_SILENCIO_MS)
+        self.assertEqual(self.saida.depois_de_calar, 0, "saiu audio depois de calar_agora() devolver")
+        time.sleep(self.motor.demora_s * 3)
+        self.assertLessEqual(self.motor.produzidos, produzidos + 1, "a sintese continuou depois de calar")
+        self.assertLess(self.motor.produzidos, self.motor.blocos)
+        self.assertEqual(self.resultado["fala"].motivo_falha, voz.MOTIVO_SILENCIADO)
+        return silencio
+
+    def test_cala_te_corta_a_frase_e_a_seguinte_fala(self) -> None:
+        self._calar("cala-te", definitivo=False)
+        self.assertFalse(voz.esta_calado())
+
+    def test_ctrl_c_corta_a_frase_e_nada_novo_e_falado(self) -> None:
+        self._calar("Ctrl+C", definitivo=True)
+        self.assertTrue(voz.esta_calado())
+        construiu: list[int] = []
+        with mock.patch.object(voz, "_construir_stream", lambda: construiu.append(1)):
+            depois = voz.falar("adeus", com_som=True)
+        self.assertEqual(construiu, [])
+        self.assertEqual(depois.motivo_falha, voz.MOTIVO_SILENCIADO)
 
 
 # --- duplos do stream de voz ------------------------------------------------
@@ -517,36 +385,38 @@ class EspiaDoSilencio:
         return voz.calar_agora(motivo, definitivo=definitivo, registar=registar)
 
 
-class GravadorFalso:
-    """Um `AudioToTextRecorder` de mentira: sem microfone e sem GPU."""
+def _jarvis_de_teste(espia: EspiaDoSilencio, log: LogFalso, falas: list[str], *, com_voz: bool = True) -> Jarvis:
+    from tests.test_app import LlmFalso  # import local: nao prende os outros testes
 
-    device = "cpu-de-mentira"
-
-    def __init__(self, ordem: list[str]) -> None:
-        self.ordem = ordem
-        self.desligado = False
-
-    def text(self):
-        raise KeyboardInterrupt
-
-    def shutdown(self) -> None:
-        self.ordem.append("shutdown")
-        self.desligado = True
-
-
-def _jarvis_de_teste(espia: EspiaDoSilencio, log: LogFalso, falas: list[str]) -> Jarvis:
     def falar_falso(texto, **kwargs):
         falas.append(texto)
         return ResultadoFala(falou=True)
 
+    config = Config(microfone="Microfone Ficticio de Teste", projetos=())
     return Jarvis(
-        Config(microfone="Microfone Ficticio de Teste", projetos=()),
+        config,
         log,
-        estado=EstadoDoProcesso(),
+        interprete=Interprete(config, cliente=LlmFalso()),
         falar=falar_falso,
-        executar=lambda *a, **k: None,
-        abrir_canal=lambda: None,
         calar=espia,
+        executar_local=lambda *a, **k: None,
+        com_voz=com_voz,
+    )
+
+
+def _frase(texto: str) -> Frase:
+    """Uma frase acabada de transcrever, como o ouvido a entrega."""
+    fim = time.perf_counter()
+    return Frase(
+        texto=texto,
+        gatilho=GATILHO_TECLA,
+        lingua="pt",
+        motor="motor-falso",
+        duracao_audio_s=1.0,
+        inicio_da_escuta=fim - 1.0,
+        fim_da_escuta=fim,
+        texto_pronto=fim,
+        latencia_stt_ms=0.0,
     )
 
 
@@ -562,40 +432,62 @@ class TestOsTresGatilhos(unittest.TestCase):
         self.jarvis = _jarvis_de_teste(self.espia, self.log, self.falas)
 
     def test_gatilho_cala_te_da_lista_branca(self) -> None:
-        """D4.d + D60(2): "cala-te" cala JA, nao so as respostas futuras."""
-        resposta = self.jarvis._accao_de_estado("calar")
+        """"cala-te" cala JA, nao so as respostas futuras."""
+        self.jarvis.ao_ouvir(_frase("cala-te"))
 
-        self.assertEqual(resposta, "Fico calado.")
         self.assertTrue(self.jarvis.estado.mudo, "o estado para o futuro mantem-se")
-        self.assertEqual(self.espia.chamadas, [("cala-te (lista branca D4.d)", False, True)])
-        self.assertIn("SILENCIO pedido (cala-te (lista branca D4.d))", self.log.texto())
+        self.assertEqual(self.espia.chamadas[0], ("cala-te dito ao jarvis", False, True))
+        self.assertIn("SILENCIO pedido (cala-te dito ao jarvis)", self.log.texto())
         self.assertIn("SILENCIO fim do audio", self.log.texto())
         self.assertFalse(voz.esta_calado(), "cala-te nao pode calar o jarvis para sempre")
 
     def test_gatilho_ctrl_c_cala_antes_de_desligar_o_microfone(self) -> None:
-        gravador = GravadorFalso(self.ordem)
-        with mock.patch.object(app, "construir_recorder", lambda **k: gravador):
-            codigo = app.correr_microfone(self.jarvis)
+        from tests.test_app import _MotorDeTexto, _TeclaSolta
+
+        ouvido = app.construir_ouvido(
+            self.jarvis, motor=_MotorDeTexto(), fonte=app.FonteDeSequencia([]), tecla=_TeclaSolta(), com_ativacao=False
+        )
+        esperas: list[float | None] = []
+        parar_de_verdade = ouvido.parar
+
+        def esperar(limite_s=None):
+            esperas.append(limite_s)
+            if len(esperas) == 1:
+                raise KeyboardInterrupt
+            return True
+
+        def parar():
+            self.ordem.append("desligar o microfone")
+            parar_de_verdade()
+
+        with mock.patch.object(ouvido, "a_correr", lambda: True), mock.patch.object(
+            ouvido, "esperar", esperar
+        ), mock.patch.object(ouvido, "parar", parar):
+            codigo = app.correr(self.jarvis, ouvido, com_voz=False, medir=lambda: None)
 
         self.assertEqual(codigo, 0)
-        self.assertEqual(self.espia.chamadas, [("Ctrl+C (D30/D60)", True, True)])
+        self.assertEqual(self.espia.chamadas, [("Ctrl+C", True, True)])
         self.assertEqual(
             self.ordem,
-            ["calar", "shutdown"],
-            "calar tem de vir ANTES do shutdown do gravador, que demora segundos",
+            ["calar", "desligar o microfone"],
+            "calar tem de vir ANTES de desligar o microfone",
         )
-        self.assertTrue(gravador.desligado)
         self.assertTrue(voz.esta_calado(), "depois do Ctrl+C a voz fica calada")
+
+    def _main(self, log: LogFalso, correr, registar=lambda *a, **k: None) -> int:
+        with mock.patch.object(app, "LogDaSessao", lambda *a, **k: log), mock.patch.object(
+            app, "construir_ouvido", lambda *a, **k: object()
+        ), mock.patch.object(app, "correr", correr), mock.patch.object(
+            app.atexit, "register", registar
+        ), mock.patch.object(app, "forcar_consola_utf8"):
+            return app.main(["--config", "config-que-nao-existe.toml", "--sem-voz"])
 
     def test_gatilho_saida_do_processo(self) -> None:
         """A saida do processo cala pelo mesmo mecanismo, com log e atexit."""
         registados: list[tuple] = []
         log = LogFalso()
 
-        with mock.patch.object(app, "LogDaSessao", lambda *a, **k: log), mock.patch.object(
-            app, "correr_microfone", lambda *a, **k: 0
-        ), mock.patch.object(app.atexit, "register", lambda f, *a, **k: registados.append((f, a, k))):
-            codigo = app.main(["--config", "config-que-nao-existe.toml", "--sem-voz"])
+        codigo = self._main(log, lambda *a, **k: 0, lambda f, *a, **k: registados.append((f, a, k)))
 
         self.assertEqual(codigo, 0)
         texto = log.texto()
@@ -610,7 +502,7 @@ class TestOsTresGatilhos(unittest.TestCase):
         self.assertEqual(
             [(f, a, k) for f, a, k in registados],
             [(voz.calar_agora, ("saida do processo (atexit)",), {"definitivo": True})],
-            "falta a rede do atexit: um piper.exe podia ficar vivo",
+            "falta a rede do atexit: a voz podia ficar a falar sozinha",
         )
 
     def test_o_processo_instala_e_repoe_o_handler_de_ctrl_c(self) -> None:
@@ -628,35 +520,29 @@ class TestOsTresGatilhos(unittest.TestCase):
                 apanhado.append("KeyboardInterrupt")
             return 0
 
-        with mock.patch.object(app, "LogDaSessao", lambda *a, **k: log), mock.patch.object(
-            app, "correr_microfone", correr_falso
-        ), mock.patch.object(app.atexit, "register", lambda *a, **k: None):
-            codigo = app.main(["--config", "config-que-nao-existe.toml", "--sem-voz"])
+        codigo = self._main(log, correr_falso)
 
         self.assertEqual(codigo, 0)
         self.assertEqual(apanhado, ["KeyboardInterrupt"], "o handler tem de levantar na mesma")
-        self.assertIn("SILENCIO pedido (Ctrl+C (D30/D60))", log.texto())
+        self.assertIn("SILENCIO pedido (Ctrl+C)", log.texto())
         self.assertEqual(
             signal.getsignal(signal.SIGINT), handler_antes, "o handler anterior tem de voltar"
         )
 
     def test_depois_do_ctrl_c_nada_novo_e_falado(self) -> None:
-        """D60(1): nem o resto da frase, nem despedida, nem a resposta que chegou."""
-        registo = RegistoDaFrase(numero=1, log=self.log)
-        voz.calar_agora("Ctrl+C (D30/D60)", definitivo=True)
+        """Nem o resto da frase, nem despedida, nem a resposta que chegou."""
+        voz.calar_agora("Ctrl+C", definitivo=True)
 
-        self.jarvis.responder("Resposta do Claude Code, nao verificada: ola.", registo)
+        self.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Ola."))
 
         self.assertEqual(self.falas, [], "falou depois de lhe terem mandado calar")
-        self.assertIn("silenciado a pedido (D60)", self.log.texto())
+        self.assertIn("silenciado a pedido", self.log.texto())
 
     def test_sem_ctrl_c_a_voz_continua_a_falar(self) -> None:
         """A rede de seguranca ao contrario: isto nao pode emudecer o jarvis."""
-        registo = RegistoDaFrase(numero=1, log=self.log)
+        self.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Sao quinze e trinta."))
 
-        self.jarvis.responder("sao quinze e trinta", registo)
-
-        self.assertEqual(self.falas, ["sao quinze e trinta"])
+        self.assertEqual(self.falas, [f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Sao quinze e trinta."])
 
 
 class TestRuidoDeTerceirosAoCalar(unittest.TestCase):
@@ -767,7 +653,7 @@ class TestTrancaDoLogEhReentrante(unittest.TestCase):
 
 class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
     """O cenario de producao completo da tranca reentrante: `Jarvis.calar_agora`
-    (chamado pelo handler de Ctrl+C, `app.py:1324`) escreve no MESMO log que,
+    (chamado pelo handler de Ctrl+C em `app.main`) escreve no MESMO log que,
     no pior caso, a propria thread principal ja tem detido porque o SIGINT
     caiu a meio de `LogDaSessao._escrever`.
     """
@@ -778,15 +664,7 @@ class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
         self.addCleanup(self._pasta.cleanup)
         self.log = LogDaSessao(pasta=Path(self._pasta.name), consola=io.StringIO())
         self.addCleanup(self.log.fechar)
-        self.jarvis = Jarvis(
-            Config(microfone="Microfone Ficticio de Teste", projetos=()),
-            self.log,
-            estado=EstadoDoProcesso(),
-            falar=lambda *a, **k: ResultadoFala(falou=True),
-            executar=lambda *a, **k: None,
-            abrir_canal=lambda: None,
-            com_voz=False,
-        )
+        self.jarvis = _jarvis_de_teste(EspiaDoSilencio(), self.log, [], com_voz=False)
 
     def test_ctrl_c_fecha_sem_bloquear_com_a_tranca_do_log_detida(self) -> None:
         resultado: dict[str, object] = {}
@@ -794,7 +672,7 @@ class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
         def como_se_o_sigint_caisse_a_meio_de_escrever() -> None:
             with self.log._tranca:
                 resultado["silencio"] = self.jarvis.calar_agora(
-                    "Ctrl+C (D30/D60)", definitivo=True
+                    "Ctrl+C", definitivo=True
                 )
 
         watchdog = threading.Thread(
@@ -815,8 +693,8 @@ class TestCtrlCNaoBloqueiaComATrancaDoLogDetida(unittest.TestCase):
             "Ctrl+C demorou a fasquia toda do watchdog: sinal de bloqueio, nao de sucesso",
         )
         texto_do_log = self.log.consola.getvalue()
-        self.assertIn("SILENCIO pedido (Ctrl+C (D30/D60))", texto_do_log)
-        self.assertIn("SILENCIO fim do audio (Ctrl+C (D30/D60))", texto_do_log)
+        self.assertIn("SILENCIO pedido (Ctrl+C)", texto_do_log)
+        self.assertIn("SILENCIO fim do audio (Ctrl+C)", texto_do_log)
         self.assertTrue(voz.esta_calado())
 
 

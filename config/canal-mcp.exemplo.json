@@ -1,0 +1,11 @@
+{
+  "_comentario": "Exemplo do --mcp-config que 'python -m jarvis.sessoes abrir <projeto>' gera em .jarvis/sessoes/<projeto>/mcp.json (pasta ignorada pelo Git). Nao e preciso copiar este ficheiro: serve para ver o que o Claude Code arranca. Os caminhos reais so existem no ficheiro gerado.",
+  "mcpServers": {
+    "jarvis": {
+      "type": "stdio",
+      "command": "C:/caminho/para/jarvis/.venv/Scripts/python.exe",
+      "args": ["-m", "jarvis.canal_mcp", "--projeto", "exemplo-um"],
+      "env": {"PYTHONPATH": "C:/caminho/para/jarvis"}
+    }
+  }
+}

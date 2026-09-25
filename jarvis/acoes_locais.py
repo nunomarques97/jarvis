@@ -69,7 +69,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -115,6 +115,23 @@ DIAS_SEMANA_PT = (
 )
 
 
+MESES_EN = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+DIAS_SEMANA_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
 class AcaoError(Exception):
     """Uma accao local nao pode ser executada (projeto desconhecido, accao
     ainda nao implementada, executavel em falta, ...). Nunca uma excecao de
@@ -138,25 +155,34 @@ class ResultadoAcao:
     projeto: str | None = None
 
 
-def _texto_horas(agora: datetime.datetime) -> str:
+def _texto_horas(agora: datetime.datetime, lingua: str = "pt") -> str:
+    if lingua == "en":
+        if agora.minute == 0:
+            return f"It's {agora.hour} o'clock."
+        return f"It's {agora.hour}:{agora.minute:02d}."
     if agora.minute == 0:
         return f"São {agora.hour} horas."
     return f"São {agora.hour} horas e {agora.minute} minutos."
 
 
-def _texto_data(agora: datetime.datetime) -> str:
+def _texto_data(agora: datetime.datetime, lingua: str = "pt") -> str:
+    if lingua == "en":
+        dia_semana = DIAS_SEMANA_EN[agora.weekday()]
+        return f"Today is {dia_semana}, {MESES_EN[agora.month - 1]} {agora.day}, {agora.year}."
     dia_semana = DIAS_SEMANA_PT[agora.weekday()]
     mes = MESES_PT[agora.month - 1]
     return f"Hoje é {dia_semana}, dia {agora.day} de {mes} de {agora.year}."
 
 
-def horas_e_data(argumento: str | None, *, agora: datetime.datetime | None = None) -> ResultadoAcao:
+def horas_e_data(
+    argumento: str | None, *, agora: datetime.datetime | None = None, lingua: str = "pt"
+) -> ResultadoAcao:
     """D4.a: diz a hora ou a data. `argumento` vem do router ("horas"/"data")."""
     agora = agora or datetime.datetime.now()
     if argumento == "data":
-        texto = _texto_data(agora)
+        texto = _texto_data(agora, lingua)
     else:
-        texto = _texto_horas(agora)
+        texto = _texto_horas(agora, lingua)
     return ResultadoAcao(nome_acao="horas_e_data", executou=True, texto=texto)
 
 
@@ -330,6 +356,47 @@ def executar(resultado_router: ResultadoRouter, config: Config, *, simular: bool
         funcao = abrir_vscode if nome_acao == "abrir_vscode" else abrir_pasta
         return funcao(projeto, simular=simular)
     raise AcaoError(f"accao desconhecida '{nome_acao}': fora da lista branca da D4")
+
+
+#: Intencoes do interprete que correm aqui, e a accao da lista branca de cada uma.
+INTENCOES_LOCAIS = {"horas": "horas_e_data", "abrir_editor": "abrir_vscode", "abrir_pasta": "abrir_pasta"}
+
+_FRASES_DE_ABRIR = {
+    ("abrir_vscode", "pt"): "Abri o editor no {projeto}.",
+    ("abrir_vscode", "en"): "I opened the editor in {projeto}.",
+    ("abrir_pasta", "pt"): "Abri a pasta do {projeto}.",
+    ("abrir_pasta", "en"): "I opened the {projeto} folder.",
+}
+
+
+def executar_pedido(
+    intencao: str,
+    projeto: str | None,
+    config: Config,
+    *,
+    detalhe: str | None = None,
+    lingua: str = "pt",
+    simular: bool = False,
+) -> ResultadoAcao:
+    """Executa um pedido ja confirmado do interprete: horas/data ou abrir editor/pasta.
+
+    O projeto chega pelo NOME e e resolvido de novo contra a configuracao
+    (nunca um caminho vindo de fora). Qualquer outra intencao e recusada.
+    """
+    lingua = "en" if lingua == "en" else "pt"
+    nome_acao = INTENCOES_LOCAIS.get(intencao)
+    if nome_acao is None:
+        raise AcaoError(f"a intencao '{intencao}' nao e uma accao local")
+    if nome_acao == "horas_e_data":
+        return horas_e_data("data" if detalhe == "data" else "horas", lingua=lingua)
+    if not projeto:
+        raise AcaoError(f"'{intencao}' sem projeto: nada foi aberto")
+    alvo = _projeto_conhecido(projeto, config)
+    funcao = abrir_vscode if nome_acao == "abrir_vscode" else abrir_pasta
+    resultado = funcao(alvo, simular=simular)
+    if simular:
+        return resultado
+    return replace(resultado, texto=_FRASES_DE_ABRIR[(nome_acao, lingua)].format(projeto=alvo.nome))
 
 
 # --- Autoteste das partes puras (config ficticia em memoria) ---------------

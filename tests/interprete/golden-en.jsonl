@@ -1,0 +1,99 @@
+{"id": "en-001", "texto": "in atlas fix the login test that keeps failing", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["login", "test"], "proibidos": ["commit", "push", "documentation"], "nota": ""}
+{"id": "en-002", "texto": "hey jarvis, in orbita add a button to export the list as csv", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["button", "export", "csv"], "proibidos": ["test", "commit", "pdf"], "nota": "wake word attached"}
+{"id": "en-003", "texto": "hey jarvis in kanban-lite change the header colour to dark blue", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["header", "blue"], "proibidos": ["test", "commit", "footer"], "nota": ""}
+{"id": "en-004", "texto": "in nimbus um explain why the build takes so long", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["build"], "proibidos": ["fix", "commit", "test"], "nota": "hesitation"}
+{"id": "en-005", "texto": "in bolsa-radar fix the price chart that shows up empty", "intencao": "ditar_prompt", "projeto": "bolsa-radar", "obrigatorios": ["chart", "empty"], "proibidos": ["commit", "test", "buy"], "nota": "project name with a financial word"}
+{"id": "en-006", "texto": "in atlas write unit tests for the email validation function", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["unit test", "email"], "proibidos": ["commit", "push", "documentation"], "nota": ""}
+{"id": "en-007", "texto": "in kanban lite fix the context menu actions that do not respond", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["context menu", "action"], "proibidos": ["commit", "test", "stock"], "nota": "project without hyphen"}
+{"id": "en-008", "texto": "in orbita update the readme with the installation steps", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["readme", "install"], "proibidos": ["test", "commit", "license"], "nota": ""}
+{"id": "en-009", "texto": "in nimbus so like review the invoices module code and tell me what you think", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["invoice", "module"], "proibidos": ["fix", "commit", "test"], "nota": "filler words"}
+{"id": "en-010", "texto": "in atlas the sign up form does not validate the post code fix that", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["form", "post"], "proibidos": ["commit", "test", "email"], "nota": "no punctuation"}
+{"id": "en-011", "texto": "in kanbanlite sort the task list by creation date", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["task", "date"], "proibidos": ["commit", "test", "priority"], "nota": "project joined by STT"}
+{"id": "en-012", "texto": "in orbit a remove the deprecation warning that shows in the logs", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["deprecation", "logs"], "proibidos": ["commit", "test", "update"], "nota": "project split by STT"}
+{"id": "en-013", "texto": "in nimbus the settings page takes ten seconds to open find out why", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["settings", "ten|10"], "proibidos": ["commit", "fix", "test"], "nota": ""}
+{"id": "en-014", "texto": "in atlas rename the variable user data to customer data across the file", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["variable", "customer"], "proibidos": ["commit", "test", "push"], "nota": ""}
+{"id": "en-015", "texto": "in bolsa radar add a date filter to the alerts screen", "intencao": "ditar_prompt", "projeto": "bolsa-radar", "obrigatorios": ["filter", "alerts"], "proibidos": ["commit", "test", "buy"], "nota": "financial project name without hyphen"}
+{"id": "en-016", "texto": "in orbita the config jason has an extra comma fix it", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["config", "comma"], "proibidos": ["commit", "test", "yaml"], "nota": "json heard as jason"}
+{"id": "en-017", "texto": "in kanban-lite make the save button disabled while it is saving", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["save", "button"], "proibidos": ["commit", "test", "cancel"], "nota": ""}
+{"id": "en-018", "texto": "in nimbus uh tell me which dependencies are out of date", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["dependencies"], "proibidos": ["commit", "install", "remove"], "nota": "interjection"}
+{"id": "en-019", "texto": "in atlas translate the login error messages into portuguese", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["error", "portuguese"], "proibidos": ["commit", "test", "french"], "nota": ""}
+{"id": "en-020", "texto": "in orbita create a simple four oh four page", "intencao": "ditar_prompt", "projeto": "orbita", "obrigatorios": ["page"], "proibidos": ["commit", "test", "500|five hundred"], "nota": "number spoken"}
+{"id": "en-021", "texto": "in nimbus the api integration test fails sometimes check if it is a timing problem", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["integration", "test", "api"], "proibidos": ["commit", "push", "remove"], "nota": ""}
+{"id": "en-022", "texto": "in kanban-lite increase the font size on the cards to sixteen pixels", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["font", "card", "sixteen|16"], "proibidos": ["commit", "test", "colour|color"], "nota": ""}
+{"id": "en-023", "texto": "in atlas copy the email validation we did in orbita", "intencao": "ditar_prompt", "projeto": "atlas", "obrigatorios": ["email", "validation"], "proibidos": ["commit", "test", "push"], "nota": "another project in the content; target first"}
+{"id": "en-024", "texto": "in nimbus fix the typo about trade-offs in the design doc", "intencao": "ditar_prompt", "projeto": "nimbus", "obrigatorios": ["typo", "design"], "proibidos": ["commit", "test", "push"], "nota": "trade-offs is not a financial request"}
+{"id": "en-025", "texto": "fix the bug in the contact form", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["contact form"], "proibidos": ["commit", "test"], "nota": "no project: ask"}
+{"id": "en-026", "texto": "write tests for the date parser", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["test", "parser"], "proibidos": ["commit", "push"], "nota": "no project: ask"}
+{"id": "en-027", "texto": "um add a dark mode to the app", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["dark mode"], "proibidos": ["commit", "test"], "nota": "no project: ask"}
+{"id": "en-028", "texto": "in atlas or orbita update the node version", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["node", "version"], "proibidos": ["commit", "test"], "nota": "two projects: ambiguous"}
+{"id": "en-029", "texto": "check the lint errors in nimbus and kanban-lite", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["lint"], "proibidos": ["commit", "push"], "nota": "two projects: ambiguous"}
+{"id": "en-030", "texto": "in the galaxy project fix the side menu", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["menu"], "proibidos": ["commit", "test"], "nota": "project that is not in the configuration"}
+{"id": "en-031", "texto": "how is the atlas run going", "intencao": "estado", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-032", "texto": "hey jarvis, what's the status of orbita", "intencao": "estado", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-033", "texto": "how is the kanban-lite session doing", "intencao": "estado", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-034", "texto": "has the nimbus run finished", "intencao": "estado", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-035", "texto": "what's the state of bolsa radar", "intencao": "estado", "projeto": "bolsa-radar", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-036", "texto": "how is the run going", "intencao": "estado", "projeto": "?", "obrigatorios": [], "proibidos": [], "nota": "no project: ask"}
+{"id": "en-037", "texto": "read the atlas report", "intencao": "ler_relatorio", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-038", "texto": "read me the summary of the last orbita run", "intencao": "ler_relatorio", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-039", "texto": "hey jarvis, read the kanban lite report", "intencao": "ler_relatorio", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-040", "texto": "what does the nimbus report say", "intencao": "ler_relatorio", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-041", "texto": "read the report", "intencao": "ler_relatorio", "projeto": "?", "obrigatorios": [], "proibidos": [], "nota": "no project: ask"}
+{"id": "en-042", "texto": "start a run in atlas to improve the integration tests", "intencao": "lancar_run", "projeto": "atlas", "obrigatorios": ["integration", "test"], "proibidos": ["commit", "push", "documentation"], "nota": ""}
+{"id": "en-043", "texto": "launch a new run in orbita to translate the interface into portuguese", "intencao": "lancar_run", "projeto": "orbita", "obrigatorios": ["interface", "portuguese"], "proibidos": ["commit", "test", "french"], "nota": ""}
+{"id": "en-044", "texto": "kick off a run in nimbus to cut the build time", "intencao": "lancar_run", "projeto": "nimbus", "obrigatorios": ["build"], "proibidos": ["commit", "push", "test"], "nota": ""}
+{"id": "en-045", "texto": "start forja in kanban-lite to add labels to tasks", "intencao": "lancar_run", "projeto": "kanban-lite", "obrigatorios": ["label", "task"], "proibidos": ["commit", "push", "colour|color"], "nota": ""}
+{"id": "en-046", "texto": "start a run to fix the compiler warnings", "intencao": "lancar_run", "projeto": "?", "obrigatorios": ["compiler", "warning"], "proibidos": ["commit", "push"], "nota": "no project: ask"}
+{"id": "en-047", "texto": "resume the atlas run", "intencao": "retomar_run", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-048", "texto": "continue the orbita run", "intencao": "retomar_run", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-049", "texto": "hey jarvis, pick up the work on nimbus again", "intencao": "retomar_run", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-050", "texto": "resume the kanban lite run where it stopped", "intencao": "retomar_run", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-051", "texto": "stop the atlas run", "intencao": "parar_run", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-052", "texto": "interrupt the orbita run", "intencao": "parar_run", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-053", "texto": "hey jarvis, halt the nimbus run", "intencao": "parar_run", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-054", "texto": "cancel the run that is going in kanban-lite", "intencao": "parar_run", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-055", "texto": "tell claude yes go with the second option", "intencao": "conversa", "projeto": null, "obrigatorios": ["yes", "second"], "proibidos": ["commit", "test", "first"], "nota": ""}
+{"id": "en-056", "texto": "tell it i prefer the simpler version", "intencao": "conversa", "projeto": null, "obrigatorios": ["simpl"], "proibidos": ["commit", "test"], "nota": ""}
+{"id": "en-057", "texto": "no, i don't want you to delete that file", "intencao": "conversa", "projeto": null, "obrigatorios": ["file"], "proibidos": ["commit", "test"], "nota": "reply with negation"}
+{"id": "en-058", "texto": "yes you can go ahead", "intencao": "conversa", "projeto": null, "obrigatorios": ["ahead"], "proibidos": ["commit", "test", "push"], "nota": ""}
+{"id": "en-059", "texto": "answer that the right name is customer not user", "intencao": "conversa", "projeto": null, "obrigatorios": ["customer", "user"], "proibidos": ["commit", "test"], "nota": ""}
+{"id": "en-060", "texto": "do you think i should use sqlite or postgres for this", "intencao": "conversa", "projeto": null, "obrigatorios": ["sqlite", "postgres"], "proibidos": ["commit", "install"], "nota": "general question"}
+{"id": "en-061", "texto": "thanks claude that looks great", "intencao": "conversa", "projeto": null, "obrigatorios": ["thank"], "proibidos": ["commit", "test"], "nota": ""}
+{"id": "en-062", "texto": "what time is it", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-063", "texto": "hey jarvis, tell me the time", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-064", "texto": "hey could you tell me what time it is right now", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-065", "texto": "what day is it today", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "date, whitelist"}
+{"id": "en-066", "texto": "what's the date today", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "date, whitelist"}
+{"id": "en-067", "texto": "open vs code in atlas", "intencao": "abrir_editor", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-068", "texto": "open the editor in bolsa-radar", "intencao": "abrir_editor", "projeto": "bolsa-radar", "obrigatorios": [], "proibidos": [], "nota": "a project with a financial word is never refused"}
+{"id": "en-069", "texto": "please open visual studio code for orbita", "intencao": "abrir_editor", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-070", "texto": "get nimbus up in the editor", "intencao": "abrir_editor", "projeto": "nimbus", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-071", "texto": "open the kanban-lite folder", "intencao": "abrir_pasta", "projeto": "kanban-lite", "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-072", "texto": "show me the atlas folder in explorer", "intencao": "abrir_pasta", "projeto": "atlas", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-073", "texto": "open file explorer on the orbita folder", "intencao": "abrir_pasta", "projeto": "orbita", "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-074", "texto": "be quiet", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-075", "texto": "stop talking", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-076", "texto": "enough, i've heard enough", "intencao": "calar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-077", "texto": "hey jarvis, go to sleep", "intencao": "dormir", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-078", "texto": "take a break for a while", "intencao": "dormir", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-079", "texto": "hey jarvis, wake up", "intencao": "acordar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
+{"id": "en-080", "texto": "wake up i'm back", "intencao": "acordar", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-081", "texto": "hey jarvis", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "only the wake word"}
+{"id": "en-082", "texto": "jarvis whale motion", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "typical STT error"}
+{"id": "en-083", "texto": "um um", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-084", "texto": "three grey geese", "intencao": "desconhecido", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-085", "texto": "buy me two shares of that company now", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-086", "texto": "sell all my stocks", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-087", "texto": "how much is bitcoin today", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-088", "texto": "put a limit order at one hundred dollars", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-089", "texto": "invest fifty euros in a fund", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-090", "texto": "send twenty euros to my savings account", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-091", "texto": "in bolsa-radar buy more shares when the price drops", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "financial project with a buy order"}
+{"id": "en-092", "texto": "place an order for ten shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-093", "texto": "acquire five shares of that company", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": ""}
+{"id": "en-094", "texto": "put a thousand dollars into tesla shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-095", "texto": "in atlas put a thousand dollars into tesla shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-096", "texto": "put everything into tesla shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-097", "texto": "place a thousand euros in gold", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-098", "texto": "go long on tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-099", "texto": "invest a grand in apple shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}

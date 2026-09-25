@@ -251,12 +251,11 @@ def normalizar_pico_pcm16(dados: bytes, alvo: float = 0.95) -> bytes:
     """Normaliza PCM de 16 bits por PICO para `alvo` da escala (audioop, stdlib).
 
     O mesmo mecanismo e alvo (-0,95 dBFS por omissao)
-    que o RealtimeSTT ja aplica sozinho quando `normalize_audio=True`
-    (`AudioToTextRecorder`, caminho ao vivo de `jarvis/app.py::construir_recorder`):
-    `audio = (audio / pico) * alvo`. Esta funcao existe para os scripts que
-    chamam `faster_whisper.WhisperModel.transcribe()` diretamente e por isso
-    NAO passam pelo RealtimeSTT (`scripts/transcrever_ficheiro.py`) — mesmo
-    alvo, sem inventar um segundo metodo.
+    que o RealtimeSTT aplicava sozinho com `normalize_audio=True` no caminho
+    vivo antigo: `audio = (audio / pico) * alvo`. Esta funcao existe para os
+    scripts que chamam `faster_whisper.WhisperModel.transcribe()` diretamente
+    (`scripts/transcrever_ficheiro.py`), para as medicoes antigas continuarem
+    comparaveis — mesmo alvo, sem inventar um segundo metodo.
 
     Escala o array inteiro por `alvo * 32767 / pico`, o que por construcao
     nunca ultrapassa `alvo` da escala (sem precisar de limitador). Guarda

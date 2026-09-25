@@ -291,6 +291,22 @@ def comando_stream_json(cli: str | None = None) -> list[str]:
     return [alvo, *ARGS_STREAM_JSON, *ARGS_SESSAO_MINIMA]
 
 
+#: Sessao headless NA PASTA DE UM PROJETO, recurso de `jarvis.sessoes` quando o
+#: channel nao regista. Ao contrario da sessao-ponte, tem as ferramentas do
+#: projeto, mas corre no modo de permissoes manual com `--permission-prompts
+#: none`: tudo o que pediria autorizacao e negado, mesmo que o modo por omissao
+#: do utilizador seja mais permissivo, porque ninguem esta a ver esta sessao e
+#: a voz nunca aprova ferramentas. A sessao fica gravada pelo proprio Claude
+#: Code e o utilizador retoma-a com `claude --resume <id>` para aprovar o resto.
+ARGS_SESSAO_DO_PROJETO = ("--permission-mode", "manual", "--permission-prompts", "none")
+
+
+def comando_sessao_do_projeto(cli: str | None = None) -> list[str]:
+    """Linha de comando da sessao headless stream-json na pasta de um projeto."""
+    alvo = verificar_executavel_seguro(cli) if cli else localizar_cli()
+    return [alvo, *ARGS_STREAM_JSON, *ARGS_SESSAO_DO_PROJETO]
+
+
 def mensagem_de_utilizador(frase: str) -> str:
     """Uma linha NDJSON com a frase, no formato que o --input-format stream-json le."""
     return json.dumps(
@@ -441,10 +457,20 @@ class CanalStreamJson:
 
     transporte = "2a"
 
-    def __init__(self, cwd: str | Path = RAIZ, cli: str | None = None):
+    def __init__(
+        self,
+        cwd: str | Path = RAIZ,
+        cli: str | None = None,
+        argumentos: list[str] | None = None,
+    ):
         self.cwd = str(cwd)
         self.cli = cli
-        self.argumentos = comando_stream_json(cli)
+        if argumentos is not None:
+            # quem da a linha inteira passa pela mesma regra: nunca um shim
+            verificar_executavel_seguro(argumentos[0])
+            self.argumentos = list(argumentos)
+        else:
+            self.argumentos = comando_stream_json(cli)
         self.processo: subprocess.Popen[str] | None = None
         self.session_id: str | None = None
         self._linhas: queue.Queue[str] = queue.Queue()

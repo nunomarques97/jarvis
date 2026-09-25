@@ -9,23 +9,38 @@
 # CUDA builds have no kernels for the Blackwell architecture (sm_120).
 --extra-index-url https://download.pytorch.org/whl/cu128
 
-# Base / orchestration: capture, VAD, wake word and STT
-RealtimeSTT==0.3.104
+# Microphone capture and voice activity detection for the resident listener
+# (jarvis/ouvido.py).
+PyAudio==0.2.14
+webrtcvad-wheels==2.0.14
 
-# Local transcription on the GPU. Comes as a RealtimeSTT dependency, pinned
-# here because it is the engine the environment check tests.
+# Local transcription with Whisper, the engine measured against Parakeet and
+# the one the environment check tests.
 faster-whisper==1.1.1
+
+# NVIDIA Parakeet TDT 0.6B v3 (ONNX), the local STT engine measured against
+# faster-whisper by scripts/avaliar_voz.py. The [cpu] extra reuses the CPU
+# onnxruntime already in the venv; the model is downloaded separately into
+# models/ (see docs/MODELOS.md). Without it the adapter reports itself
+# unavailable and is skipped.
+onnx-asr[cpu,hub]==0.12.0
 
 # "hey jarvis" wake word
 openwakeword==0.6.0
 
-# Local spoken reply (0.4.9 had no PiperEngine at all). From 0.7.0 the [piper]
-# extra brings the real engine, which drives the piper.exe shipped in the
-# piper-tts package.
+# Local spoken reply. jarvis/voz.py loads the voice once, in process: the
+# piper-tts library runs the pt-PT Piper voice. RealtimeTTS (its [piper] extra
+# drives the piper.exe shipped in piper-tts) is only used by
+# scripts/gerar_wav.py to make test WAVs.
 RealtimeTTS[piper]==0.8.5
 piper-tts==1.8.0
 
-# Dependency of RealtimeSTT/openwakeword, pinned to the CUDA 12.8 build for
-# Blackwell GPUs and so CTranslate2 finds cuDNN/cuBLAS inside the venv.
+# Kokoro-82M, the natural English voice. The model files are downloaded
+# separately into models/kokoro/ (see docs/MODELOS.md); without them the
+# jarvis keeps speaking with the Piper voice.
+kokoro-onnx==0.6.1
+
+# Pinned to the CUDA 12.8 build for Blackwell GPUs, so CTranslate2 finds
+# cuDNN/cuBLAS inside the venv.
 torch==2.9.1+cu128
 torchaudio==2.9.1+cu128

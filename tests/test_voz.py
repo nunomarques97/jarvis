@@ -2,16 +2,14 @@ r"""Testes de jarvis/voz.py, unittest da biblioteca padrao (sem pytest, mesma
 convencao de tests/test_router.py e tests/test_app.py: nenhuma framework de
 testes fora da biblioteca padrao).
 
-Este ficheiro cobre o filtro do aviso do pydub e o teste de guarda do opt-in
-de som.
+Este ficheiro cobre os avisos do carregamento do motor e o teste de guarda
+do opt-in de som.
 
-O import tardio do RealtimeTTS em `_construir_stream()` fica dentro de um
-`warnings.catch_warnings()` que ignora SO o `RuntimeWarning` do `pydub.utils`
-(o aviso de ffmpeg em falta), e `warnings.filters` volta EXATAMENTE ao estado
-anterior depois do import — lista inteira, nao so as entradas do pydub. A
-comparacao tem de ser da lista inteira porque e isso que apanha o contrario do
-que se quer: um `warnings.filterwarnings("ignore")` global passaria numa
-comparacao so das entradas do pydub.
+O carregamento do motor de voz (`_carregar_motor()`) fica dentro de um
+`warnings.catch_warnings()`: o que as bibliotecas de sintese registam em
+`warnings.filters` ao carregar nao sobrevive, e a lista volta EXATAMENTE ao
+estado anterior — lista inteira, porque e isso que apanha um
+`warnings.filterwarnings("ignore")` global.
 
 Opt-in de som (`TestGuardaDoOptInDeSom`): `falar()` sem `ficheiro=` e sem `com_som=True` e um
 erro (nunca chega a construir o motor, nunca chega perto de um dispositivo de
@@ -20,9 +18,8 @@ e a UNICA maneira de pedir `muted=False`, com ou sem `ficheiro=` — tudo provad
 com um stream falso, sem Piper nem PyAudio. E o guarda do silencio
 corre ANTES do do opt-in: calado, nem o recurso em texto e impresso.
 
-Nao toca em GPU, em Piper nem em audio real: so o comportamento do import, do
-estado dos filtros de warnings e do contrato de `falar()`, que corre em
-qualquer maquina com o venv instalado (RealtimeTTS ja e dependencia do projeto).
+Nao toca em GPU, em modelos de voz nem em audio real: so o estado dos filtros
+de warnings e o contrato de `falar()`, com motores e streams falsos.
 
 Corre com:
 
@@ -33,7 +30,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 import tempfile
 import unittest
 import warnings
@@ -44,57 +40,60 @@ from jarvis import voz
 from jarvis.audio_util import escrever_wav_pcm16
 
 
-class TestFiltroDeAvisoDoPydub(unittest.TestCase):
-    """So o import do RealtimeTTS fica silenciado, e so
-    localmente — nada de `warnings.filterwarnings("ignore")` global."""
+class _MotorQueSujaOsAvisos:
+    """Motor falso que, ao carregar, faz o que uma biblioteca de sintese faz:
+    regista um filtro global em `warnings.filters`."""
 
-    def _accionar_o_import(self) -> None:
-        """Aciona o mesmo caminho que `falar()` usa: o import tardio do
-        RealtimeTTS dentro do `with warnings.catch_warnings()`. Pode falhar
-        depois disso (FileNotFoundError se o modelo Piper nao estiver
-        descarregado nesta maquina) — irrelevante para estes testes, que so
-        olham para o estado dos filtros de warnings."""
-        try:
-            voz._construir_stream()
-        except FileNotFoundError:
-            pass
+    nome = "falso"
+    lingua = "pt"
+    taxa = 16000
+    descricao = "motor falso"
 
-    def test_iii_warnings_filters_volta_ao_estado_anterior(self) -> None:
-        """(iii) da definicao de pronto, em sentido estrito: a lista INTEIRA de
-        `warnings.filters` e a mesma antes e depois do import."""
+    def __init__(self) -> None:
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"pydub\.utils")
+        warnings.filterwarnings("ignore")
+
+    def sintetizar(self, texto: str):
+        yield b"\x00\x00"
+
+
+class TestCarregarMotorNaoMexeNosAvisos(unittest.TestCase):
+    """O que as bibliotecas de sintese registam em `warnings.filters` ao
+    carregar fica dentro de `_carregar_motor()` — nada de filtro global."""
+
+    def _carregar_com_motor_sujo(self) -> object:
+        sem_kokoro = mock.Mock(side_effect=voz.MotorIndisponivel("sem kokoro"))
+        with mock.patch.object(voz, "MotorKokoro", sem_kokoro), mock.patch.object(
+            voz, "MotorPiperResidente", _MotorQueSujaOsAvisos
+        ):
+            return voz._carregar_motor("en")
+
+    def test_warnings_filters_volta_ao_estado_anterior(self) -> None:
+        """A lista INTEIRA, nao so as entradas do pydub: um
+        `warnings.filterwarnings("ignore")` global tambem tem de desaparecer."""
         filtros_antes = list(warnings.filters)
 
-        self._accionar_o_import()
+        motor = self._carregar_com_motor_sujo()
 
-        self.assertEqual(
-            list(warnings.filters),
-            filtros_antes,
-            "o import do RealtimeTTS mexeu no estado global de warnings.filters",
-        )
+        self.assertIsInstance(motor, _MotorQueSujaOsAvisos, "o motor falso nao chegou a carregar")
+        self.assertEqual(list(warnings.filters), filtros_antes)
 
-    def test_o_filtro_do_pydub_nao_fica_registado_globalmente(self) -> None:
-        """O mesmo visto pelo lado do filtro concreto: nenhuma entrada de
-        `ignore` para `pydub.utils` sobrevive ao `with`."""
-        self._accionar_o_import()
+    def test_sem_kokoro_o_motivo_fica_na_descricao(self) -> None:
+        motor = self._carregar_com_motor_sujo()
 
-        do_pydub = [
-            entrada
-            for entrada in warnings.filters
-            if entrada[0] == "ignore"
-            and entrada[2] is RuntimeWarning
-            and entrada[3] is not None
-            and entrada[3].pattern == r"pydub\.utils"
-        ]
-        self.assertEqual(do_pydub, [])
+        self.assertIn("Kokoro indisponivel: sem kokoro", motor.descricao)
 
-    def test_o_import_e_mesmo_accionado(self) -> None:
-        """Sem isto os testes acima passariam por nao fazerem nada: confirma que
-        `_construir_stream()` carregou mesmo o RealtimeTTS (e com ele o pydub,
-        o que emite o aviso que se quer silenciado)."""
-        self._accionar_o_import()
+    def test_kokoro_partido_ao_carregar_cai_para_a_voz_pt(self) -> None:
+        """Um Kokoro instalado mas partido (DLL em falta, API diferente) nao
+        pode deixar o jarvis sem voz nenhuma."""
+        partido = mock.Mock(side_effect=OSError("DLL em falta"))
+        with mock.patch.object(voz, "MotorKokoro", partido), mock.patch.object(
+            voz, "MotorPiperResidente", _MotorQueSujaOsAvisos
+        ):
+            motor = voz._carregar_motor("en")
 
-        self.assertIn("RealtimeTTS", sys.modules)
-        self.assertIn("pydub", sys.modules)
+        self.assertIsInstance(motor, _MotorQueSujaOsAvisos)
+        self.assertIn("Kokoro indisponivel: DLL em falta", motor.descricao)
 
 
 class _StreamFalsoParaGuarda:

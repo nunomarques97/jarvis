@@ -11,6 +11,54 @@ To verify a file that is already downloaded:
 certutil -hashfile <path> SHA256
 ```
 
+## Spoken reply: resident engine
+
+`jarvis/voz.py` loads the voice engine once per process (at start-up, through
+`voz.aquecer()`) and keeps it in memory; no synthesis process is started per
+sentence. Both engines run inside the Python process on onnxruntime (CPU, four
+threads) and stream: the first audio block plays while the rest of the reply
+is still being synthesised. `scripts/medir_latencia_voz.py --verificar`
+measures text -> first audio block on 20 fixed sentences (targets: 300 ms
+p50, 600 ms p95) and the silencing time, without playing any sound.
+
+The engine follows the language of the reply text, never what happens to be
+installed (`voz.lingua_da_voz()`; `--lingua` on `python -m jarvis.voz` and on
+the measurement script):
+
+- **Portuguese (`pt`, the default):** **Piper `pt_PT-tugão-medium`** through
+  the `piper-tts` library (next section). The jarvis replies are written in
+  Portuguese today, so this is the voice that speaks them. A Portuguese reply
+  never reaches the English engine, even when Kokoro is installed.
+- **English (`en`):** **Kokoro-82M** (`kokoro-onnx`, English voice
+  `af_heart`), the natural English voice of the chosen product language. It
+  is loaded and warmed up with one throw-away sentence; if the package or a
+  model file is missing, or that first synthesis fails, Piper speaks instead
+  and the start-up log line says why. The switch to `en` happens when the
+  reply texts are written in English.
+
+### Kokoro-82M (ONNX)
+
+**Status: not installed yet.** Install the package into the venv and download
+the two model files into `models/kokoro/`:
+
+```
+.venv\Scripts\python -m pip install "kokoro-onnx==0.6.1"
+mkdir models\kokoro
+curl.exe -L -o models\kokoro\kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+curl.exe -L -o models\kokoro\voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+```
+
+After the download, record the sha256 of each file here
+(`Get-FileHash models\kokoro\* -Algorithm SHA256` in PowerShell) and run
+`scripts/medir_latencia_voz.py --verificar --lingua en`: it measures the
+Kokoro voice with English sentences and fails if the engine loaded for `en`
+is not Kokoro.
+
+| File | Source URL | sha256 |
+|---|---|---|
+| `models/kokoro/kokoro-v1.0.onnx` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx` | (pending download) |
+| `models/kokoro/voices-v1.0.bin` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin` | (pending download) |
+
 ## Spoken reply: Piper `pt_PT-tugão-medium`
 
 Source: the `rhasspy/piper-voices` repository on Hugging Face (the voice is
@@ -112,6 +160,40 @@ accuracy comes first. It is the second case, after plain `large-v3`, where
 
 The `int8_float16` fallback was not needed: VRAM was never tight.
 
+## Transcription: NVIDIA Parakeet TDT 0.6B v3 (ONNX)
+
+The local STT engine chosen for short commands and dictation, measured against
+faster-whisper `medium` and `large-v3-turbo` on the Sponsor's own voice by
+`scripts/avaliar_voz.py`; the engine that wins on that measurement stays.
+Model: NVIDIA Parakeet TDT 0.6B v3 (25 European languages, including
+Portuguese and English; CC-BY-4.0), in the ONNX export that `onnx-asr`
+publishes on Hugging Face (`istupakov/parakeet-tdt-0.6b-v3-onnx`, the
+repository behind the `nemo-parakeet-tdt-0.6b-v3` alias of `onnx-asr`).
+
+**Status: not downloaded yet.** `jarvis/stt.py` never downloads it: until the
+two commands below have been run, the `parakeet-tdt-0.6b-v3` adapter reports
+itself unavailable and the evaluator skips it with that reason.
+
+Install the package into the venv, then download the model into `models/`:
+
+```
+.venv\Scripts\python -m pip install "onnx-asr[cpu,hub]==0.12.0"
+.venv\Scripts\python -c "import onnx_asr; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', 'models/parakeet-tdt-0.6b-v3')"
+```
+
+The onnxruntime in this venv is CPU-only, so the evaluator runs this engine
+with `--motores ...,parakeet-tdt-0.6b-v3:cpu`; the device each engine ran on is
+written in the evidence.
+
+After the download, record every file of `models/parakeet-tdt-0.6b-v3/` here
+with its sha256 (`Get-FileHash models\parakeet-tdt-0.6b-v3\* -Algorithm SHA256`
+in PowerShell) and its source URL
+(`https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/<file>`).
+
+| File | Source URL | sha256 |
+|---|---|---|
+| (pending download) | — | — |
+
 ## Wake word: openWakeWord
 
 Source: the release assets of the `dscripka/openWakeWord` repository (v0.5.1),
@@ -155,3 +237,144 @@ is removed with the folder. jarvis loads none of those extra models: it always
 passes the path of `hey_jarvis` in `models/openwakeword/`. It is recorded here
 so nobody finds out late that the installation brings more models than this
 repository chose.
+
+### Threshold and measurement on the Sponsor's voice
+
+The detection threshold is `[ouvido] limiar_ativacao` in `config.toml`
+(default `0.6`, documented in `config.exemplo.toml`). It is chosen from the
+numbers, not guessed: `scripts/avaliar_ativacao.py` runs the Sponsor's
+recordings through the same detector the ear uses
+(`jarvis.ouvido.DetetorOpenWakeWord`, 80 ms steps) and writes the curve
+threshold -> detection / false wakes per 30 min to `docs/forja/evidence/`
+(ignored by Git), together with the threshold to put in `config.toml`.
+Targets: detection >= 95% over 20 repetitions, <= 1 false wake per 30 min of
+normal household noise. The recording script is `tests/voz/guiao-ativacao.md`.
+Only recordings whose manifest says they came from the microphone count;
+anything else is listed as set aside. Without those recordings the evidence
+says "PENDENTE — passo do Sponsor" and the targets are not declared met;
+synthetic voice never decides.
+
+False wakes in the noise recording are counted at most once per 0.94 s: the
+shortest time the ear ignores the detector after a wake (0.25 s of deafness,
+90 ms of speech, 0.6 s of closing silence). Without speech the ear waits
+longer (up to 5 s), so the count never falls below what the Sponsor would
+hear.
+
+The wake word is removed from the transcribed text before the interpreter
+only when its exact words are there (`jarvis.ouvido.retirar_palavra_de_ativacao`);
+misheard spellings are never mapped back to the wake word.
+
+## Wake word: "boas jarvis" (Portuguese, trained locally)
+
+Only needed when the product runs in Portuguese (`[ouvido] lingua = "pt"`);
+English uses the pre-trained `hey_jarvis` above. There is no pre-trained
+"boas jarvis" model, so `scripts/treinar_ativacao.py` trains one with what is
+already in `.venv` and `models/` (openWakeWord 0.6.0, scikit-learn, piper-tts,
+onnxruntime); nothing is downloaded or installed.
+
+**Status: not trained yet** — it needs the Sponsor's training recordings
+(step 1 below). The model file is `models/openwakeword/boas_jarvis.onnx`;
+until it exists, Portuguese hands-free mode reports it missing and points
+here.
+
+How the model is built:
+
+- **Features:** openWakeWord's own `melspectrogram.onnx` and
+  `embedding_model.onnx` (above): 2 s windows -> 16 x 96 features, exactly
+  what the detector gives the model every 80 ms.
+- **Positives:** the Sponsor's 20 *training* repetitions (a set separate from
+  the 20 evaluation repetitions), each augmented 15 times (gain, noise,
+  position in the window), plus 300 "boas jarvis" syntheses by the Piper
+  `pt_PT-tugão-medium` voice with varied speed and intonation.
+- **Negatives:** near-miss phrases ("boas", "jarvis", "boa noite", "boas
+  notícias"...), everyday household phrases and fragments of the voice-test
+  script, all spoken by the same synthetic voice; the Sponsor's voice-test
+  recordings that do not start with the wake word; generated white, pink and
+  brown noise. The evaluation repetitions and the household noise recording
+  are never read by the training, so the measurement is not inflated.
+- **Model:** a small MLP (scikit-learn, one hidden layer of 64) with the
+  feature normalisation folded into the weights, written as ONNX
+  (`Flatten -> Gemm -> Relu -> Gemm -> Sigmoid`) by a minimal protobuf
+  encoder in the script, because the `onnx` package is not in the venv. The
+  file is checked with onnxruntime against scikit-learn and loaded by the
+  ear's detector before it is reported ready.
+- **Reproducible procedure:** fixed seed (`--semente`, default 1790) for the
+  augmentation, the split and the MLP. The file itself is not byte-identical
+  between runs: Piper samples its synthesis noise inside its ONNX model, so a
+  re-run can give slightly different synthetic positives and another sha256.
+  Next to the model the script writes `boas_jarvis.onnx.json`: date, sample
+  counts, parameters, seed, package versions and the sha256; no transcripts
+  and no paths. The sha256 recorded below identifies the file in use.
+- **Only the Sponsor's microphone recordings** are used as real positives
+  and negatives; recordings marked synthetic in their manifest are skipped.
+
+Procedure:
+
+1. Record the 20 training repetitions (script in `tests/voz/guiao-ativacao.md`):
+   ```
+   .venv\Scripts\python scripts/avaliar_ativacao.py --gravar-palavra --lingua pt --conjunto treino
+   ```
+2. Train (about 7 min on the CPU):
+   ```
+   .venv\Scripts\python scripts/treinar_ativacao.py
+   ```
+3. Record the printed sha256 in the table below, then measure with the
+   evaluation set and the noise recording:
+   ```
+   .venv\Scripts\python scripts/avaliar_ativacao.py --lingua pt
+   ```
+
+| File | Source | sha256 |
+|---|---|---|
+| `models/openwakeword/boas_jarvis.onnx` | trained locally by `scripts/treinar_ativacao.py` | (pending: needs the Sponsor's training recordings) |
+
+`--ensaio-sintetico --saida <folder outside the repository>` trains on
+synthetic voice only, to prove the chain; it refuses to write to the real
+model path. A trial like that says nothing about the Sponsor's voice. On
+2026-09-25 a synthetic-only trial, streamed through the ear's detector on 14
+new sentences from the same synthetic voice, scored the 4 sentences starting
+with "boas jarvis" at 0.999-1.000 and the 10 without it at 0.153 at most. An
+earlier trial without the near-miss and household phrases woke on "boa noite
+a todos" (0.84), which is why they are in the negatives. Only the Sponsor's
+recordings and the measured curve decide the real model and its threshold.
+
+## Interpreter: Qwen3 8B through Ollama (fallback Qwen3 4B)
+
+`jarvis/interprete.py` classifies each transcribed sentence (intent from a
+closed list, project from `config.toml`) and rewrites dictation into a clear
+prompt before the confirmation step. It talks to the local Ollama server over
+HTTP on `127.0.0.1` only (no new Python dependency) and asks for JSON bound to
+a schema, with thinking off. The models live in Ollama's own store, not in
+`models/`.
+
+Financial requests (buying, selling, investing, paying or placing money in any
+asset) are always refused. A deterministic rule checks the sentence before the
+model and the rewritten prompt after it, and the schema also has a boolean
+`financeiro` field. When the model sets that field, the sentence is refused.
+The field can only refuse a sentence; it can never let through one that the
+rule caught.
+
+**Status: both models pulled.** On a machine without them the interpreter
+reports that no model is available and `scripts/avaliar_interprete.py
+--verificar` exits with code 2 and prints these commands:
+
+```
+ollama pull qwen3:8b
+ollama pull qwen3:4b
+```
+
+`qwen3:8b` is the main model; `qwen3:4b` is used when the main one is not
+installed or does not fit in the free VRAM measured at start-up (the
+evaluator prints the VRAM before and after loading, and the share of the model
+that ended up in VRAM). Both names can be changed in the `[interprete]` table
+of `config.toml` (see `config.exemplo.toml`).
+
+Golden-set evaluation:
+
+```
+.venv\Scripts\python scripts/avaliar_interprete.py --verificar --evidencia
+```
+
+It fails if intent accuracy is below 95% or project accuracy below 98% in
+either language, if any rewritten prompt adds a request, or if warm latency
+exceeds 1.2 s p50 / 2.5 s p95.

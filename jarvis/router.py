@@ -132,9 +132,12 @@ CONFIANCA_MINIMA = 0.35
 #: aparece de facto conta como residuo — nada de aproximacao/fuzzy.
 #: Ordem: variantes de duas palavras primeiro, para que "hey jarvis" nao pare
 #: a meio em "hey" sozinho; "jorvis" e a grafia que o log real mostrou (linha
-#: 647 de logs/jarvis-2026-09-20.log, "Jorvis, que oração!").
+#: 647 de logs/jarvis-2026-09-20.log, "Jorvis, que oração!"). "boas jarvis"
+#: e a palavra de ativacao portuguesa; o ouvido residente ja a tira antes (so
+#: as palavras exatas), e aqui fica para qualquer outro caminho ate ao router.
 RESIDUOS_PALAVRA_DE_ATIVACAO: tuple[str, ...] = (
     "hey jarvis",
+    "boas jarvis",
     "hei jarvis",
     "ei jarvis",
     "jorvis",

@@ -1,82 +1,74 @@
-r"""Testes do orquestrador (jarvis/app.py), unittest da biblioteca padrao.
+r"""Testes do jarvis residente (jarvis/app.py), unittest da biblioteca padrao.
 
-Mesma convencao de tests/test_router.py e tests/test_acoes.py: sem pytest
-(nenhuma framework de testes fora da biblioteca padrao).
+NENHUM destes testes toca em hardware nem em servicos: sem microfone, sem
+Ollama (o LLM e um cliente falso em memoria), sem Claude Code (o canal e
+falso) e sem som (a voz e uma funcao que so regista o texto). O que protegem:
 
-NENHUM destes testes toca em hardware: sem GPU, sem microfone, sem Piper, sem
-Claude Code. O que eles protegem:
-
-  * o FORMATO do log de cada frase — as cinco etapas, os timestamps, as
-    latencias em ms e a linha do total — porque o log e o entregavel da D2/D11
-    e uma mudanca silenciosa no formato invalida a prova;
-  * a ARITMETICA das latencias, com um relogio falso (nunca `time.sleep`);
-  * a linha `FALSO DESPERTAR DESCARTADO` e, sobretudo, que uma frase descartada
-    NAO executa accao nenhuma e NAO abre o canal do Claude Code;
-  * um comando local nunca abrir o canal do Claude Code (zero tokens);
-  * o estado do processo (calar, adormecer, acordar), que so existe aqui
-    porque `jarvis.acoes_locais.executar()` as recusa de proposito;
-  * a injeccao de ficheiro: o corte em chunks do tamanho que o RealtimeSTT
-    consome, o preenchimento do ultimo chunk, a reamostragem e a juncao de
-    canais;
-  * o resumo falado de uma resposta do Claude Code: nomeia a origem e
-    nunca a le inteira como facto.
+  * o formato do log de cada frase (etapas, timestamps, latencias, total);
+  * o estado mostrado na consola (a ouvir, a pensar, a espera de
+    confirmacao, a falar, a dormir);
+  * a politica de confirmacao no processo: horas corre logo, abrir o editor
+    ou enviar um ditado so depois de "sim", e nada chega ao canal sem ele;
+  * "cala-te" dito por cima da voz cala logo, dormir ignora frases, o canal
+    em baixo nunca envia nada;
+  * a resposta do Claude passa pelo filtro da voz e fica inteira so no log;
+  * o arranque em paralelo e o canal real com pecas falsas;
+  * o RealtimeSTT ja nao e importado pelo caminho vivo.
 
 Corre com:
 
-    .venv\Scripts\python -m unittest discover -s tests -v
+    .venv\Scripts\python -m unittest tests.test_app -v
 """
 
 from __future__ import annotations
 
 import datetime
-import logging
-import os
+import json
 import subprocess
 import sys
 import tempfile
-import types
+import threading
 import unittest
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from jarvis import acoes_locais, app, voz
 from jarvis.acoes_locais import AcaoError, ResultadoAcao
 from jarvis.app import (
-    BYTES_POR_CHUNK,
-    PREFIXO_DA_RESPOSTA_DO_CLAUDE,
-    EstadoDoProcesso,
+    A_DORMIR,
+    A_ESPERA,
+    A_FALAR,
+    A_OUVIR,
+    A_PENSAR,
+    Arranque,
+    CanalDasSessoes,
+    FonteDeSequencia,
     Jarvis,
     LogDaSessao,
+    Painel,
     RegistoDaFrase,
     agora_iso,
+    aquecer_em_paralelo,
     caminho_do_log,
     carregar_config_tolerante,
-    chunks_de_silencio,
-    construir_recorder,
-    detalhe_da_transcricao,
+    construir_ouvido,
+    construir_parser,
     formatar_etapa,
-    frames_do_wav,
-    instalar_silenciador_no_processo_filho,
-    resumo_falado,
-    silenciar_ruido_do_shutdown,
 )
-from jarvis.audio_util import escrever_wav_pcm16
-from jarvis.lingua import LINGUA_FIXA_DO_PRODUTO
-from jarvis.config import Config, Projeto
+from jarvis.config import Config, ConfigInterprete, ConfigOuvido, Projeto
+from jarvis.interprete import Interprete, MotorIndisponivel
+from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_TECLA, Frase, TeclaDoFicheiro
+from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE
+from jarvis.sessoes import Entrega
+from jarvis.stt import MotorBase, MotorIndisponivel as SttIndisponivel
 from jarvis.voz import ResultadoFala
 
+RAIZ = Path(__file__).resolve().parent.parent
+NOMES = ("atlas", "orbita")
 
-class RelogioFalso:
-    """Relogio monotonico controlado pelo teste: nada de time.sleep."""
 
-    def __init__(self, tempos: list[float]) -> None:
-        self.tempos = list(tempos)
-        self.ultimo = self.tempos[0] if self.tempos else 0.0
-
-    def __call__(self) -> float:
-        if self.tempos:
-            self.ultimo = self.tempos.pop(0)
-        return self.ultimo
+# --- Pecas falsas partilhadas com tests/test_ponta_a_ponta.py -------------------
 
 
 class LogFalso:
@@ -84,684 +76,772 @@ class LogFalso:
 
     def __init__(self) -> None:
         self.linhas: list[str] = []
+        self.caminho = Path("logs") / "jarvis-teste.log"
+        self.fechado = False
+        self._tranca = threading.Lock()
 
     def linha(self, texto: str) -> str:
-        self.linhas.append(texto)
+        with self._tranca:
+            self.linhas.append(texto)
         return texto
 
     def bruto(self, texto: str = "") -> None:
-        self.linhas.append(texto)
+        self.linha(texto)
+
+    def fechar(self) -> None:
+        self.fechado = True
 
     def texto(self) -> str:
-        return "\n".join(self.linhas)
+        with self._tranca:
+            return "\n".join(self.linhas)
 
 
-def _config_sem_projetos() -> Config:
-    return Config(microfone="Microfone Ficticio de Teste", projetos=())
-
-
-def _config_com_projeto(pasta: Path) -> Config:
+def config_de_teste(lingua: str = "pt", **ajustes) -> Config:
     return Config(
         microfone="Microfone Ficticio de Teste",
-        projetos=(Projeto(nome="exemplo-um", caminho=pasta.resolve()),),
+        projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in NOMES),
+        ouvido=ConfigOuvido(lingua=lingua),
+        interprete=ConfigInterprete(**ajustes),
     )
 
 
-class CanalFalso:
-    """Uma sessao do Claude Code de mentira: conta as chamadas."""
+def resposta_llm(intencao: str, projeto: str = "", prompt: str = "", financeiro: bool = False) -> str:
+    return json.dumps({"intencao": intencao, "projeto": projeto, "prompt": prompt, "financeiro": financeiro})
 
-    def __init__(self, resposta: str = "resposta de teste") -> None:
+
+class LlmFalso:
+    """Faz de Ollama em memoria: respostas feitas, pela ordem; depois indisponivel."""
+
+    def __init__(self, respostas=None) -> None:
+        self.respostas = list(respostas or [])
+        self.pedidos: list[list[dict]] = []
+        self.limite_s = 5.0
+
+    def conversar(self, modelo, mensagens, esquema, *, limite_s=None):
+        self.pedidos.append(mensagens)
+        if not self.respostas:
+            raise MotorIndisponivel("sem resposta feita")
+        return self.respostas.pop(0)
+
+
+class CanalFalso:
+    """Faz de canal para as sessoes: regista (projeto, texto) e responde se pedido."""
+
+    def __init__(self, resposta: str | None = None, aberta: bool = True) -> None:
+        self.recebidos: list[tuple[str, str]] = []
         self.resposta = resposta
-        self.perguntas: list[str] = []
+        self.aberta = aberta
         self.fechado = False
 
-    def perguntar(self, frase: str, limite_s: float = 0.0) -> str:
-        self.perguntas.append(frase)
-        return self.resposta
+    def enviar(self, projeto: str, texto: str, ao_responder) -> bool:
+        self.recebidos.append((projeto, texto))
+        if self.resposta is not None:
+            ao_responder(projeto, Entrega(projeto=projeto, caminho="canal", texto=self.resposta))
+        return self.aberta
 
     def fechar(self) -> None:
         self.fechado = True
 
 
-class JarvisDeTeste:
-    """Monta um Jarvis com todas as pecas externas substituidas por falsos."""
+class RelogioFalso:
+    def __init__(self, agora: float = 1000.0) -> None:
+        self.agora = agora
 
-    def __init__(self, config: Config | None = None, resposta_do_claude: str = "ok") -> None:
+    def __call__(self) -> float:
+        return self.agora
+
+    def avancar(self, segundos: float) -> None:
+        self.agora += segundos
+
+
+class Montagem:
+    """Um Jarvis com todas as pecas externas falsas."""
+
+    def __init__(
+        self,
+        respostas_llm=None,
+        *,
+        lingua: str = "pt",
+        canal: CanalFalso | None | bool = True,
+        relogio=None,
+        primeiro_audio_depois_s: float = 0.1,
+        **ajustes,
+    ) -> None:
         self.log = LogFalso()
-        self.canal = CanalFalso(resposta_do_claude)
-        self.canais_abertos = 0
+        self.config = config_de_teste(lingua, **ajustes)
+        self.llm = LlmFalso(respostas_llm)
+        self.interprete = Interprete(self.config, cliente=self.llm)
+        self.canal = CanalFalso() if canal is True else (canal or None)
         self.falados: list[str] = []
-        self.accoes: list[str] = []
+        self.locais: list[tuple] = []
+        self.silencios: list[tuple[str, bool]] = []
+        self.relogio = relogio or RelogioFalso()
 
-        def abrir_canal():
-            self.canais_abertos += 1
-            return self.canal
-
-        def falar(texto: str, **_kwargs) -> ResultadoFala:
+        def falar(texto: str) -> ResultadoFala:
             self.falados.append(texto)
-            return ResultadoFala(falou=True)
+            return ResultadoFala(falou=True, primeiro_audio=self.relogio() + primeiro_audio_depois_s)
 
-        def executar(resultado, config, **_kwargs) -> ResultadoAcao:
-            self.accoes.append(resultado.nome_acao or "")
-            return ResultadoAcao(
-                nome_acao=resultado.nome_acao or "",
-                executou=True,
-                texto="São 15 horas e 30 minutos.",
+        def executar_local(intencao, projeto, config, *, detalhe=None, lingua="pt"):
+            self.locais.append((intencao, projeto, detalhe))
+            return ResultadoAcao(nome_acao=intencao, executou=True, texto="São 15 horas e 30 minutos.")
+
+        def calar(motivo, *, definitivo, registar=None):
+            self.silencios.append((motivo, definitivo))
+            agora = datetime.datetime.now()
+            return voz.ResultadoSilencio(
+                instante_do_pedido=agora,
+                instante_do_fim_do_audio=agora,
+                intervalo_ms=0.0,
+                matou_sintese=False,
+                parou_reproducao=False,
+                definitivo=definitivo,
+                motivo=motivo,
             )
 
         self.jarvis = Jarvis(
-            config or _config_sem_projetos(),
-            self.log,  # type: ignore[arg-type]
+            self.config,
+            self.log,
+            interprete=self.interprete,
+            canal=self.canal,
             falar=falar,
-            executar=executar,
-            abrir_canal=abrir_canal,
+            calar=calar,
+            executar_local=executar_local,
+            relogio=self.relogio,
         )
 
-    def frase(self, texto: str) -> RegistoDaFrase:
-        self.jarvis.frases += 1
-        registo = RegistoDaFrase(numero=self.jarvis.frases, log=self.log)  # type: ignore[arg-type]
-        registo.marcar(1, "palavra de ativacao de teste")
-        registo.marcar(2, f"texto: {texto!r}")
-        self.jarvis.tratar_transcricao(texto, registo)
-        return registo
+    def ouvir(self, texto: str, *, gatilho: str = GATILHO_TECLA, fim: float | None = None) -> None:
+        """Uma frase acabada de transcrever, entregue como o ouvido a entrega."""
+        fim = self.relogio() if fim is None else fim
+        self.jarvis.ao_ouvir(
+            Frase(
+                texto=texto,
+                gatilho=gatilho,
+                lingua=self.config.ouvido.lingua,
+                motor="motor-falso",
+                duracao_audio_s=1.0,
+                inicio_da_escuta=fim - 1.0,
+                fim_da_escuta=fim,
+                texto_pronto=fim + 0.2,
+                latencia_stt_ms=200.0,
+                score_ativacao=0.9 if gatilho == GATILHO_ATIVACAO else None,
+            )
+        )
+
+    def avancar(self, segundos: float = 1.0) -> None:
+        self.relogio.avancar(segundos)
+
+
+DITADO = resposta_llm("ditar_prompt", "atlas", "Corrige o teste do login.")
+
+
+# --- Log -------------------------------------------------------------------------
 
 
 class TestFormatoDoLog(unittest.TestCase):
-    """O formato e o entregavel: se muda, a prova deixa de casar."""
-
     def test_linha_de_etapa_tem_frase_etapa_latencia_e_detalhe(self) -> None:
         self.assertEqual(
-            formatar_etapa(3, 2, 812.4, "texto: 'que horas sao'"),
-            "frase #3 | etapa 2/5 transcricao           |     812 ms "
-            "| texto: 'que horas sao'",
+            formatar_etapa(7, 3, 41.6, "intencao=horas"),
+            "frase #7 | etapa 3/5 interprete            |      42 ms | intencao=horas",
         )
 
     def test_as_cinco_etapas_tem_nome_proprio(self) -> None:
-        nomes = [formatar_etapa(1, n, 0, "x").split("|")[1].strip() for n in range(1, 6)]
+        nomes = [app.NOMES_DAS_ETAPAS[n].strip() for n in range(1, 6)]
         self.assertEqual(
-            nomes,
-            [
-                "etapa 1/5 palavra de ativacao",
-                "etapa 2/5 transcricao",
-                "etapa 3/5 encaminhamento",
-                "etapa 4/5 accao/entrega",
-                "etapa 5/5 resposta falada",
-            ],
+            nomes, ["1/5 ouvido", "2/5 transcricao", "3/5 interprete", "4/5 confirmacao/accao", "5/5 voz"]
         )
 
     def test_timestamp_tem_milissegundos(self) -> None:
-        self.assertEqual(
-            agora_iso(datetime.datetime(2026, 9, 20, 6, 12, 1, 123456)),
-            "2026-09-20 06:12:01.123",
-        )
+        self.assertEqual(agora_iso(datetime.datetime(2026, 9, 25, 9, 5, 7, 45000)), "2026-09-25 09:05:07.045")
 
     def test_nome_do_ficheiro_de_log_e_por_dia(self) -> None:
-        caminho = caminho_do_log(datetime.datetime(2026, 9, 20, 23, 59), Path("logs"))
-        self.assertEqual(caminho.name, "jarvis-2026-09-20.log")
+        self.assertEqual(caminho_do_log(datetime.datetime(2026, 9, 25), Path("x")).name, "jarvis-2026-09-25.log")
 
     def test_o_log_escreve_na_consola_e_no_ficheiro(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:
             consola = StringIO()
-            log = LogDaSessao(
-                pasta=Path(pasta),
-                consola=consola,
-                quando=datetime.datetime(2026, 9, 20),
-                relogio_de_parede=lambda: datetime.datetime(2026, 9, 20, 6, 0, 0, 500000),
-            )
-            log.linha("frase #1 | etapa 3/5")
+            log = LogDaSessao(pasta=Path(pasta), consola=consola)
+            log.linha("frase #1 | ola")
             log.fechar()
-            esperado = "2026-09-20 06:00:00.500 frase #1 | etapa 3/5"
-            self.assertEqual(consola.getvalue().strip(), esperado)
-            self.assertEqual(log.caminho.read_text(encoding="utf-8").strip(), esperado)
+            log.linha("depois de fechar so vai para a consola")
+            ficheiro = log.caminho.read_text(encoding="utf-8")
+        self.assertIn("frase #1 | ola", consola.getvalue())
+        self.assertIn("frase #1 | ola", ficheiro)
+        self.assertNotIn("depois de fechar", ficheiro)
+
+    def test_latencias_medem_desde_a_etapa_anterior_e_o_total_desde_o_fim_da_fala(self) -> None:
+        tempos = iter([10.0, 11.0, 11.25, 12.0])
+        registo = RegistoDaFrase(numero=1, relogio=lambda: next(tempos))
+        registo.fim_da_fala = 10.5
+        self.assertEqual(round(registo.marcar(1, "a").latencia_ms), 1000)
+        self.assertEqual(round(registo.marcar(2, "b").latencia_ms), 250)
+        self.assertIn("1500 ms desde o fim da fala", registo.fechar("fim"))
 
 
-class TestLatencias(unittest.TestCase):
-    """A aritmetica das latencias, com relogio falso (sem sleep nenhum)."""
-
-    def test_cada_etapa_mede_desde_a_anterior(self) -> None:
-        relogio = RelogioFalso([0.0, 1.0, 1.5, 1.5])
-        registo = RegistoDaFrase(numero=1, relogio=relogio)
-        self.assertEqual(round(registo.marcar(1, "wake").latencia_ms), 1000)
-        self.assertEqual(round(registo.marcar(2, "stt").latencia_ms), 500)
-        self.assertEqual(round(registo.marcar(3, "router").latencia_ms), 0)
-
-    def test_a_etapa_2_pode_medir_desde_o_fim_da_fala(self) -> None:
-        relogio = RelogioFalso([0.0, 2.0, 2.9])
-        registo = RegistoDaFrase(numero=1, relogio=relogio)
-        registo.marcar_fim_da_fala()  # t=2.0
-        marca = registo.marcar(2, "stt", desde=registo.fim_da_fala)  # t=2.9
-        self.assertEqual(round(marca.latencia_ms), 900)
-
-    def test_o_total_conta_das_duas_referencias(self) -> None:
-        log = LogFalso()
-        relogio = RelogioFalso([0.0, 1.0, 4.0])
-        registo = RegistoDaFrase(numero=7, log=log, relogio=relogio)  # type: ignore[arg-type]
-        registo.marcar_fim_da_fala()  # t=1.0
-        linha = registo.fechar("accao local 'horas_e_data' (zero tokens)")  # t=4.0
-        self.assertIn("frase #7 | TOTAL |", linha)
-        self.assertIn("4000 ms desde o inicio da escuta", linha)
-        self.assertIn("3000 ms desde o fim da fala", linha)
-
-    def test_sem_fala_o_total_diz_que_nao_houve_fala(self) -> None:
-        registo = RegistoDaFrase(numero=1, relogio=RelogioFalso([0.0, 3.0]))
-        self.assertIn("sem fala detetada", registo.fechar("descartada"))
+class TestRegistoDeUmaFrase(unittest.TestCase):
+    def test_horas_tem_as_cinco_etapas_e_as_duas_medidas(self) -> None:
+        m = Montagem()
+        m.ouvir("que horas são")
+        texto = m.log.texto()
+        for etapa in ("1/5 ouvido", "2/5 transcricao", "3/5 interprete", "4/5 confirmacao/accao", "5/5 voz"):
+            self.assertIn(etapa, texto)
+        self.assertIn("primeiro sinal de vida: 0 ms desde o fim da fala (linha A PENSAR)", texto)
+        self.assertIn("inicio da resposta falada: 100 ms desde o fim da fala", texto)
+        self.assertIn("| TOTAL |", texto)
+        medida = m.jarvis.medidas[0]
+        self.assertEqual((medida.intencao, medida.desfecho), ("horas", "executado"))
+        self.assertAlmostEqual(medida.primeira_fala_ms, 100.0)
+        self.assertEqual(medida.sinal_de_vida_ms, 0.0)
 
 
-class TestFalsoDespertar(unittest.TestCase):
-    """Um falso despertar nao executa nada nem abre o canal do Claude Code."""
-
-    def test_transcricao_vazia_regista_a_linha_e_nao_faz_nada(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("")
-        registo = teste.log.texto()
-        self.assertIn("FALSO DESPERTAR DESCARTADO", registo)
-        self.assertIn("transcricao vazia (D5)", registo)
-        self.assertIn("nenhuma accao executada, nada enviado ao Claude Code", registo)
-        self.assertEqual(teste.accoes, [])
-        self.assertEqual(teste.canais_abertos, 0)
-        self.assertEqual(teste.canal.perguntas, [])
-        self.assertEqual(teste.falados, [])
-
-    def test_alucinacao_conhecida_sobre_ruido_nao_chega_ao_claude(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Obrigado por assistir!")
-        self.assertIn("FALSO DESPERTAR DESCARTADO", teste.log.texto())
-        self.assertEqual(teste.canais_abertos, 0)
-        self.assertEqual(teste.accoes, [])
-
-    def test_transcricao_curta_de_mais_nao_chega_ao_claude(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("ah")
-        self.assertIn("FALSO DESPERTAR DESCARTADO", teste.log.texto())
-        self.assertEqual(teste.canais_abertos, 0)
-
-    def test_a_frase_descartada_fecha_com_zero_accoes_e_zero_tokens(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("")
-        self.assertIn("descartada: zero accoes, zero tokens", teste.log.texto())
+# --- Estado na consola -----------------------------------------------------------
 
 
-class TestComandoLocal(unittest.TestCase):
-    def test_horas_executa_accao_local_e_nunca_abre_o_canal(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Que horas são?")
-        registo = teste.log.texto()
-        self.assertIn("decisao=local -> accao local 'horas_e_data'", registo)
-        self.assertIn("zero tokens", registo)
-        self.assertEqual(teste.accoes, ["horas_e_data"])
-        self.assertEqual(teste.canais_abertos, 0, "um comando local nunca gasta tokens (D4)")
-        self.assertEqual(teste.falados, ["São 15 horas e 30 minutos."])
-        self.assertNotIn("FALSO DESPERTAR", registo)
-
-    def test_as_cinco_etapas_ficam_no_log_de_um_comando_local(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Que horas são?")
-        registo = teste.log.texto()
-        for etapa in ("etapa 1/5", "etapa 2/5", "etapa 3/5", "etapa 4/5", "etapa 5/5"):
-            self.assertIn(etapa, registo)
-        self.assertIn("| TOTAL |", registo)
-
-    def test_uma_accao_recusada_nao_inventa_resposta(self) -> None:
-        teste = JarvisDeTeste()
-
-        def recusar(_resultado, _config, **_kwargs):
-            raise AcaoError("projeto 'x' nao esta na configuracao")
-
-        teste.jarvis._executar = recusar  # type: ignore[assignment]
-        teste.frase("Que horas são?")
-        self.assertIn("accao local RECUSADA", teste.log.texto())
-        self.assertEqual(teste.falados, ["Não consegui executar esse comando."])
-
-
-class TestEntregaAoClaude(unittest.TestCase):
-    def test_frase_fora_da_lista_branca_vai_ao_claude_uma_so_vez(self) -> None:
-        teste = JarvisDeTeste(resposta_do_claude="Está tudo bem.")
-        teste.frase("Pergunta ao claude o estado da ultima sessão")
-        teste.frase("Pergunta ao claude outra coisa qualquer")
-        self.assertEqual(len(teste.canal.perguntas), 2)
-        self.assertEqual(teste.canais_abertos, 1, "a sessao-ponte mantem-se entre frases (D49)")
-        self.assertIn("entregue ao Claude Code pelo degrau", teste.log.texto())
-
-    def test_a_voz_nomeia_a_origem_da_resposta_do_claude(self) -> None:
-        teste = JarvisDeTeste(resposta_do_claude="Li o ficheiro X.")
-        teste.frase("Pergunta ao claude o que fizeste")
-        self.assertEqual(len(teste.falados), 1)
-        self.assertTrue(teste.falados[0].startswith(PREFIXO_DA_RESPOSTA_DO_CLAUDE))
-
-    def test_canal_em_baixo_nao_derruba_o_jarvis(self) -> None:
-        teste = JarvisDeTeste()
-
-        def rebentar():
-            raise RuntimeError("o CLI claude nao arrancou")
-
-        teste.jarvis._abrir_canal = rebentar  # type: ignore[assignment]
-        teste.frase("Pergunta ao claude uma coisa")
-        self.assertIn("entrega ao Claude Code FALHOU", teste.log.texto())
-        self.assertEqual(teste.falados, ["Não consegui falar com o Claude Code."])
-
-
-class TestResumoFalado(unittest.TestCase):
-    """D48(4): a voz nomeia a origem e nunca le a resposta inteira."""
-
-    def test_junta_as_linhas_e_tira_as_crases(self) -> None:
-        self.assertEqual(
-            resumo_falado("linha um\n\nlinha `dois`"),
-            f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} linha um linha dois",
-        )
-
-    def test_corta_no_fim_de_uma_palavra(self) -> None:
-        falado = resumo_falado("palavra " * 50, limite=20)
-        corpo = falado[len(PREFIXO_DA_RESPOSTA_DO_CLAUDE) + 1 :]
-        self.assertTrue(corpo.endswith("..."))
-        self.assertLessEqual(len(corpo), 24)
-        self.assertNotIn("palav.", corpo)
-
-    def test_resposta_vazia_diz_que_veio_vazia(self) -> None:
-        self.assertIn("sem texto", resumo_falado("   "))
-
-
-class TestEstadoDoProcesso(unittest.TestCase):
-    """calar / adormecer / acordar: so existem num processo vivo."""
-
-    def test_adormecer_ignora_as_frases_seguintes_ate_acordar(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Adormece")
-        self.assertTrue(teste.jarvis.estado.adormecido)
-        teste.frase("Que horas são?")
-        self.assertEqual(teste.accoes, [], "adormecido nao executa accoes")
-        self.assertIn("o jarvis esta adormecido", teste.log.texto())
-        teste.frase("Acorda")
-        self.assertFalse(teste.jarvis.estado.adormecido)
-        teste.frase("Que horas são?")
-        self.assertEqual(teste.accoes, ["horas_e_data"])
-
-    def test_adormecido_nunca_entrega_ao_claude(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Adormece")
-        teste.frase("Pergunta ao claude uma coisa qualquer")
-        self.assertEqual(teste.canais_abertos, 0)
-        self.assertEqual(teste.canal.perguntas, [])
-
-    def test_calar_mantem_a_resposta_so_na_consola(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Cala-te")
-        self.assertTrue(teste.jarvis.estado.mudo)
-        self.assertEqual(teste.falados, [], "depois de 'cala-te' a voz nao fala")
-        teste.frase("Que horas são?")
-        self.assertEqual(teste.falados, [])
-        self.assertIn("voz desligada (modo calado (D4.d))", teste.log.texto())
-        teste.frase("Acorda")
-        self.assertFalse(teste.jarvis.estado.mudo)
-
-    def test_sem_voz_regista_a_resposta_na_consola(self) -> None:
-        teste = JarvisDeTeste()
-        teste.jarvis.com_voz = False
-        teste.frase("Que horas são?")
-        self.assertEqual(teste.falados, [])
-        self.assertIn("voz desligada (--sem-voz)", teste.log.texto())
-
-    def test_estado_novo_comeca_acordado_e_com_voz(self) -> None:
-        estado = EstadoDoProcesso()
-        self.assertFalse(estado.adormecido)
-        self.assertFalse(estado.mudo)
-
-
-class TestInjeccaoDeFicheiro(unittest.TestCase):
-    """Os frames do WAV no mesmo pipeline, sem microfone."""
-
-    def test_corta_em_chunks_do_tamanho_do_realtimestt(self) -> None:
-        with tempfile.TemporaryDirectory() as pasta:
-            caminho = Path(pasta) / "t.wav"
-            escrever_wav_pcm16(caminho, b"\x01\x00" * 1536, 16000, 1)  # 3 chunks certos
-            pedacos = list(frames_do_wav(caminho))
-            self.assertEqual(len(pedacos), 3)
-            self.assertTrue(all(len(c) == BYTES_POR_CHUNK for c in pedacos))
-
-    def test_completa_o_ultimo_chunk_com_silencio(self) -> None:
-        with tempfile.TemporaryDirectory() as pasta:
-            caminho = Path(pasta) / "t.wav"
-            escrever_wav_pcm16(caminho, b"\x01\x00" * 600, 16000, 1)  # 1200 bytes
-            pedacos = list(frames_do_wav(caminho))
-            self.assertEqual(len(pedacos), 2)
-            self.assertEqual(len(pedacos[1]), BYTES_POR_CHUNK)
-            self.assertEqual(pedacos[1][-2:], b"\x00\x00")
-
-    def test_reamostra_para_16_khz(self) -> None:
-        with tempfile.TemporaryDirectory() as pasta:
-            caminho = Path(pasta) / "t.wav"
-            escrever_wav_pcm16(caminho, b"\x01\x00" * 22050, 22050, 1)  # 1 s a 22050
-            amostras = sum(len(c) for c in frames_do_wav(caminho)) / 2
-            self.assertAlmostEqual(amostras, 16000, delta=BYTES_POR_CHUNK)
-
-    def test_junta_os_dois_canais_de_um_wav_estereo(self) -> None:
-        with tempfile.TemporaryDirectory() as pasta:
-            caminho = Path(pasta) / "t.wav"
-            escrever_wav_pcm16(caminho, b"\x01\x00\x01\x00" * 1024, 16000, 2)
-            amostras = sum(len(c) for c in frames_do_wav(caminho)) / 2
-            self.assertAlmostEqual(amostras, 1024, delta=512)
-
-    def test_wav_vazio_nao_produz_frames(self) -> None:
-        with tempfile.TemporaryDirectory() as pasta:
-            caminho = Path(pasta) / "t.wav"
-            escrever_wav_pcm16(caminho, b"", 16000, 1)
-            self.assertEqual(list(frames_do_wav(caminho)), [])
-
-    def test_silencio_da_cauda_tem_a_duracao_pedida(self) -> None:
-        chunks = list(chunks_de_silencio(1.0))
-        self.assertEqual(len(chunks), 31)  # 32000 bytes // 1024
-        self.assertTrue(all(c == b"\x00" * BYTES_POR_CHUNK for c in chunks))
-
-
-MENSAGEM_DO_WINERROR_6 = (
-    "Error receiving data from connection: [WinError 6] The handle is invalid"
-)
-
-
-class _HandlerDeCaptura(logging.Handler):
-    """Guarda as mensagens que chegam mesmo a um handler do logger raiz."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.mensagens: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.mensagens.append(record.getMessage())
-
-
-class TestSilenciadorDoRuidoDoShutdown(unittest.TestCase):
-    """Metade do processo pai: so o WinError 6
-    conhecido e descartado; tudo o resto do logger raiz continua a passar, e o
-    logger fica exatamente como estava antes de o context manager correr.
-
-    Esta metade NAO e a que resolve o caso Windows — la o emissor esta noutro
-    processo e quem trata dele e `instalar_silenciador_no_processo_filho()`,
-    provado em TestSilenciadorNoProcessoFilho com processos a serio. Aqui
-    testa-se o que esta metade faz: defesa em profundidade e o caso Linux, em
-    que o worker do RealtimeSTT e uma thread deste mesmo processo.
-    """
-
-    def _capturar(self, corpo) -> list[str]:
-        """Corre `corpo()` com um handler no logger raiz e devolve o que passou.
-
-        Comportamental de proposito: chama `logging.error`/`logging.info` como
-        o RealtimeSTT chama, em vez de ir buscar o filtro a mao. Repoe o nivel e
-        o handler no fim.
-        """
-        logger_raiz = logging.getLogger()
-        handler = _HandlerDeCaptura()
-        nivel_antes = logger_raiz.level
-        logger_raiz.addHandler(handler)
-        logger_raiz.setLevel(logging.DEBUG)
+class TestEstadoNaConsola(unittest.TestCase):
+    def test_o_ditado_passa_por_pensar_falar_e_esperar(self) -> None:
+        m = Montagem([DITADO])
+        m.jarvis.iniciar()
         try:
-            corpo()
+            m.ouvir("no atlas corrige o teste do login")
+            self.assertTrue(m.jarvis.esperar_ocioso(5.0))
         finally:
-            logger_raiz.setLevel(nivel_antes)
-            logger_raiz.removeHandler(handler)
-        return handler.mensagens
+            m.jarvis.fechar()
+        self.assertEqual(m.jarvis.painel.historico, [A_OUVIR, A_PENSAR, A_FALAR, A_ESPERA])
+        self.assertIn(f"estado | {A_ESPERA}", m.log.texto())
 
-    def test_i_descarta_a_mensagem_exata_e_deixa_passar_tudo_o_resto(self) -> None:
-        def corpo() -> None:
-            with silenciar_ruido_do_shutdown():
-                logging.error(MENSAGEM_DO_WINERROR_6)
-                logging.error("Error receiving data from connection: o disco esta cheio")
-                logging.error("[WinError 6] noutro sitio qualquer")
-                logging.info("etapa 5/5 resposta falada")
-            logging.error(MENSAGEM_DO_WINERROR_6)
+    def test_dormir_mostra_a_dormir(self) -> None:
+        m = Montagem()
+        m.ouvir("dorme")
+        self.assertEqual(m.jarvis.painel.atual, A_DORMIR)
 
-        passaram = self._capturar(corpo)
-
-        self.assertEqual(
-            passaram,
-            [
-                # a mensagem do finding 4b desapareceu, e so ela
-                "Error receiving data from connection: o disco esta cheio",
-                "[WinError 6] noutro sitio qualquer",
-                "etapa 5/5 resposta falada",
-                # fora do `with`, ate ela volta a passar: nada fica permanente
-                MENSAGEM_DO_WINERROR_6,
-            ],
-        )
-
-    def test_ii_o_logger_raiz_fica_igual_depois_de_sair(self) -> None:
-        logger_raiz = logging.getLogger()
-        filtros_antes = list(logger_raiz.filters)
-        handlers_antes = list(logger_raiz.handlers)
-        nivel_antes = logger_raiz.level
-
-        with silenciar_ruido_do_shutdown():
-            self.assertNotEqual(list(logger_raiz.filters), filtros_antes)
-
-        self.assertEqual(list(logger_raiz.filters), filtros_antes)
-        self.assertEqual(list(logger_raiz.handlers), handlers_antes)
-        self.assertEqual(logger_raiz.level, nivel_antes)
-
-    def test_o_filtro_e_removido_mesmo_que_o_corpo_do_with_levante(self) -> None:
-        logger_raiz = logging.getLogger()
-        filtros_antes = list(logger_raiz.filters)
-
-        with self.assertRaises(RuntimeError):
-            with silenciar_ruido_do_shutdown():
-                raise RuntimeError("recorder.shutdown() falhou a serio")
-
-        self.assertEqual(list(logger_raiz.filters), filtros_antes)
-
-    def test_no_processo_principal_nao_instala_nada(self) -> None:
-        """Importar `jarvis.app` no processo principal nao mexe no logger raiz.
-
-        O silenciador do filho corre no corpo do modulo; aqui garante-se que no
-        pai isso e um no-op declarado — devolve False e nao deixa filtro nenhum.
-        """
-        logger_raiz = logging.getLogger()
-        filtros_antes = list(logger_raiz.filters)
-
-        self.assertFalse(instalar_silenciador_no_processo_filho())
-
-        self.assertEqual(list(logger_raiz.filters), filtros_antes)
+    def test_painel_nao_repete_a_mesma_linha(self) -> None:
+        linhas: list[str] = []
+        painel = Painel(linhas.append)
+        painel.mudar(A_OUVIR)
+        painel.mudar(A_OUVIR)
+        painel.mudar(A_PENSAR, "frase #1")
+        self.assertEqual(linhas, [f"estado | {A_OUVIR}", f"estado | {A_PENSAR} | frase #1"])
 
 
-class TestSilenciadorNoProcessoFilho(unittest.TestCase):
-    """A prova do finding 4b com processos a serio.
-
-    O emissor real (`RealtimeSTT/audio_recorder.py:134`) corre num filho de
-    `mp.Process` (audio_recorder.py:996, porque em Windows o sistema nao e
-    Linux), por isso nenhum filtro do processo pai o apanha. `tests/_filho_ruidoso.py`
-    monta a mesma situacao: um filho de verdade que faz `logging.error` com a
-    mensagem exata e `exc_info=True`, mais um ERROR diferente e uma linha INFO.
-    """
-
-    RAIZ = Path(__file__).resolve().parent.parent
-    OUTRO_ERRO = "Error receiving data from connection: o disco esta cheio"
-    LINHA_DE_INFO = "linha informativa do filho que tem de continuar a passar"
-
-    def _correr_auxiliar(self, *argumentos: str) -> subprocess.CompletedProcess:
-        ambiente = dict(os.environ, PYTHONIOENCODING="utf-8")
-        return subprocess.run(
-            [sys.executable, "-m", "tests._filho_ruidoso", *argumentos],
-            cwd=str(self.RAIZ),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=ambiente,
-            timeout=300,
-        )
-
-    def test_controlo_sem_o_silenciador_a_mensagem_aparece(self) -> None:
-        """Controlo negativo: sem `jarvis.app` importado no filho, e o de hoje."""
-        corrida = self._correr_auxiliar("--controlo")
-
-        self.assertEqual(corrida.returncode, 0, corrida.stderr)
-        self.assertIn(MENSAGEM_DO_WINERROR_6, corrida.stderr)
-        self.assertIn("Traceback (most recent call last)", corrida.stderr)
-        self.assertIn(self.OUTRO_ERRO, corrida.stderr)
-
-    def test_com_o_silenciador_a_mensagem_do_filho_nao_chega_ao_stderr(self) -> None:
-        corrida = self._correr_auxiliar()
-
-        self.assertEqual(corrida.returncode, 0, corrida.stderr)
-        # (b): a mensagem do filho e o seu traceback desapareceram do stderr do pai
-        self.assertNotIn("WinError 6", corrida.stderr)
-        self.assertNotIn("Traceback (most recent call last)", corrida.stderr)
-        # e so ela: um ERROR diferente do mesmo filho continua a aparecer,
-        # e uma linha de nivel INFO tambem
-        self.assertIn(self.OUTRO_ERRO, corrida.stderr)
-        self.assertIn(self.LINHA_DE_INFO, corrida.stderr)
-        # o stdout do pai nao e tocado
-        self.assertIn("pai: filho terminado", corrida.stdout)
+# --- Politica de confirmacao dentro do processo ---------------------------------
 
 
-class TestConfiguracaoEmFalta(unittest.TestCase):
-    """Sem config.toml o jarvis continua, mas NUNCA adivinha um projeto."""
+class TestConfirmacaoNoProcesso(unittest.TestCase):
+    def test_horas_corre_sem_confirmacao_e_nunca_toca_no_canal(self) -> None:
+        m = Montagem()
+        m.ouvir("que horas são")
+        self.assertEqual(m.locais, [("horas", None, "horas")])
+        self.assertEqual(m.falados, ["São 15 horas e 30 minutos."])
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.llm.pedidos, [], "a lista branca responde sem o LLM")
 
-    def test_sem_ficheiro_avisa_e_segue_sem_projetos(self) -> None:
+    def test_abrir_o_editor_so_depois_do_sim(self) -> None:
+        m = Montagem()
+        m.ouvir("abre o editor no atlas")
+        self.assertEqual(m.locais, [], "nada abre antes do sim")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        m.avancar()
+        m.ouvir("sim")
+        self.assertEqual(m.locais, [("abrir_editor", "atlas", None)])
+
+    def test_ditado_so_chega_ao_canal_depois_do_sim_e_e_o_texto_mostrado(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("no atlas corrige o teste do login")
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertIn("ecra | Corrige o teste do login.", m.log.texto())
+        m.avancar()
+        m.ouvir("sim")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Corrige o teste do login.")])
+        self.assertEqual(m.falados[-1], "Enviado para o atlas.")
+
+    def test_sessao_por_abrir_diz_que_vai_abrir_a_janela(self) -> None:
+        m = Montagem([DITADO], canal=CanalFalso(aberta=False))
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("sim")
+        self.assertIn("Aceita o aviso na janela nova", m.falados[-1])
+
+    def test_sim_dito_antes_do_recap_nao_envia(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("no atlas corrige o teste do login")
+        # A fala do "sim" comecou antes de o recap ter sido dito.
+        m.ouvir("sim", fim=m.relogio() - 0.5)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+
+    def test_cancela_nunca_envia(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("cancela")
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertIn("Cancelado, não enviei nada.", m.falados)
+
+    def test_sem_resposta_o_prazo_cancela_pelo_ciclo_principal(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar(m.jarvis.confirmacao.limite_s + 1)
+        m.jarvis.verificar_tempo()
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertIn("Sem resposta, cancelei. Não enviei nada.", m.falados)
+        self.assertEqual(m.jarvis.painel.atual, A_OUVIR)
+
+    def test_pedido_financeiro_e_recusado_sem_recap(self) -> None:
+        m = Montagem()
+        m.ouvir("compra cem euros de bitcoin")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.llm.pedidos, [])
+
+    def test_estado_sem_forja_recapitula_e_diz_que_nao_esta_disponivel(self) -> None:
+        m = Montagem([resposta_llm("estado", "atlas")])
+        m.ouvir("como está o run do atlas")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        m.avancar()
+        m.ouvir("sim")
+        self.assertIn("não estão disponíveis", m.falados[-1])
+        self.assertIn("forja | indisponivel", m.log.texto())
+
+    def test_conversa_sem_projeto_pede_o_projeto_e_nao_envia(self) -> None:
+        m = Montagem([resposta_llm("conversa", "", "Sim, pode avançar.")])
+        m.ouvir("diz-lhe que sim pode avançar")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.falados, ["Diz em que projeto é a conversa."])
+
+    def test_sem_canal_o_sim_nao_envia_e_diz_porque(self) -> None:
+        m = Montagem([DITADO], canal=None)
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("sim")
+        self.assertIn("O canal para o Claude Code não está disponível", m.falados[-1])
+        self.assertIn("o prompt confirmado NAO foi enviado", m.log.texto())
+
+    def test_accao_local_recusada_diz_que_falhou(self) -> None:
+        m = Montagem()
+
+        def recusar(*_a, **_k):
+            raise AcaoError("Code.exe em falta")
+
+        m.jarvis._executar_local = recusar
+        m.ouvir("abre o editor no atlas")
+        m.avancar()
+        m.ouvir("sim")
+        self.assertEqual(m.falados[-1], "Não consegui fazer isso.")
+
+    def test_em_ingles_as_respostas_do_jarvis_sao_inglesas(self) -> None:
+        m = Montagem([resposta_llm("ditar_prompt", "atlas", "Fix the login test.")], lingua="en")
+        m.ouvir("in atlas fix the login test")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Fix the login test.")])
+        self.assertEqual(m.falados[-1], "Sent to atlas.")
+
+
+# --- Silencio, dormir e voz desligada ----------------------------------------------
+
+
+class TestSilencioEDormir(unittest.TestCase):
+    def test_cala_te_cala_logo_ao_ser_ouvido_mesmo_com_a_fila_ocupada(self) -> None:
+        m = Montagem()
+        m.jarvis.iniciar()
+        bloqueio = threading.Event()
+        try:
+            with m.jarvis._tranca:  # uma frase "a ser tratada": a fila nao anda
+                threading.Thread(target=lambda: (m.ouvir("cala-te"), bloqueio.set())).start()
+                self.assertTrue(bloqueio.wait(2.0))
+                self.assertEqual(m.silencios, [("cala-te dito ao jarvis", False)])
+            self.assertTrue(m.jarvis.esperar_ocioso(5.0))
+        finally:
+            m.jarvis.fechar()
+        self.assertTrue(m.jarvis.estado.mudo)
+
+    def test_calado_as_respostas_ficam_so_no_ecra(self) -> None:
+        m = Montagem()
+        m.ouvir("cala-te")
+        m.ouvir("que horas são")
+        self.assertEqual(m.falados, [])
+        self.assertIn("modo calado; resposta so no ecra: 'São 15 horas e 30 minutos.'", m.log.texto())
+
+    def test_a_dormir_nada_e_interpretado_ate_acordar(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("dorme")
+        m.ouvir("no atlas corrige o teste do login")
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertIn("ignorada: o jarvis esta a dormir", m.log.texto())
+        m.ouvir("acorda")
+        self.assertFalse(m.jarvis.estado.adormecido)
+        self.assertEqual(m.falados[-1], "Estou acordado.")
+
+    def test_dormir_com_recap_pendente_cancela_sem_enviar(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("dorme")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        m.ouvir("sim")
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_depois_do_ctrl_c_nada_novo_e_falado(self) -> None:
+        self.addCleanup(voz.retomar_a_voz)
+        m = Montagem()
+        voz.calar_agora("Ctrl+C", definitivo=True)
+        m.ouvir("que horas são")
+        self.assertEqual(m.falados, [])
+        self.assertIn("silenciado a pedido", m.log.texto())
+
+    def test_sem_voz_so_no_ecra(self) -> None:
+        m = Montagem()
+        m.jarvis.com_voz = False
+        m.ouvir("que horas são")
+        self.assertEqual(m.falados, [])
+        self.assertIn("voz desligada; resposta so no ecra", m.log.texto())
+
+
+# --- Resposta do Claude pelo canal --------------------------------------------------
+
+
+class TestRespostaDoCanal(unittest.TestCase):
+    def test_resposta_natural_e_falada_com_a_origem(self) -> None:
+        m = Montagem([DITADO], canal=CanalFalso(resposta="Está feito, os testes passam."))
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("sim")
+        # O canal falso responde dentro de `enviar`; o real responde mais tarde.
+        self.assertIn(f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está feito, os testes passam.", m.falados)
+
+    def test_resposta_tecnica_nunca_chega_a_voz_e_fica_inteira_no_log(self) -> None:
+        tecnica = "Corri `git status --short` e alterei jarvis/app.py:\n```python\nimport os\n```"
+        m = Montagem()
+        m.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto=tecnica))
+        self.assertEqual(m.falados, [FRASE_RECURSO_SO_TECNICO])
+        self.assertIn(repr(tecnica), m.log.texto())
+
+    def test_falha_da_entrega_e_dita_e_mostra_como_retomar(self) -> None:
+        m = Montagem()
+        entrega = Entrega(projeto="atlas", caminho="headless", erro="o CLI saiu", session_id="abc-123")
+        m.jarvis._ao_responder("atlas", entrega)
+        self.assertIn("Não consegui entregar o pedido ao atlas", m.falados[-1])
+        self.assertIn("claude --resume abc-123", m.log.texto())
+
+    def test_a_dormir_a_resposta_so_fica_no_log(self) -> None:
+        m = Montagem()
+        m.jarvis.estado.adormecido = True
+        m.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Feito."))
+        self.assertEqual(m.falados, [])
+        self.assertIn("'Feito.'", m.log.texto())
+
+
+# --- Canal real, com as pecas do Claude Code falsas -------------------------------
+
+
+class _CentralFalsa:
+    def __init__(self, nomes, log=None) -> None:
+        self.nomes = list(nomes)
+        self.parada = False
+
+    def iniciar(self):
+        return self
+
+    def parar(self) -> None:
+        self.parada = True
+
+
+class _CanalDoProjetoFalso:
+    def __init__(self, sessao, central, log=None) -> None:
+        self.sessao = sessao
+        self.entregues: list[str] = []
+        self.fechado = False
+
+    def entregar(self, texto, limite_s):
+        self.entregues.append(texto)
+        return Entrega(projeto=self.sessao.nome, caminho="canal", texto="ok")
+
+    def fechar(self) -> None:
+        self.fechado = True
+
+
+class TestCanalDasSessoes(unittest.TestCase):
+    def montar(self, abrir=None):
+        self.abertas: list[str] = []
+        self.canais: list[_CanalDoProjetoFalso] = []
+
+        def abrir_falso(projeto, log=None):
+            self.abertas.append(projeto.nome)
+            return projeto
+
+        def criar_canal(sessao, central, log=None):
+            canal = _CanalDoProjetoFalso(sessao, central, log)
+            self.canais.append(canal)
+            return canal
+
+        linhas: list[str] = []
+        canal = CanalDasSessoes(
+            config_de_teste(), linhas.append, criar_central=_CentralFalsa, abrir=abrir or abrir_falso, criar_canal=criar_canal
+        ).iniciar()
+        return canal, linhas
+
+    def entregar(self, canal, projeto: str, texto: str) -> tuple[bool, list]:
+        respostas = []
+        feito = threading.Event()
+        ja_aberta = canal.enviar(projeto, texto, lambda p, e: (respostas.append((p, e)), feito.set()))
+        self.assertTrue(feito.wait(5.0))
+        return ja_aberta, respostas
+
+    def test_abre_a_sessao_uma_vez_por_projeto_e_entrega_por_ordem(self) -> None:
+        canal, _ = self.montar()
+        self.assertEqual(self.entregar(canal, "atlas", "primeiro")[0], False)
+        ja_aberta, respostas = self.entregar(canal, "atlas", "segundo")
+        self.assertTrue(ja_aberta)
+        self.assertEqual(self.abertas, ["atlas"])
+        self.assertEqual(self.canais[0].entregues, ["primeiro", "segundo"])
+        self.assertEqual(respostas[0][0], "atlas")
+        canal.fechar()
+        self.assertTrue(self.canais[0].fechado)
+
+    def test_projeto_fora_da_configuracao_e_recusado(self) -> None:
+        canal, _ = self.montar()
+        with self.assertRaises(ValueError):
+            canal.enviar("../outro", "texto", lambda *_: None)
+        self.assertEqual(self.abertas, [])
+
+    def test_falha_ao_abrir_volta_como_entrega_com_erro(self) -> None:
+        def abrir_que_falha(projeto, log=None):
+            raise OSError("claude nao encontrado")
+
+        canal, _ = self.montar(abrir=abrir_que_falha)
+        _, respostas = self.entregar(canal, "atlas", "texto")
+        self.assertIn("claude nao encontrado", respostas[0][1].erro)
+
+
+# --- Arranque, ouvido e linha de comandos --------------------------------------------
+
+
+class _MotorDeTexto(MotorBase):
+    nome = "motor-falso"
+
+    def __init__(self, texto: str = "que horas são", indisponivel: bool = False) -> None:
+        super().__init__("cpu")
+        self.texto = texto
+        self.indisponivel = indisponivel
+
+    def _carregar_modelo(self):
+        if self.indisponivel:
+            raise SttIndisponivel("motor-falso: pesos em falta")
+        return object()
+
+    def _inferir(self, modelo, pcm16, lingua):
+        return (self.texto if any(pcm16) else ""), lingua, False
+
+
+class _TeclaSolta:
+    def premida(self) -> bool:
+        return False
+
+
+class TestArranque(unittest.TestCase):
+    def test_aquece_as_pecas_ao_mesmo_tempo(self) -> None:
+        barreira = threading.Barrier(3, timeout=5.0)
         log = LogFalso()
-        config = carregar_config_tolerante(
-            Path("nao-existe-config-de-teste.toml"), log  # type: ignore[arg-type]
+        arranque = aquecer_em_paralelo(
+            {nome: (lambda: barreira.wait() or "pronto") for nome in ("transcricao", "voz", "interprete")},
+            log,
+            medir=lambda: None,
         )
-        self.assertEqual(config.projetos, ())
-        self.assertIn("AVISO: configuracao privada por carregar", log.texto())
+        self.assertEqual(arranque.erros, {}, "as tres so passam a barreira se correrem ao mesmo tempo")
+        self.assertTrue(arranque.dentro_da_meta)
+        self.assertIn("arranque | voz:", log.texto())
 
-    def test_sem_projetos_um_comando_com_projeto_vai_como_texto(self) -> None:
-        teste = JarvisDeTeste()
-        teste.frase("Abre o VS Code no exemplo-um")
-        self.assertEqual(teste.accoes, [])
-        self.assertIn("decisao=claude", teste.log.texto())
+    def test_uma_peca_que_falha_fica_no_log_e_nao_para_as_outras(self) -> None:
+        def falhar():
+            raise RuntimeError("Ollama desligado")
 
-    def test_com_projeto_conhecido_a_accao_e_local(self) -> None:
+        log = LogFalso()
+        arranque = aquecer_em_paralelo({"interprete": falhar, "voz": lambda: "ok"}, log, medir=lambda: None)
+        self.assertEqual(set(arranque.erros), {"interprete"})
+        self.assertIn("RuntimeError: Ollama desligado", log.texto())
+
+    def test_transcricao_indisponivel_sai_com_erro_legivel(self) -> None:
+        m = Montagem()
+        ouvido = construir_ouvido(
+            m.jarvis, motor=_MotorDeTexto(indisponivel=True), fonte=FonteDeSequencia([]), tecla=_TeclaSolta(), com_ativacao=False
+        )
+        self.assertEqual(app.correr(m.jarvis, ouvido, com_voz=False, medir=lambda: None), 2)
+        self.assertIn("motor-falso: pesos em falta", m.log.texto())
+
+    def test_pronto_e_cabecalho_com_a_tecla_e_as_respostas_ao_recap(self) -> None:
+        m = Montagem()
         with tempfile.TemporaryDirectory() as pasta:
-            alvo = Path(pasta) / "exemplo-um"
-            alvo.mkdir()
-            teste = JarvisDeTeste(_config_com_projeto(alvo))
-            teste.frase("Abre o VS Code no exemplo-um")
-            self.assertEqual(teste.accoes, ["abrir_vscode"])
-            self.assertEqual(teste.canais_abertos, 0)
+            caminho = Path(pasta) / "horas.wav"
+            from jarvis.audio_util import escrever_wav_pcm16
+
+            escrever_wav_pcm16(caminho, b"\x10\x20" * 16000, 16000, 1)
+            ouvido = construir_ouvido(m.jarvis, motor=_MotorDeTexto(), wavs=[caminho])
+            self.assertIsInstance(ouvido.tecla, TeclaDoFicheiro)
+            self.assertIsNone(ouvido.detetor, "em modo ficheiro nao ha maos-livres")
+            codigo = app.correr(m.jarvis, ouvido, com_voz=False, medir=lambda: None)
+        self.assertEqual(codigo, 0)
+        texto = m.log.texto()
+        self.assertIn("JARVIS PRONTO em", texto)
+        self.assertIn('"sim" envia, "nao, muda X para Y" corrige, "cancela" cancela', texto)
+        self.assertEqual(m.falados, ["São 15 horas e 30 minutos."])
+
+    def test_sem_modelo_da_palavra_de_ativacao_fica_so_a_tecla(self) -> None:
+        m = Montagem()
+
+        def sem_modelo(_modelo):
+            raise FileNotFoundError("modelo em falta")
+
+        with mock.patch("jarvis.app.DetetorOpenWakeWord", sem_modelo):
+            ouvido = construir_ouvido(m.jarvis, motor=_MotorDeTexto(), fonte=FonteDeSequencia([]), tecla=_TeclaSolta())
+        self.assertIsNone(ouvido.detetor)
+        self.assertIn("maos-livres desligadas", m.log.texto())
+
+    def test_parser(self) -> None:
+        args = construir_parser().parse_args(["--wav", "a.wav", "b.wav", "--sem-voz", "--com-som", "--sem-ativacao"])
+        self.assertEqual(args.wav, ["a.wav", "b.wav"])
+        self.assertTrue(args.sem_voz and args.com_som and args.sem_ativacao)
+        self.assertFalse(construir_parser().parse_args(["--ptt"]).wav)
+
+    def test_sem_config_segue_sem_projetos(self) -> None:
+        log = LogFalso()
+        config = carregar_config_tolerante(Path("config-que-nao-existe.toml"), log)
+        self.assertEqual(config.projetos, ())
+        self.assertIn("O jarvis segue SEM projetos", log.texto())
+
+    def test_main_liga_o_ouvido_e_o_processo_residente(self) -> None:
+        self.addCleanup(voz.retomar_a_voz)
+        log = LogFalso()
+        chamadas = []
+
+        def correr_falso(jarvis, ouvido, **kwargs):
+            chamadas.append((jarvis, ouvido, kwargs))
+            return 0
+
+        with mock.patch.object(app, "LogDaSessao", lambda *a, **k: log), mock.patch.object(
+            app, "construir_ouvido", lambda jarvis, **k: ("ouvido", k)
+        ), mock.patch.object(app, "correr", correr_falso), mock.patch.object(
+            app.atexit, "register"
+        ), mock.patch.object(app, "forcar_consola_utf8"):
+            codigo = app.main(["--config", "nao-existe.toml", "--sem-voz", "--com-som"])
+        self.assertEqual(codigo, 0)
+        jarvis, ouvido, kwargs = chamadas[0]
+        self.assertEqual(ouvido[1], {"com_som": True, "com_ativacao": True, "wavs": None})
+        self.assertFalse(kwargs["com_voz"])
+        self.assertIsNone(jarvis.canal, "sem projetos nao ha canal")
+        self.assertTrue(log.fechado)
 
 
-# --- Lingua no caminho VIVO -------------------------------------------------
+class TestRealtimeSttForaDoCaminhoVivo(unittest.TestCase):
+    def test_importar_o_jarvis_nao_importa_o_realtimestt(self) -> None:
+        codigo = "import sys, jarvis.app; print('RealtimeSTT' in sys.modules)"
+        saida = subprocess.run(
+            [sys.executable, "-c", codigo], cwd=RAIZ, capture_output=True, text=True, timeout=120, check=True
+        )
+        self.assertEqual(saida.stdout.strip(), "False")
+
+    def test_o_modulo_nao_refere_o_gravador_antigo(self) -> None:
+        fonte = (RAIZ / "jarvis" / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("AudioToTextRecorder", fonte)
+        self.assertNotIn("canal_claude", fonte, "a sessao-ponte sem ferramentas saiu do caminho vivo")
+
+    def test_python_menos_m_jarvis_e_o_mesmo_main(self) -> None:
+        texto = (RAIZ / "jarvis" / "__main__.py").read_text(encoding="utf-8")
+        self.assertIn("from jarvis.app import main", texto)
 
 
-class RecorderFalso:
-    """So os atributos que `detalhe_da_transcricao` le do RealtimeSTT."""
+class TestAtalho(unittest.TestCase):
+    """scripts/criar_atalho.py: atalho local, em pasta ignorada, sem interpolar caminhos."""
 
-    def __init__(self, lingua, probabilidade) -> None:
-        self.device = "cuda"
-        self.main_model_type = "medium"
-        self.detected_language = lingua
-        self.detected_language_probability = probabilidade
+    def setUp(self) -> None:
+        from scripts import criar_atalho
 
+        self.atalho = criar_atalho
+        pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(pasta.cleanup)
+        self.raiz = Path(pasta.name) / "repo com espaços & 'aspas'"
+        (self.raiz / ".venv" / "Scripts").mkdir(parents=True)
+        (self.raiz / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
 
-class TestLinguaNoLogDaFrase(unittest.TestCase):
-    """Cada frase do log diz lingua, probabilidade e hesitacao.
+    def test_a_pasta_do_atalho_e_ignorada_pelo_git(self) -> None:
+        saida = subprocess.run(
+            ["git", "check-ignore", "-q", str(self.atalho.PASTA_DO_ATALHO / "jarvis.lnk")], cwd=RAIZ, timeout=30
+        )
+        self.assertEqual(saida.returncode, 0, ".jarvis/atalho/ tem de estar no .gitignore")
 
-    ACHADO provado aqui: o RealtimeSTT 0.3.104 so expoe o TOP-1
-    (`detected_language`/`detected_language_probability`), por isso o caminho
-    vivo aplica o argmax restrito ao unico numero que tem — e uma terceira
-    lingua no topo continua a nao decidir nada.
-    """
+    def test_so_opcoes_da_lista_fechada(self) -> None:
+        self.assertEqual(self.atalho.argumentos_do_jarvis(["--sem-ativacao"]), ["-m", "jarvis", "--sem-ativacao"])
+        with self.assertRaises(ValueError):
+            self.atalho.argumentos_do_jarvis(["--sem-ativacao & del *"])
 
-    def test_portugues_decidido(self) -> None:
-        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.98), "que horas sao")
-        self.assertIn("lingua=pt", detalhe)
-        self.assertIn("p=0.98", detalhe)
-        self.assertIn("decidida", detalhe)
-        self.assertIn("texto: 'que horas sao'", detalhe)
+    def test_os_caminhos_vao_pelo_ambiente_e_nunca_pelo_comando(self) -> None:
+        chamadas = []
 
-    def test_ingles_decidido(self) -> None:
-        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.87), "what time is it")
-        self.assertIn("lingua=en", detalhe)
-        self.assertIn("decidida", detalhe)
+        def correr(comando, **opcoes):
+            chamadas.append((comando, opcoes))
+            Path(opcoes["env"]["JARVIS_ATALHO"]).write_bytes(b"lnk")
+            return subprocess.CompletedProcess(comando, 0, "", "")
 
-    def test_probabilidade_baixa_escreve_que_hesitou_e_porque(self) -> None:
-        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.32), "what time is it")
-        self.assertIn("lingua=en", detalhe)
-        self.assertIn("hesitou", detalhe)
-        self.assertIn("limiar", detalhe)
+        codigo = self.atalho.criar(["--com-som"], raiz=self.raiz, correr=correr, escrever=lambda _t: None)
+        self.assertEqual(codigo, 0)
+        comando, opcoes = chamadas[0]
+        self.assertNotIn("shell", opcoes)
+        self.assertFalse(any(str(self.raiz) in parte for parte in comando), "caminho colado no comando")
+        self.assertEqual(opcoes["env"]["JARVIS_PASTA"], str(self.raiz))
+        self.assertEqual(opcoes["env"]["JARVIS_ARGUMENTOS"], "-m jarvis --com-som")
+        self.assertTrue((self.raiz / ".jarvis" / "atalho" / "jarvis.lnk").is_file())
 
-    def test_terceira_lingua_no_topo_nao_decide_e_fica_marcada_no_log(self) -> None:
-        # A lingua do PRODUTO continua a ser
-        # `pt`, mas a linha de log tem de dizer que foi o espanhol a
-        # descodificar — e o caminho vivo tambem corre com language=None.
-        detalhe = detalhe_da_transcricao(RecorderFalso("es", 0.80), "que horas sao")
-        self.assertIn("lingua=pt", detalhe)
-        self.assertIn("hesitou", detalhe)
-        self.assertIn("lingua-terceira(es descodificou)", detalhe)
-        self.assertIn("descodificou o audio", detalhe)
-        self.assertNotIn("ignorado", detalhe)
+    def test_sem_lnk_fica_o_cmd_com_caminhos_relativos(self) -> None:
+        def falha(comando, **_opcoes):
+            return subprocess.CompletedProcess(comando, 1, "", "sem COM")
 
-    def test_uma_frase_normal_nao_leva_marca_de_lingua_terceira(self) -> None:
-        # Sem isto a marca nao valia nada: tem de aparecer so quando acontece.
-        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.97), "que horas sao")
-        self.assertNotIn("lingua-terceira", detalhe)
+        linhas: list[str] = []
+        self.assertEqual(self.atalho.criar([], raiz=self.raiz, correr=falha, escrever=linhas.append), 0)
+        cmd = (self.raiz / ".jarvis" / "atalho" / "jarvis.cmd").read_text(encoding="ascii")
+        self.assertIn('".venv\\Scripts\\python.exe" -m jarvis %*', cmd)
+        self.assertNotIn(":\\", cmd, "o .cmd nao leva caminhos absolutos")
+        self.assertTrue(any("usa o jarvis.cmd" in linha for linha in linhas))
 
-    def test_sem_lingua_nenhuma_continua_a_escrever_a_linha(self) -> None:
-        detalhe = detalhe_da_transcricao(RecorderFalso(None, None), "lixo")
-        self.assertIn("lingua=pt", detalhe)
-        self.assertIn("hesitou", detalhe)
-
-    def test_o_resto_da_linha_nao_mudou(self) -> None:
-        # O formato do log e o entregavel: device, modelo e prompt
-        # continuam onde estavam.
-        detalhe = detalhe_da_transcricao(RecorderFalso("pt", 0.9), "x")
-        self.assertIn("device=cuda", detalhe)
-        self.assertIn("modelo=medium", detalhe)
-        self.assertIn("prompt=desligado (D51)", detalhe)
+    def test_sem_venv_nao_escreve_nada(self) -> None:
+        (self.raiz / ".venv" / "Scripts" / "python.exe").unlink()
+        codigo = self.atalho.criar([], raiz=self.raiz, correr=lambda *a, **k: None, escrever=lambda _t: None)
+        self.assertEqual(codigo, 1)
+        self.assertFalse((self.raiz / ".jarvis").exists())
 
 
-class TestRecorderPedeDeteccaoDeLingua(unittest.TestCase):
-    """No caminho vivo, a lingua do recorder e a do produto.
+class TestExecutorLocal(unittest.TestCase):
+    """acoes_locais.executar_pedido: o que o jarvis corre depois do "sim" (ou logo, nas horas)."""
 
-    A deteccao (`language=None`) foi ligada aqui e medida; o A/B controlado
-    deu o acerto de intencao em portugues a descer (21/40 -> 20/40) e a regra
-    mandou reverter. O que este teste
-    trava e a REVERSAO: o recorder pede a lingua do produto e nao um `None`
-    solto — e pede-a pela constante, para nao haver dois sitios a dizer qual e.
-    """
+    def setUp(self) -> None:
+        pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(pasta.cleanup)
+        self.pasta = Path(pasta.name)
+        self.config = Config(microfone="x", projetos=(Projeto("atlas", self.pasta),))
 
-    def _opcoes_do_recorder(self, **kwargs) -> dict:
-        capturadas: dict = {}
+    def test_horas_e_data_na_lingua_do_jarvis(self) -> None:
+        self.assertTrue(acoes_locais.executar_pedido("horas", None, self.config).texto.startswith("São "))
+        self.assertTrue(acoes_locais.executar_pedido("horas", None, self.config, lingua="en").texto.startswith("It's "))
+        data = acoes_locais.executar_pedido("horas", None, self.config, detalhe="data", lingua="en")
+        self.assertTrue(data.texto.startswith("Today is "))
 
-        class AudioToTextRecorderFalso:
-            def __init__(self, **opcoes):
-                capturadas.update(opcoes)
+    def test_so_intencoes_locais(self) -> None:
+        for intencao in ("ditar_prompt", "lancar_run", "comprar", ""):
+            with self.subTest(intencao=intencao), self.assertRaises(acoes_locais.AcaoError):
+                acoes_locais.executar_pedido(intencao, "atlas", self.config, simular=True)
 
-        modulo = types.ModuleType("RealtimeSTT")
-        modulo.AudioToTextRecorder = AudioToTextRecorderFalso  # type: ignore[attr-defined]
-        with mock.patch.dict(sys.modules, {"RealtimeSTT": modulo}):
-            construir_recorder(
-                use_microphone=False, com_wake_word=False, device="cpu", **kwargs
-            )
-        return capturadas
+    def test_abrir_sem_projeto_ou_com_projeto_desconhecido_e_recusado(self) -> None:
+        with self.assertRaises(acoes_locais.AcaoError):
+            acoes_locais.executar_pedido("abrir_pasta", None, self.config, simular=True)
+        for nome in ("orbita", "C:/Windows", "..\\atlas"):
+            with self.subTest(nome=nome), self.assertRaises(acoes_locais.AcaoError):
+                acoes_locais.executar_pedido("abrir_pasta", nome, self.config, simular=True)
 
-    def test_language_e_a_lingua_fixa_do_produto(self) -> None:
-        opcoes = self._opcoes_do_recorder()
-        self.assertEqual(opcoes["language"], LINGUA_FIXA_DO_PRODUTO)
-        self.assertEqual(opcoes["language"], "pt")
-
-    def test_com_a_lingua_fixa_a_linha_do_log_e_curta_e_nao_inventa_numeros(self) -> None:
-        # Como o recorder do produto: `language` preenchido (nao houve deteccao
-        # nenhuma) e o `detected_language` a 1.0 e so o eco do que lhe demos.
-        recorder = RecorderFalso(LINGUA_FIXA_DO_PRODUTO, 1.0)
-        recorder.language = LINGUA_FIXA_DO_PRODUTO
-        detalhe = detalhe_da_transcricao(recorder, "que horas sao")
-        self.assertIn("lingua=pt FIXA (sem deteccao)", detalhe)
-        self.assertNotIn("p=1.00", detalhe)
-        self.assertNotIn("hesitou", detalhe)
-        # A justificacao inteira da reversao (~190 caracteres) nao se repete
-        # em cada frase: fica em `lingua_fixada().motivo` e no comentario da
-        # constante. Aqui basta a etiqueta.
-        self.assertNotIn("A/B controlado", detalhe)
-        self.assertIn("texto: 'que horas sao'", detalhe)
-
-    def test_o_mecanismo_de_deteccao_continua_ligavel_e_testado(self) -> None:
-        # A reversao desligou a deteccao no produto, nao a apagou:
-        # com um recorder sem lingua, o caminho vivo volta a ler o top-1.
-        detalhe = detalhe_da_transcricao(RecorderFalso("en", 0.93), "x")
-        self.assertIn("lingua=en p=0.93 decidida", detalhe)
-
-    def test_o_resto_da_configuracao_nao_mudou(self) -> None:
-        opcoes = self._opcoes_do_recorder()
-        self.assertIs(opcoes["use_microphone"], False)
-        self.assertEqual(opcoes["beam_size"], 5)
-        self.assertIsNone(opcoes["initial_prompt"])  # D51
+    def test_abrir_pasta_resolve_o_projeto_pela_configuracao(self) -> None:
+        resultado = acoes_locais.executar_pedido("abrir_pasta", "ATLAS", self.config, simular=True)
+        self.assertFalse(resultado.executou)
+        self.assertIn(str(self.pasta), resultado.comando)
 
 
 if __name__ == "__main__":

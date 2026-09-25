@@ -1,0 +1,28 @@
+{
+  "_comentario": "Exemplo do --settings que 'python -m jarvis.sessoes abrir <projeto>' gera em .jarvis/sessoes/<projeto>/settings.json (pasta ignorada pelo Git) e passa ao Claude Code no arranque. Nao e preciso copiar este ficheiro. So liga dois hooks: Stop (a sessao acabou) e Notification com idle_prompt ou permission_prompt (a sessao esta a espera). O hook so manda ao jarvis o tipo de evento, nunca a mensagem nem o transcript. Nada e escrito na pasta do projeto nem em ~/.claude. Os caminhos reais so existem no ficheiro gerado.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/caminho/para/jarvis/.venv/Scripts/python.exe\" \"C:/caminho/para/jarvis/jarvis/avisos.py\" \"hook\" \"--projeto\" \"exemplo-um\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt|permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/caminho/para/jarvis/.venv/Scripts/python.exe\" \"C:/caminho/para/jarvis/jarvis/avisos.py\" \"hook\" \"--projeto\" \"exemplo-um\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,177 +1,197 @@
-r"""Orquestrador do jarvis: ouve, transcreve, encaminha, age e responde.
+r"""O jarvis residente: ouve, percebe, confirma, faz e responde, num so processo.
 
-O processo de consola da D11/D30: arranca-se a mao, nao tem interface grafica,
-nao e servico do Windows, nao arranca com o sistema, e fechar a janela desliga
-o microfone E cala a voz (Ctrl+C, saida do processo e o comando "cala-te"
-passam todos pelo mesmo `jarvis.voz.calar_agora`, que mata a sintese em curso
-antes de parar a reproducao, e depois disso nada novo e falado).
+    .venv\Scripts\python -m jarvis
 
-A consola deixa obvio a olho quando esta a ouvir (o cabecalho e a linha de
-estado) e e, ao mesmo tempo, a prova: cada frase escreve um unico registo com
-timestamps e latencias, na consola E em `logs/jarvis-<data>.log`.
+arranca o processo residente. No arranque aquece, em paralelo, as tres pecas
+pesadas: a transcricao (`jarvis.stt`, pelo ouvido), a voz (`jarvis.voz`) e o
+interprete (LLM local no Ollama). Fica pronto em poucos segundos (a meta e
+<= 30 s) e escreve "PRONTO" com o tempo que levou e a VRAM livre antes e
+depois.
 
-Dois modos, o MESMO pipeline:
+O CAMINHO VIVO de cada frase:
 
-  (a) microfone ao vivo — `AudioToTextRecorder` com `use_microphone=True`,
-      `wakeword_backend="oww"` e o modelo pre-treinado `hey_jarvis`, VAD do
-      RealtimeSTT e transcricao faster-whisper no GPU;
+  ouvido      tecla de falar (segurar para falar, soltar para acabar) ou,
+              maos-livres, a palavra de ativacao seguida da frase; o VAD
+              decide o fim. Transcricao residente e quente.
+  interprete  intencao, projeto e, num ditado, o prompt reescrito claro.
+  confirmacao tudo o que tem efeito (enviar um prompt, abrir o editor ou a
+              pasta, ver o estado, ler o relatorio, lancar, retomar ou parar
+              um run) e recapitulado em voz alta e no ecra e so corre depois
+              de um "sim"; "nao, muda X para Y", "acrescenta ..." e
+              "cancela" corrigem ou cancelam. Horas/data, calar, dormir e
+              acordar correm logo.
+  executor    as accoes locais (`jarvis.acoes_locais`), o estado e os runs
+              FORJA do projeto (`jarvis.forja_voz`) ou o canal para a
+              sessao do Claude Code do projeto (`jarvis.sessoes`): o prompt
+              confirmado entra na sessao interativa do projeto pelo channel
+              MCP do jarvis, ou numa sessao headless na pasta do projeto se o
+              canal nao registar.
+  voz         a resposta falada pela voz residente, em streaming.
 
-  (b) `--wav <ficheiro>` — o mesmo `AudioToTextRecorder`, com
-      `use_microphone=False`, alimentado por `feed_audio()` com os frames do
-      WAV ao ritmo real (prova sem microfone humano).
+Conversa (`jarvis.conversa`): quando a resposta do Claude acaba numa pergunta,
+abre-se uma janela de escuta de 8 s sem palavra de ativacao; o que o
+utilizador disser vai tal e qual para a confirmacao rapida e so um "sim" o
+envia. "sai da conversa" ou 8 s sem resposta fecham a janela.
 
-AS CINCO ETAPAS, o que cada uma mede e de onde vem o tempo:
+Avisos (`jarvis.avisos`): a sessao de um projeto acabou ou esta a espera do
+utilizador (hooks do Claude Code, pelo IPC do canal), ou um run FORJA terminou
+ou bloqueou (sondagem de `core status`). Cada aviso e uma frase fixa com o
+nome do projeto, dita quando o jarvis esta livre, nunca por cima de ninguem.
 
-  1/5 palavra de ativacao — openWakeWord (modelo `hey_jarvis`). Ao vivo e
-      a porta do RealtimeSTT (`on_wakeword_detected`). No modo ficheiro ver
-      "PORTA DA PALAVRA DE ATIVACAO" mais abaixo.
-  2/5 transcricao — faster-whisper `medium` (`--modelo` troca-o), medida do FIM
-      DA FALA (VAD a fechar a frase) ate o texto existir, que e a latencia que
-      o utilizador sente.
-  3/5 encaminhamento — `jarvis.router.encaminhar`, determinista.
-  4/5 accao local ou entrega ao Claude Code pelo canal (`jarvis.canal_claude`).
-  5/5 resposta falada — `jarvis.voz.falar` (Piper pt-PT), com o recuo
-      documentado para texto na consola se a voz falhar.
+A consola mostra sempre o estado atual numa linha propria (A OUVIR, A PENSAR,
+A ESPERA DE CONFIRMACAO, A FALAR, A DORMIR) e cada frase escreve o seu
+registo com timestamps e a latencia de cada etapa, na consola e em
+`logs/jarvis-<data>.log` (pasta ignorada pelo Git). Duas medidas ficam em
+cada frase: o primeiro sinal de vida (fim da fala -> linha A PENSAR, com o
+texto ja transcrito) e o inicio da resposta falada (fim da fala -> primeiro
+bloco de audio da resposta ou do recap).
 
-Mais a latencia TOTAL e, sempre que uma frase e descartada sem accao, uma
-linha explicita `FALSO DESPERTAR DESCARTADO`: um falso despertar nunca
-executa uma accao nem gasta um token.
+Silencio: Ctrl+C, fechar a janela e "cala-te" passam todos por
+`jarvis.voz.calar_agora`. "cala-te" dito por cima da voz cala-a logo que a
+frase e transcrita, sem esperar pela vez dela.
 
-PORTA DA PALAVRA DE ATIVACAO NO MODO FICHEIRO. O backend `oww` deteta mesmo a
-partir de ficheiro — esta provado neste repositorio com um WAV que comeca por
-"hey jarvis" (`--exigir-wake-word`). Mas os WAV de prova
-(`audio/t-horas.wav`, `audio/t-ruido.wav`) nao trazem palavra de ativacao
-nenhuma, por isso o modo `--wav` corre por omissao com a porta ABERTA e injeta
-a partir da etapa 2. Nao se finge a
-etapa 1: o MESMO modelo openWakeWord corre sobre os MESMOS frames em paralelo
-(`MonitorWakeWord`) e a etapa 1 regista o que ele mediu de facto — o instante
-da deteccao, ou o score maximo que o ficheiro atingiu e a razao de nao ter
-disparado. Com `--exigir-wake-word` a porta fecha-se e o pipeline so transcreve
-depois de a palavra de ativacao disparar, como ao vivo.
-
-O QUE ESTE PROCESSO NUNCA FAZ: nao liga o microfone sem o utilizador o arrancar;
-nao poe texto vindo do microfone, de ficheiro ou da configuracao numa
-linha de comandos do Windows (as accoes locais recebem caminhos ja
-resolvidos da config e a frase vai ao Claude Code por stdin em JSON); nao liga
-o `initial_prompt` da transcricao, que fica DESLIGADO no caminho vivo e cujo
-estado aparece no log de cada frase; e nao envia nada para fora do PC
-alem da frase que o router mandar ao Claude Code pelo canal ja decidido.
+Nada disto envia texto para fora do PC antes do "sim": o interprete corre no
+Ollama local e o canal so recebe o prompt que o utilizador confirmou.
 
 Uso:
 
-    .venv\Scripts\python -m jarvis.app                          # microfone
-    .venv\Scripts\python -m jarvis.app --wav audio/t-horas.wav  # ficheiro
-    .venv\Scripts\python -m jarvis.app --wav audio/x.wav --exigir-wake-word
-    .venv\Scripts\python -m jarvis.app --prova-wake-word audio/x.wav
-    .venv\Scripts\python -m jarvis.app --autoteste
+    .venv\Scripts\python -m jarvis                       # microfone, tecla e palavra de ativacao
+    .venv\Scripts\python -m jarvis --sem-ativacao        # so a tecla de falar
+    .venv\Scripts\python -m jarvis --com-som             # bip no inicio e no fim da escuta
+    .venv\Scripts\python -m jarvis --sem-voz             # respostas so na consola
+    .venv\Scripts\python -m jarvis --wav a.wav b.wav     # ficheiros em vez do microfone
+    .venv\Scripts\python -m jarvis --autoteste
+
+Com `--wav` cada ficheiro faz de uma frase dita com a tecla premida; o
+seguinte so entra depois de a frase anterior estar tratada (como alguem que
+ouve o recap e responde). Neste modo a voz so toca com `--com-som`.
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
-import contextlib
 import datetime
-import logging
-import multiprocessing
+import queue
 import signal
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Protocol
 
-from jarvis import acoes_locais, canal_claude, voz
-from jarvis.audio_util import (
-    PASTA_MODELOS_FASTER_WHISPER,
-    RAIZ,
-    garantir_pasta,
-    ler_wav_pcm16,
-    reamostrar_pcm16,
-    registar_dlls_do_torch,
-)
+from jarvis import acoes_locais, conversa, voz
+from jarvis.audio_util import RAIZ, garantir_pasta
+from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
+from jarvis.confirmacao import Confirmacao, Desfecho, Pedido
 from jarvis.consola import forcar_consola_utf8
-from jarvis.lingua import (
-    LINGUA_FIXA_DO_PRODUTO,
-    decidir_lingua_do_top1,
-    lingua_fixada,
+from jarvis.forja_voz import INTENCOES_POR_VOZ, ForjaPorVoz
+from jarvis.interprete import Interpretacao, Interprete, medir_vram
+from jarvis.ouvido import (
+    BYTES_POR_CHUNK,
+    DURACAO_DO_CHUNK_S,
+    GATILHO_JANELA,
+    GATILHO_TECLA,
+    PALAVRAS_DE_ATIVACAO,
+    DetetorOpenWakeWord,
+    Frase,
+    MicrofonePyAudio,
+    Ouvido,
+    TeclaDoFicheiro,
+    TeclaWindows,
+    VadWebRtc,
+    chunks_do_pcm,
+    modelo_de_ativacao,
+    palavra_de_ativacao,
+    pcm_do_wav,
 )
 from jarvis.resposta_falada import (
     FRASE_RECURSO_SEM_CORTE_SEGURO,
     MAXIMO_ABSOLUTO_FALADO,
-    MAXIMO_CARACTERES_FALADOS,
-    PREFIXO_DA_RESPOSTA_DO_CLAUDE,
     cortar_no_limite,
     resumo_falado,
 )
-from jarvis.router import ResultadoRouter, encaminhar
+from jarvis.router import encaminhar
+from jarvis.stt import MotorIndisponivel, criar_motor
 
-# --- Constantes do envelope (nada configuravel por texto vindo de fora) -----
+# --- Constantes ---------------------------------------------------------------
 
 #: Pasta dos logs. Ja esta no .gitignore (`logs/`): nenhuma transcricao entra
 #: no repositorio publico.
 PASTA_LOGS = RAIZ / "logs"
 
-#: Modelos do openWakeWord descarregados para models/ (ver docs/MODELOS.md).
-PASTA_MODELOS_OWW = RAIZ / "models" / "openwakeword"
-MODELO_WAKE_WORD = PASTA_MODELOS_OWW / "hey_jarvis_v0.1.onnx"
-MODELO_MELSPEC = PASTA_MODELOS_OWW / "melspectrogram.onnx"
-MODELO_EMBEDDING = PASTA_MODELOS_OWW / "embedding_model.onnx"
+#: Meta do arranque: do inicio do processo a "PRONTO".
+LIMITE_DO_ARRANQUE_S = 30.0
 
-#: Limiar do openWakeWord. O mesmo valor e dado ao RealtimeSTT
-#: (`wake_words_sensitivity`) e ao monitor, para os dois caminhos decidirem
-#: pelo mesmo numero.
-SENSIBILIDADE_WAKE_WORD = 0.6
+#: Frases ja transcritas a espera de vez. Cheia, a frase nova e descartada
+#: com uma linha no log (nunca cresce sem limite).
+FRASES_EM_ESPERA = 4
 
-#: Transcricao: `medium` por omissao. A lista e FECHADA pela mesma
-#: razao de scripts/transcrever_ficheiro.py: sem ela, `--modelo alguem/repo-mau`
-#: mandava o faster-whisper descarregar pesos arbitrarios do Hugging Face para
-#: models/, fora do registo de docs/MODELOS.md.
-#:
-#: `large-v3-turbo` entrou na lista para poder ser MEDIDO contra
-#: o `medium` nas quatro combinacoes (pt/en, com/sem prefixo). Entrar na lista fechada nao e
-#: adocao: o default continua a ser decidido pelos numeros (ver docs/MODELOS.md).
-MODELO_STT = "medium"
-MODELOS_STT_PERMITIDOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
-
-#: D51: o initial_prompt fica DESLIGADO no caminho vivo e o estado do prompt
-#: aparece no log de cada frase. Mesmos rotulos de scripts/transcrever_ficheiro.py.
-INITIAL_PROMPT = None
-ESTADO_PROMPT_DESLIGADO = "desligado"
-
-TAXA_AMOSTRAGEM = 16_000
-#: 512 amostras por chunk = 1024 bytes, o `buffer_size` do RealtimeSTT.
-BYTES_POR_CHUNK = 1024
-#: Cauda de silencio injetada depois do ficheiro, para o VAD fechar a frase.
-SILENCIO_DEPOIS_DO_FICHEIRO_S = 1.5
-#: Tempo que o modo ficheiro ainda espera pela transcricao depois de alimentar
-#: tudo. Esgotado, a frase e abortada e o log escreve o falso despertar.
-ESPERA_MAXIMA_DEPOIS_DO_FICHEIRO_S = 8.0
-# O contrato do que chega a voz (limites, prefixo de origem, filtro por exclusao
-# e frases de recurso) vive em jarvis/resposta_falada.py: a sessao
-# filha do Claude Code corre sem ferramentas e pode alucinar que as usou, por
-# isso o log leva a resposta INTEIRA em bruto e a voz so o que passa o filtro.
-# Este modulo importa de la e nao define limites proprios.
-
-#: Limite por frase entregue ao Claude Code.
-LIMITE_CLAUDE_S = 120.0
-
-#: As tres accoes da lista branca da D4 que sao ESTADO DESTE PROCESSO e nao
-#: accoes do sistema: o `jarvis.acoes_locais.executar()` recusa-as de proposito
-#: (nao ha processo vivo nenhum numa biblioteca) e sao tratadas aqui.
-ACOES_DE_ESTADO = frozenset({"calar", "adormecer", "acordar"})
+#: Modo ficheiro: quanto tempo se espera que a frase anterior fique tratada
+#: antes de entregar o ficheiro seguinte.
+ESPERA_ENTRE_FICHEIROS_S = 60.0
+#: Silencio depois de cada ficheiro: a tecla simulada solta-se aqui.
+SILENCIO_DEPOIS_DO_FICHEIRO_S = 0.3
 
 NOMES_DAS_ETAPAS = {
-    1: "1/5 palavra de ativacao",
+    1: "1/5 ouvido               ",
     2: "2/5 transcricao          ",
-    3: "3/5 encaminhamento       ",
-    4: "4/5 accao/entrega        ",
-    5: "5/5 resposta falada      ",
+    3: "3/5 interprete           ",
+    4: "4/5 confirmacao/accao    ",
+    5: "5/5 voz                  ",
 }
 
 LARGURA_DA_SEPARACAO = 78
+
+# Estados mostrados na consola.
+A_OUVIR = "A OUVIR"
+A_PENSAR = "A PENSAR"
+A_ESPERA = "À ESPERA DE CONFIRMAÇÃO"
+A_FALAR = "A FALAR"
+A_DORMIR = "A DORMIR"
+A_CONVERSA = "EM CONVERSA"
+
+#: Intencoes sobre o estado e os runs FORJA de um projeto (`jarvis.forja_voz`).
+INTENCOES_DA_FORJA = frozenset(INTENCOES_POR_VOZ)
+
+#: Intencoes que acabam num prompt entregue a sessao do Claude Code.
+INTENCOES_DO_CANAL = frozenset({"ditar_prompt", "conversa"})
+
+#: Accoes da lista branca que passam a frente de um recap pendente: calar e
+#: dormir nunca sao lidas como resposta ao recap.
+ACOES_QUE_PASSAM_A_FRENTE = {"calar": "calar", "adormecer": "dormir", "acordar": "acordar"}
+
+_TEXTOS = {
+    "pt": {
+        "calado": "Fico calado.",
+        "dormir": "Vou dormir. Diz acorda quando precisares.",
+        "acordado": "Estou acordado.",
+        "enviado": "Enviado para o {projeto}.",
+        "a_abrir": "Vou abrir a sessão do {projeto}. Aceita o aviso na janela nova e o pedido segue.",
+        "sem_forja": "O estado e os runs da FORJA não estão disponíveis. Não fiz nada.",
+        "conversa_sem_projeto": "Diz em que projeto é a conversa.",
+        "sem_canal": "O canal para o Claude Code não está disponível. Não enviei nada.",
+        "sem_resposta": "Não recebi resposta do {projeto}. Os detalhes estão no ecrã.",
+        "conversa_fim": "Saí da conversa.",
+    },
+    "en": {
+        "calado": "I'll be quiet.",
+        "dormir": "Going to sleep. Say wake up when you need me.",
+        "acordado": "I'm awake.",
+        "enviado": "Sent to {projeto}.",
+        "a_abrir": "Opening the {projeto} session. Accept the notice in the new window and the request follows.",
+        "sem_forja": "Project status and FORJA runs are not available. I did nothing.",
+        "conversa_sem_projeto": "Tell me which project the conversation is for.",
+        "sem_canal": "The Claude Code channel is not available. Nothing was sent.",
+        "sem_resposta": "I got no answer from {projeto}. The details are on screen.",
+        "conversa_fim": "Left the conversation.",
+    },
+}
+
+
+# --- Log ------------------------------------------------------------------------
 
 
 def agora_iso(quando: datetime.datetime | None = None) -> str:
@@ -183,9 +203,8 @@ def agora_iso(quando: datetime.datetime | None = None) -> str:
 def texto_para_a_consola(texto: str, codificacao: str | None = None) -> str:
     """O mesmo texto, garantidamente imprimivel na consola em uso.
 
-    Mesma convencao (e mesma razao) de scripts/transcrever_ficheiro.py: perder
-    um acento na consola e mau, perder o registo da frase por causa dele e
-    pior. O ficheiro de log fica sempre em UTF-8, com os acentos intactos.
+    Perder um acento na consola e mau, perder o registo da frase por causa
+    dele e pior. O ficheiro de log fica sempre em UTF-8, com os acentos intactos.
     """
     codificacao = codificacao or getattr(sys.stdout, "encoding", None) or "utf-8"
     try:
@@ -204,9 +223,8 @@ def caminho_do_log(quando: datetime.datetime | None = None, pasta: Path = PASTA_
 class LogDaSessao:
     """O log unico: a mesma linha na consola E no ficheiro do dia.
 
-    Seguro entre threads de proposito: as callbacks do RealtimeSTT (palavra de
-    ativacao, inicio e fim da fala) correm na thread do gravador, e o resto do
-    pipeline na thread principal.
+    Seguro entre threads: o ouvido, o tratamento das frases, o canal e a
+    thread principal escrevem todos aqui.
     """
 
     def __init__(
@@ -219,15 +237,9 @@ class LogDaSessao:
         self.caminho = caminho_do_log(quando, pasta)
         self.consola = consola if consola is not None else sys.stdout
         self._relogio_de_parede = relogio_de_parede
-        # RLock, nao Lock (achado de revisao de seguranca): um
-        # SIGINT corre na thread principal entre bytecodes: se cair enquanto
-        # essa mesma thread esta dentro de `_escrever` (a tranca ja detida),
-        # `ao_ctrl_c` -> `Jarvis.calar_agora` -> `voz.calar_agora` volta a
-        # chamar `log.linha`/`_escrever` NA MESMA thread antes de matar o
-        # piper.exe. Com `threading.Lock` isso e um deadlock (a tranca nao
-        # sabe quem e o dono); com `RLock` a mesma thread reentra sem
-        # bloquear. So protege a escrita (consola+ficheiro); nunca fica presa
-        # a espera doutra thread.
+        # RLock, nao Lock: um Ctrl+C corre na thread principal entre bytecodes
+        # e o handler volta a escrever aqui (para calar a voz) na MESMA thread
+        # que pode ja estar dentro de `_escrever`. Com Lock era um deadlock.
         self._tranca = threading.RLock()
         garantir_pasta(self.caminho.parent)
         self._ficheiro = self.caminho.open("a", encoding="utf-8")
@@ -245,8 +257,9 @@ class LogDaSessao:
     def _escrever(self, texto: str) -> None:
         with self._tranca:
             print(texto_para_a_consola(texto), file=self.consola, flush=True)
-            self._ficheiro.write(texto + "\n")
-            self._ficheiro.flush()
+            if not self._ficheiro.closed:
+                self._ficheiro.write(texto + "\n")
+                self._ficheiro.flush()
 
     def fechar(self) -> None:
         with self._tranca:
@@ -273,10 +286,10 @@ class Marca:
 
 @dataclass
 class RegistoDaFrase:
-    """O registo unico de uma frase: cinco etapas, latencias e total.
+    """O registo de uma frase: etapas com latencias, notas e o total.
 
-    As latencias sao calculadas a partir de um relogio monotonico injetavel
-    (`relogio`), por isso o formato e a aritmetica testam-se sem audio nenhum.
+    Cada etapa mede desde a anterior (ou desde `desde`). O relogio e
+    injetavel, por isso o formato e a aritmetica testam-se sem audio.
     """
 
     numero: int
@@ -284,11 +297,10 @@ class RegistoDaFrase:
     relogio: Callable[[], float] = time.perf_counter
     inicio: float = field(default=0.0)
     marcas: list[Marca] = field(default_factory=list)
-    #: Instante em que o VAD fechou a frase. E a referencia da etapa 2 e da
-    #: latencia total que o utilizador sente.
+    #: Tecla solta ou VAD a fechar a frase: a referencia das latencias que o
+    #: utilizador sente.
     fim_da_fala: float | None = None
     inicio_da_fala: float | None = None
-    descartada: bool = False
     fechada: bool = False
     _referencia: float = field(default=0.0)
 
@@ -297,12 +309,8 @@ class RegistoDaFrase:
             self.inicio = self.relogio()
         self._referencia = self.inicio
 
-    def reiniciar_relogio(self) -> None:
-        """Poe o inicio da frase agora (depois de carregar modelos, por ex.)."""
-        self.inicio = self.relogio()
-        self._referencia = self.inicio
-
-    # -- marcacao das etapas
+    def tem_etapa(self, etapa: int) -> bool:
+        return any(marca.etapa == etapa for marca in self.marcas)
 
     def marcar(
         self, etapa: int, detalhe: str, desde: float | None = None, instante: float | None = None
@@ -320,36 +328,22 @@ class RegistoDaFrase:
         self._emitir(formatar_etapa(self.numero, etapa, marca.latencia_ms, detalhe))
         return marca
 
-    def marcar_inicio_da_fala(self) -> None:
-        self.inicio_da_fala = self.relogio()
-
-    def marcar_fim_da_fala(self) -> None:
-        self.fim_da_fala = self.relogio()
-
     def nota(self, texto: str) -> None:
-        """Uma linha do registo desta frase que nao e uma das cinco etapas."""
+        """Uma linha do registo desta frase que nao e uma etapa."""
         self._emitir(f"frase #{self.numero} | {texto}")
 
-    def descartar(self, motivo: str) -> None:
-        """A linha explicita da D5/D6: um falso despertar que nao fez nada."""
-        self.descartada = True
-        self._emitir(
-            f"frase #{self.numero} | FALSO DESPERTAR DESCARTADO | {motivo} "
-            "| nenhuma accao executada, nada enviado ao Claude Code (D5/D6)"
-        )
-
     def fechar(self, resultado: str) -> str:
-        """A linha final: latencia total, pelas duas referencias que importam."""
+        """A linha final: latencia total, desde o inicio da escuta e desde o fim da fala."""
         self.fechada = True
         agora = self.relogio()
-        total_desde_o_inicio = (agora - self.inicio) * 1000
+        total = (agora - self.inicio) * 1000
         if self.fim_da_fala is not None:
             desde_a_fala = f"{(agora - self.fim_da_fala) * 1000:.0f} ms desde o fim da fala"
         else:
             desde_a_fala = "sem fala detetada"
         linha = (
-            f"frase #{self.numero} | TOTAL | {total_desde_o_inicio:7.0f} ms "
-            f"desde o inicio da escuta | {desde_a_fala} | {resultado}"
+            f"frase #{self.numero} | TOTAL | {total:7.0f} ms desde o inicio da escuta "
+            f"| {desde_a_fala} | {resultado}"
         )
         self._emitir(linha)
         self._emitir("-" * LARGURA_DA_SEPARACAO)
@@ -360,1013 +354,1129 @@ class RegistoDaFrase:
             self.log.linha(texto)
 
 
-# --- Palavra de ativacao: o mesmo modelo, fora da porta do RealtimeSTT ------
+# --- Estado na consola -----------------------------------------------------------
 
 
-class MonitorWakeWord:
-    """Corre o modelo openWakeWord sobre os frames, sem gatilho nenhum.
+def _titulo_da_consola(texto: str) -> None:
+    """Poe o estado no titulo da janela (so Windows; falhar nao importa)."""
+    try:
+        import ctypes
 
-    Existe para a etapa 1 do modo ficheiro ser uma MEDIDA e nao uma suposicao:
-    quando a porta do RealtimeSTT esta aberta (o WAV nao tem palavra de
-    ativacao), o mesmo `hey_jarvis` corre sobre os mesmos frames e diz o que
-    viu — o instante em que disparou, ou o score maximo que o ficheiro atingiu.
+        ctypes.windll.kernel32.SetConsoleTitleW(texto)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - o titulo e um extra, nunca um erro
+        pass
+
+
+class Painel:
+    """O estado atual do jarvis: uma linha na consola a cada mudanca."""
+
+    def __init__(self, escrever: Callable[[str], object], *, titulo: bool = False) -> None:
+        self._escrever = escrever
+        self._titulo = titulo
+        self._tranca = threading.Lock()
+        self.atual: str | None = None
+        self.historico: list[str] = []
+
+    def mudar(self, estado: str, detalhe: str = "") -> None:
+        with self._tranca:
+            if estado == self.atual and not detalhe:
+                return
+            self.atual = estado
+            self.historico.append(estado)
+        self._escrever(f"estado | {estado}" + (f" | {detalhe}" if detalhe else ""))
+        if self._titulo:
+            _titulo_da_consola(f"jarvis - {estado.lower()}")
+
+
+# --- Modo ficheiro: varios WAV, um de cada vez ----------------------------------
+
+
+class FonteDeSequencia:
+    """Varios PCM seguidos, cada um "dito com a tecla premida", um de cada vez.
+
+    Entre ficheiros entrega silencio (a tecla solta) e so passa ao seguinte
+    quando `pronto(n)` diz que as `n` frases ja entregues estao tratadas, ou ao
+    fim de `espera_maxima_s`. Depois do ultimo, espera do mesmo modo e acaba.
+    `dentro_do_audio` e o que a `TeclaDoFicheiro` usa para segurar a tecla.
     """
 
     def __init__(
         self,
-        modelo: Path = MODELO_WAKE_WORD,
-        sensibilidade: float = SENSIBILIDADE_WAKE_WORD,
-        relogio: Callable[[], float] = time.perf_counter,
+        pcms: Iterable[bytes],
+        *,
+        pronto: Callable[[int], bool] = lambda _n: True,
+        ritmo_real: bool = False,
+        silencio_depois_s: float = SILENCIO_DEPOIS_DO_FICHEIRO_S,
+        espera_maxima_s: float = ESPERA_ENTRE_FICHEIROS_S,
+        descricao: str = "ficheiros",
+        avisar: Callable[[str], object] | None = None,
+        dormir: Callable[[float], None] = time.sleep,
+        relogio: Callable[[], float] = time.monotonic,
     ) -> None:
-        for ficheiro in (modelo, MODELO_MELSPEC, MODELO_EMBEDDING):
-            if not ficheiro.is_file():
-                raise FileNotFoundError(
-                    f"modelo do openWakeWord em falta: '{ficheiro}'. Descarregar com: "
-                    '.venv\\Scripts\\python -c "import openwakeword.utils as u; '
-                    "u.download_models(['hey_jarvis'], target_directory='models/openwakeword')\""
-                )
-        import numpy as np
-        from openwakeword.model import Model
+        self._ficheiros = [chunks_do_pcm(pcm) for pcm in pcms]
+        self._pronto = pronto
+        self._ritmo_real = ritmo_real
+        self._silencio = max(1, round(silencio_depois_s / DURACAO_DO_CHUNK_S))
+        self._espera_maxima_s = espera_maxima_s
+        self._avisar = avisar
+        self._dormir = dormir
+        self._relogio = relogio
+        self.descricao = descricao
+        self.dentro_do_audio = False
+        self._indice = 0
+        self._posicao = 0
+        self._silencio_dado = 0
+        self._espera_desde: float | None = None
 
-        self._np = np
-        self.sensibilidade = sensibilidade
-        self.relogio = relogio
-        self.modelo = Model(
-            wakeword_models=[str(modelo)],
-            inference_framework="onnx",
-            melspec_model_path=str(MODELO_MELSPEC),
-            embedding_model_path=str(MODELO_EMBEDDING),
-        )
-        self.score_maximo = 0.0
-        self.instante_da_deteccao: float | None = None
+    def abrir(self) -> None:
+        self._indice = self._posicao = self._silencio_dado = 0
+        self._espera_desde = None
 
-    @property
-    def detetou(self) -> bool:
-        return self.instante_da_deteccao is not None
+    def _silencio_chunk(self) -> bytes:
+        self.dentro_do_audio = False
+        return b"\x00" * BYTES_POR_CHUNK
 
-    def processar(self, chunk: bytes) -> float:
-        """Alimenta um chunk PCM16 mono de 16 kHz. Devolve o score desse chunk."""
-        pcm = self._np.frombuffer(chunk, dtype=self._np.int16)
-        if pcm.size == 0:
-            return 0.0
-        previsao = self.modelo.predict(pcm)
-        score = max(previsao.values()) if previsao else 0.0
-        self.score_maximo = max(self.score_maximo, float(score))
-        if score >= self.sensibilidade and self.instante_da_deteccao is None:
-            self.instante_da_deteccao = self.relogio()
-        return float(score)
+    def ler(self) -> bytes | None:
+        if self._indice < len(self._ficheiros):
+            chunks = self._ficheiros[self._indice]
+            if self._posicao < len(chunks):
+                if self._ritmo_real:
+                    self._dormir(DURACAO_DO_CHUNK_S)
+                chunk = chunks[self._posicao]
+                self._posicao += 1
+                self.dentro_do_audio = True
+                return chunk
+        if self._silencio_dado < self._silencio:
+            self._silencio_dado += 1
+            if self._ritmo_real:
+                self._dormir(DURACAO_DO_CHUNK_S)
+            return self._silencio_chunk()
+        # A espera pela frase anterior: silencio ao ritmo real, sem girar a vazio.
+        entregues = min(self._indice + 1, len(self._ficheiros))
+        if self._espera_desde is None:
+            self._espera_desde = self._relogio()
+        esgotada = self._relogio() - self._espera_desde >= self._espera_maxima_s
+        if not self._pronto(entregues) and not esgotada:
+            self._dormir(DURACAO_DO_CHUNK_S)
+            return self._silencio_chunk()
+        if esgotada and self._avisar is not None:
+            self._avisar(
+                f"modo ficheiro | a frase do ficheiro {entregues} nao ficou tratada em "
+                f"{self._espera_maxima_s:.0f} s; a seguir sem ela"
+            )
+        self._espera_desde = None
+        self._indice += 1
+        self._posicao = self._silencio_dado = 0
+        if self._indice >= len(self._ficheiros):
+            self.dentro_do_audio = False
+            return None
+        return self._silencio_chunk()
 
-
-def prova_da_wake_word(caminho: Path, sensibilidade: float = SENSIBILIDADE_WAKE_WORD) -> dict:
-    """Corre o openWakeWord DIRETAMENTE sobre um WAV e devolve o que mediu.
-
-    E a prova a parte da etapa 1 quando o WAV do
-    pipeline nao tem palavra de ativacao: mesmo modelo, mesmo limiar, um
-    ficheiro que comeca por "hey jarvis".
-    """
-    monitor = MonitorWakeWord(sensibilidade=sensibilidade)
-    scores: list[float] = []
-    for chunk in frames_do_wav(caminho):
-        scores.append(monitor.processar(chunk))
-    return {
-        "ficheiro": str(caminho),
-        "chunks": len(scores),
-        "score_maximo": monitor.score_maximo,
-        "sensibilidade": sensibilidade,
-        "detetou": monitor.detetou,
-        "chunks_acima_do_limiar": sum(1 for s in scores if s >= sensibilidade),
-    }
-
-
-# --- Injeccao de ficheiro: os frames do WAV no MESMO pipeline ----------
-
-
-def frames_do_wav(
-    caminho: Path, bytes_por_chunk: int = BYTES_POR_CHUNK
-) -> Iterator[bytes]:
-    """Frames PCM16 mono de 16 kHz, do tamanho que o RealtimeSTT consome.
-
-    Aceita qualquer WAV PCM de 16 bits: reamostra para 16 kHz e junta os canais
-    quando preciso (os WAV de prova ja sao mono/16 kHz, mas um WAV gravado pelo
-    microfone do utilizador pode nao ser). O ultimo chunk e completado com
-    silencio para todos terem o mesmo tamanho — o `feed_audio` do RealtimeSTT
-    so entrega ao pipeline buffers completos.
-    """
-    dados, taxa, canais = ler_wav_pcm16(caminho)
-    if canais not in (1, 2):
-        raise ValueError(f"{caminho}: esperava 1 ou 2 canais, encontrei {canais}")
-    if canais == 2:
-        import audioop  # stdlib; aviso de depreciacao esperado em 3.12+
-
-        dados = audioop.tomono(dados, 2, 0.5, 0.5)
-    dados = reamostrar_pcm16(dados, taxa, TAXA_AMOSTRAGEM, canais=1)
-    if not dados:
-        return
-    for inicio in range(0, len(dados), bytes_por_chunk):
-        chunk = dados[inicio : inicio + bytes_por_chunk]
-        if len(chunk) < bytes_por_chunk:
-            chunk = chunk + b"\x00" * (bytes_por_chunk - len(chunk))
-        yield chunk
+    def fechar(self) -> None:
+        pass
 
 
-def chunks_de_silencio(segundos: float, bytes_por_chunk: int = BYTES_POR_CHUNK) -> Iterator[bytes]:
-    """Silencio digital, para o VAD fechar a frase depois do ficheiro."""
-    amostras = int(segundos * TAXA_AMOSTRAGEM)
-    total = amostras * 2
-    for _ in range(max(total // bytes_por_chunk, 0)):
-        yield b"\x00" * bytes_por_chunk
+# --- Canal para as sessoes do Claude Code ----------------------------------------
 
 
-def duracao_do_chunk_s(bytes_por_chunk: int = BYTES_POR_CHUNK) -> float:
-    """Quanto tempo de audio cabe num chunk (PCM16 mono a 16 kHz)."""
-    return bytes_por_chunk / 2 / TAXA_AMOSTRAGEM
+class CanalParaSessoes(Protocol):
+    """Entrega um prompt confirmado a sessao de um projeto da configuracao."""
+
+    def enviar(self, projeto: str, texto: str, ao_responder: Callable[[str, object], None]) -> bool:
+        """Envia em segundo plano; devolve True se a sessao do projeto ja estava aberta."""
+
+    def fechar(self) -> None: ...
 
 
-# --- O processo -------------------------------------------------------------
+class CanalDasSessoes:
+    """O canal real: sessao interativa do projeto com o channel MCP do jarvis.
 
-
-@dataclass
-class EstadoDoProcesso:
-    """O que so existe enquanto o jarvis esta a correr.
-
-    `jarvis.acoes_locais.executar()` recusa `calar`, `adormecer` e `acordar` de
-    proposito: uma biblioteca sem processo vivo nao tem nada para calar nem
-    para adormecer. Quem as executa e este processo.
-    """
-
-    adormecido: bool = False
-    mudo: bool = False
-
-
-class Jarvis:
-    """Cola as pecas das tasks anteriores e escreve o registo de cada frase.
-
-    As dependencias entram pelo construtor (`falar`, `executar`, `abrir_canal`)
-    para os testes correrem a cadeia inteira sem Piper, sem VS Code e sem
-    Claude Code — o default de cada uma e a peca real.
+    A primeira entrega a um projeto abre a sessao numa janela nova (o
+    utilizador aceita o aviso do Claude Code nessa janela); se o canal nao
+    registar, os prompts vao para uma sessao headless na pasta do projeto.
+    Cada entrega corre numa thread propria, por ordem dentro de cada projeto,
+    e o resultado volta por `ao_responder(projeto, entrega)`.
     """
 
     def __init__(
         self,
         config: Config,
-        log: LogDaSessao,
+        escrever: Callable[[str], object],
         *,
-        estado: EstadoDoProcesso | None = None,
-        falar: Callable[..., voz.ResultadoFala] = voz.falar,
-        executar: Callable[..., acoes_locais.ResultadoAcao] = acoes_locais.executar,
-        abrir_canal: Callable[[], object] = canal_claude.abrir_canal,
-        com_voz: bool = True,
+        criar_central: Callable[..., object] | None = None,
+        abrir: Callable[..., object] | None = None,
+        criar_canal: Callable[..., object] | None = None,
+        limite_s: float | None = None,
+        ao_evento: Callable[[str, str, str], object] | None = None,
+    ) -> None:
+        from jarvis import sessoes
+
+        self._sessoes = sessoes
+        self.config = config
+        self._escrever = escrever
+        self._criar_central = criar_central or sessoes.CentralDoCanal
+        self._abrir = abrir or sessoes.abrir_sessao
+        self._criar_canal = criar_canal or sessoes.CanalDoProjeto
+        self.limite_s = sessoes.ESPERA_DA_RESPOSTA_S if limite_s is None else limite_s
+        self._ao_evento = ao_evento
+        self.central = None
+        self._canais: dict[str, object] = {}
+        self._trancas: dict[str, threading.Lock] = {}
+        self._tranca = threading.Lock()
+
+    def _registar(self, texto: str) -> None:
+        self._escrever(f"canal | {texto}")
+
+    def iniciar(self) -> "CanalDasSessoes":
+        nomes = [projeto.nome for projeto in self.config.projetos]
+        if nomes and self.central is None:
+            extra = {} if self._ao_evento is None else {"ao_evento": self._ao_evento}
+            self.central = self._criar_central(nomes, log=self._registar, **extra).iniciar()
+        return self
+
+    def aberta(self, projeto: str) -> bool:
+        with self._tranca:
+            return projeto in self._canais
+
+    def _tranca_do(self, projeto: str) -> threading.Lock:
+        with self._tranca:
+            return self._trancas.setdefault(projeto, threading.Lock())
+
+    def enviar(self, projeto: str, texto: str, ao_responder: Callable[[str, object], None]) -> bool:
+        alvo = self.config.encontrar_projeto(projeto)
+        if alvo is None:
+            raise ValueError(f"projeto '{projeto}' nao esta na configuracao")
+        if self.central is None:
+            raise RuntimeError("o canal nao foi iniciado")
+        ja_aberta = self.aberta(alvo.nome)
+        threading.Thread(
+            target=self._entregar, args=(alvo, texto, ao_responder), name=f"canal-{alvo.nome}", daemon=True
+        ).start()
+        return ja_aberta
+
+    def _entregar(self, alvo, texto: str, ao_responder: Callable[[str, object], None]) -> None:
+        with self._tranca_do(alvo.nome):
+            try:
+                with self._tranca:
+                    canal = self._canais.get(alvo.nome)
+                if canal is None:
+                    sessao = self._abrir(alvo, log=self._registar)
+                    canal = self._criar_canal(sessao, self.central, log=self._registar)
+                    with self._tranca:
+                        self._canais[alvo.nome] = canal
+                entrega = canal.entregar(texto, self.limite_s)
+            except Exception as erro:  # noqa: BLE001 - a falha e dita, nunca derruba o jarvis
+                entrega = self._sessoes.Entrega(projeto=alvo.nome, caminho="nenhum", erro=str(erro))
+        ao_responder(alvo.nome, entrega)
+
+    def fechar(self) -> None:
+        with self._tranca:
+            canais = list(self._canais.values())
+            self._canais.clear()
+        for canal in canais:
+            try:
+                canal.fechar()
+            except Exception:  # noqa: BLE001 - fechar nunca impede os outros de fechar
+                pass
+        if self.central is not None:
+            self.central.parar()
+            self.central = None
+
+
+# --- O processo ---------------------------------------------------------------------
+
+
+@dataclass
+class EstadoDoProcesso:
+    """O que so existe enquanto o jarvis esta a correr."""
+
+    adormecido: bool = False
+    mudo: bool = False
+
+
+@dataclass
+class MedidaDaFrase:
+    """Os numeros de uma frase, para o log e para `scripts/medir_ponta_a_ponta.py`."""
+
+    numero: int
+    texto: str
+    gatilho: str
+    fim_da_fala: float
+    #: Fim da fala -> linha A PENSAR (com o texto transcrito).
+    sinal_de_vida_ms: float | None = None
+    #: Fim da fala -> primeiro bloco de audio da primeira coisa dita (resposta ou recap).
+    primeira_fala_ms: float | None = None
+    intencao: str | None = None
+    projeto: str | None = None
+    desfecho: str | None = None
+    resposta_ao_recap: bool = False
+    primeira_fala: str | None = None
+
+
+def _falar_com_som(texto: str) -> voz.ResultadoFala:
+    # O jarvis a serio tem de falar: e o unico sitio que liga as colunas.
+    return voz.falar(texto, com_som=True)
+
+
+class Jarvis:
+    """Liga o ouvido ao interprete, a confirmacao, ao executor e a voz.
+
+    As pecas externas entram pelo construtor (interprete, canal, falar,
+    calar, executar_local) para os testes correrem a cadeia inteira sem
+    microfone, sem Ollama, sem Claude Code e sem som.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        log,
+        *,
+        interprete: Interprete,
+        canal: CanalParaSessoes | None = None,
+        forja: ForjaPorVoz | None = None,
+        falar: Callable[[str], voz.ResultadoFala] = _falar_com_som,
         calar: Callable[..., voz.ResultadoSilencio] = voz.calar_agora,
+        executar_local: Callable[..., acoes_locais.ResultadoAcao] = acoes_locais.executar_pedido,
+        com_voz: bool = True,
+        relogio: Callable[[], float] = time.perf_counter,
+        painel: Painel | None = None,
+        limite_da_confirmacao_s: float | None = None,
+        avisos: Avisos | None = None,
+        janela_de_conversa_s: float = conversa.JANELA_S,
     ) -> None:
         self.config = config
         self.log = log
-        self.estado = estado or EstadoDoProcesso()
+        self.interprete = interprete
+        self.canal = canal
+        self.forja = forja
+        self.lingua ="en" if config.ouvido.lingua == "en" else "pt"
         self._falar = falar
-        # O MESMO mecanismo dos tres gatilhos; entra pelo construtor
-        # so para os testes o poderem espiar sem Piper nem dispositivo de som.
         self._calar = calar
-        self._executar = executar
-        self._abrir_canal = abrir_canal
+        self._executar_local = executar_local
         self.com_voz = com_voz
-        self.canal = None
+        self.relogio = relogio
+        self.estado = EstadoDoProcesso()
+        self.painel = painel or Painel(log.linha)
+        self.confirmacao = Confirmacao(
+            interprete,
+            self._executar,
+            falar=self._dizer,
+            mostrar=self._mostrar,
+            lingua=self.lingua,
+            limite_s=limite_da_confirmacao_s,
+            relogio=relogio,
+        )
+        #: Avisos por voz (sessao acabou ou a espera, run FORJA mudou).
+        self.avisos = avisos or Avisos(self._entregar_aviso, lingua=self.lingua, escrever=self.log.linha)
+        #: Sondagem dos runs FORJA, ligada por `main` quando ha [forja].
+        self.vigia: VigiaDosRuns | None = None
+        #: Janela de escuta de uma conversa com o Claude (mesmo relogio das frases).
+        self.janela = conversa.JanelaDeConversa(limite_s=janela_de_conversa_s, relogio=relogio)
+        #: O ouvido, quando existe: abre e fecha a escuta sem palavra de ativacao.
+        self.ouvido: Ouvido | None = None
+        self.medidas: list[MedidaDaFrase] = []
+        #: O que o arranque mediu (tempos, VRAM), preenchido por `correr`.
+        self.arranque: Arranque | None = None
         self.frases = 0
+        self.frases_concluidas = 0
+        # Uma frase (ou um prazo, ou uma resposta do canal) de cada vez.
+        self._tranca = threading.RLock()
+        # Nunca duas falas ao mesmo tempo.
+        self._tranca_da_voz = threading.Lock()
+        self._condicao = threading.Condition()
+        self._pendentes = 0
+        self._contador = threading.Lock()
+        self._local = threading.local()
+        self._fila: queue.Queue | None = None
+        self._fio: threading.Thread | None = None
 
-    # -- etapa 3: encaminhamento
+    # -- textos
 
-    def encaminhar(self, texto: str, registo: RegistoDaFrase) -> ResultadoRouter:
-        resultado = encaminhar(texto, self.config)
-        alvo = {
-            "local": f"accao local '{resultado.nome_acao}'",
-            "claude": "texto para o Claude Code",
-            "nada": "nada",
-        }[resultado.tipo]
-        # D62: o que a limpeza do residuo da palavra de ativacao tirou do
-        # inicio da frase, explicavel ao utilizador numa frase deste log.
-        residuo = (
-            f"'{resultado.residuo_removido}'" if resultado.residuo_removido else "nenhum"
-        )
-        registo.marcar(
-            3,
-            f"decisao={resultado.tipo} -> {alvo} | confianca={'nao medida' if not resultado.confianca_verificada else 'verificada'}"
-            f" | residuo da wake word removido: {residuo}"
-            f" | motivo: {resultado.motivo}",
-        )
-        return resultado
+    def _texto(self, chave: str, **valores: str) -> str:
+        return _TEXTOS[self.lingua][chave].format(**valores)
 
-    # -- etapa 4: accao local, estado do processo, ou entrega ao Claude Code
+    # -- ciclo de vida
 
-    def _accao_de_estado(self, nome_acao: str) -> str:
-        if nome_acao == "calar":
-            # D60(2): "cala-te" cala a frase que esta a ser dita NAQUELE
-            # momento, pelo mesmo mecanismo do Ctrl+C, e so depois marca o
-            # estado para as respostas futuras (que era tudo o que fazia).
-            # `definitivo=False`: um "acorda" a seguir volta a poder falar.
-            self.calar_agora("cala-te (lista branca D4.d)", definitivo=False)
-            self.estado.mudo = True
-            return "Fico calado."
-        if nome_acao == "adormecer":
-            self.estado.adormecido = True
-            return "Vou dormir. Diz 'acorda' quando precisares."
-        self.estado.adormecido = False
-        self.estado.mudo = False
-        return "Estou acordado."
+    def iniciar(self) -> None:
+        """Passa a tratar as frases numa thread propria (o ouvido nunca espera pela voz)."""
+        if self._fio is not None:
+            return
+        self._fila = queue.Queue(maxsize=FRASES_EM_ESPERA)
+        self._fio = threading.Thread(target=self._tratar_em_ciclo, name="jarvis-frases", daemon=True)
+        self._fio.start()
+        self.avisos.iniciar()
+        if self.vigia is not None:
+            self.vigia.iniciar()
+        self.painel.mudar(self._estado_de_repouso())
 
-    def _entregar_ao_claude(self, texto: str, registo: RegistoDaFrase) -> str:
-        if self.canal is None:
-            registo.nota(
-                "canal do Claude Code: a abrir a sessao-ponte (degrau "
-                f"{canal_claude.transporte_em_vigor()}, D49) | aviso de privacidade: a frase "
-                "fica gravada em claro no historico da sessao, fora deste repositorio (D50.10)"
-            )
-            self.canal = self._abrir_canal()
-        resposta = self.canal.perguntar(texto, LIMITE_CLAUDE_S)
-        registo.nota(
-            "resposta do Claude Code (sessao filha sem ferramentas, D48.3/D48.4 - "
-            f"texto do modelo, nao facto verificado): {resposta!r}"
-        )
-        return resumo_falado(resposta)
-
-    def agir(self, resultado: ResultadoRouter, registo: RegistoDaFrase) -> str | None:
-        """Executa a etapa 4 e devolve o texto da resposta (None = nao ha)."""
-        if self.estado.adormecido and resultado.nome_acao != "acordar":
-            registo.marcar(4, "ignorada: o jarvis esta adormecido (D4.e); diz 'acorda' para voltar")
-            return None
-
-        if resultado.tipo == "local":
-            nome_acao = resultado.nome_acao or ""
-            if nome_acao in ACOES_DE_ESTADO:
-                resposta = self._accao_de_estado(nome_acao)
-                registo.marcar(
-                    4,
-                    f"estado do processo: {nome_acao} | adormecido={self.estado.adormecido} "
-                    f"mudo={self.estado.mudo} | zero tokens",
-                )
-                return resposta
+    def fechar(self) -> None:
+        if self.vigia is not None:
+            self.vigia.parar()
+        self.avisos.parar()
+        if self._fila is not None and self._fio is not None:
+            self._fila.put(None)
+            self._fio.join(timeout=5.0)
+        self._fio = None
+        self._fila = None
+        canal, self.canal = self.canal, None
+        if canal is not None:
             try:
-                feito = self._executar(resultado, self.config)
-            except acoes_locais.AcaoError as erro:
-                registo.marcar(4, f"accao local RECUSADA: {erro}")
-                return "Não consegui executar esse comando."
-            detalhe = f"accao local '{feito.nome_acao}' executada={feito.executou} | zero tokens"
-            if feito.comando:
-                detalhe += f" | comando: {feito.comando}"
-            registo.marcar(4, detalhe)
-            return feito.texto
+                canal.fechar()
+            except Exception as erro:  # noqa: BLE001 - fechar nunca levanta
+                self.log.linha(f"canal | erro ao fechar: {erro!r}")
 
-        try:
-            resposta = self._entregar_ao_claude(resultado.texto or "", registo)
-        except Exception as erro:  # noqa: BLE001 - o canal nunca derruba o jarvis
-            registo.marcar(4, f"entrega ao Claude Code FALHOU: {erro!r}")
-            return "Não consegui falar com o Claude Code."
-        registo.marcar(
-            4,
-            f"entregue ao Claude Code pelo degrau {canal_claude.transporte_em_vigor()} (D49) | "
-            f"{len(resposta)} caracteres para a voz (resposta inteira na linha acima)",
+    def ocioso(self) -> bool:
+        with self._condicao:
+            return self._pendentes == 0
+
+    def esperar_ocioso(self, limite_s: float) -> bool:
+        with self._condicao:
+            return self._condicao.wait_for(lambda: self._pendentes == 0, limite_s)
+
+    def _estado_de_repouso(self) -> str:
+        if self.estado.adormecido:
+            return A_DORMIR
+        if self.confirmacao.a_espera:
+            return A_ESPERA
+        return A_CONVERSA if self.janela.aberta() else A_OUVIR
+
+    # -- entrada: uma frase transcrita pelo ouvido
+
+    def ao_ouvir(self, frase: Frase) -> None:
+        """Callback do ouvido. Rapido: mostra o sinal de vida e poe a frase na fila."""
+        with self._contador:
+            self.frases += 1
+            numero = self.frases
+        sinal = self.relogio()
+        self.painel.mudar(A_PENSAR, f"frase #{numero}: {frase.texto!r}")
+        medida = MedidaDaFrase(
+            numero=numero,
+            texto=frase.texto,
+            gatilho=frase.gatilho,
+            fim_da_fala=frase.fim_da_escuta,
+            sinal_de_vida_ms=(sinal - frase.fim_da_escuta) * 1000,
         )
-        return resposta
-
-    # -- etapa 5: resposta falada
-
-    def responder(self, texto: str | None, registo: RegistoDaFrase) -> None:
-        if not texto:
-            registo.marcar(5, "sem resposta a dar")
+        if self._acao_rapida(frase.texto) == "calar":
+            # Dito por cima da voz: cala ja, sem esperar que a fala acabe.
+            self.calar_agora("cala-te dito ao jarvis", definitivo=False)
+            self.avisos.descartar("cala-te")
+            self._fechar_conversa("cala-te")
+        with self._condicao:
+            self._pendentes += 1
+        if self._fila is None:
+            self._tratar(frase, medida)
             return
-        falado = " ".join(texto.split())
+        try:
+            self._fila.put_nowait((frase, medida))
+        except queue.Full:
+            self.log.linha(
+                f"frase #{numero} | descartada: {FRASES_EM_ESPERA} frases ainda por tratar | nada executado"
+            )
+            self._concluir()
+
+    def _tratar_em_ciclo(self) -> None:
+        fila = self._fila
+        assert fila is not None
+        while True:
+            item = fila.get()
+            if item is None:
+                return
+            self._tratar(*item)
+
+    def _concluir(self) -> None:
+        with self._condicao:
+            self._pendentes -= 1
+            self.frases_concluidas += 1
+            self._condicao.notify_all()
+
+    def _acao_rapida(self, texto: str) -> str | None:
+        """calar/dormir/acordar pela lista branca (frase inteira), sem LLM."""
+        try:
+            resultado = encaminhar(texto, self.config)
+        except Exception:  # noqa: BLE001 - na duvida, a frase segue o caminho normal
+            return None
+        if resultado.tipo != "local":
+            return None
+        return ACOES_QUE_PASSAM_A_FRENTE.get(resultado.nome_acao or "")
+
+    def _tratar(self, frase: Frase, medida: MedidaDaFrase) -> None:
+        try:
+            with self._tranca:
+                self._tratar_com_tranca(frase, medida)
+        except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o jarvis
+            self.log.linha(f"frase #{medida.numero} | ERRO no tratamento: {erro!r} | nada enviado")
+        finally:
+            self._local.registo = None
+            self._local.medida = None
+            self.medidas.append(medida)
+            self.painel.mudar(self._estado_de_repouso())
+            self._concluir()
+
+    def _tratar_com_tranca(self, frase: Frase, medida: MedidaDaFrase) -> None:
+        registo = RegistoDaFrase(
+            numero=medida.numero, log=self.log, relogio=self.relogio, inicio=frase.inicio_da_escuta
+        )
+        registo.inicio_da_fala = frase.inicio_da_escuta
+        registo.fim_da_fala = frase.fim_da_escuta
+        self._local.registo = registo
+        self._local.medida = medida
+        if frase.gatilho == GATILHO_TECLA:
+            gatilho = "tecla de falar"
+        elif frase.gatilho == GATILHO_JANELA:
+            gatilho = "janela de conversa (sem palavra de ativacao)"
+        else:
+            palavra = PALAVRAS_DE_ATIVACAO.get(self.config.ouvido.lingua, "?")
+            gatilho = f"palavra de ativacao '{palavra}' (score {frase.score_ativacao or 0:.2f})"
+        registo.marcar(1, f"{gatilho} | audio {frase.duracao_audio_s:.2f} s", instante=frase.inicio_da_escuta)
+        registo.marcar(
+            2,
+            f"motor={frase.motor} inferencia={frase.latencia_stt_ms:.0f} ms "
+            f"| palavra de ativacao retirada: {frase.palavra_retirada or 'nenhuma'!r} | texto: {frase.texto!r}",
+            desde=frase.fim_da_escuta,
+            instante=frase.texto_pronto,
+        )
+        registo.nota(f"primeiro sinal de vida: {medida.sinal_de_vida_ms:.0f} ms desde o fim da fala (linha A PENSAR)")
+
+        rapida = self._acao_rapida(frase.texto)
+        if self.estado.adormecido and rapida != "acordar":
+            registo.marcar(3, "ignorada: o jarvis esta a dormir; diz 'acorda' para voltar (nada interpretado)")
+            medida.desfecho = "ignorada"
+            registo.fechar("ignorada (a dormir)")
+            return
+
+        if self.confirmacao.a_espera and rapida is None:
+            medida.resposta_ao_recap = True
+            registo.marcar(3, "resposta ao recap pendente")
+            desfecho = self.confirmacao.responder(frase.texto, dito_em=frase.inicio_da_escuta)
+        elif rapida is None and self.janela.aceita(frase.inicio_da_escuta):
+            desfecho = self._responder_na_conversa(frase, registo, medida)
+        else:
+            self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
+            if self.confirmacao.a_espera and rapida == "dormir":
+                self.confirmacao.cancelar("o jarvis foi dormir")
+            interpretacao = self.interprete.interpretar(frase.texto)
+            medida.intencao, medida.projeto = interpretacao.intencao, interpretacao.projeto
+            registo.marcar(3, self._detalhe_da_interpretacao(interpretacao))
+            desfecho = self._decidir(interpretacao)
+        if desfecho is not None:
+            medida.desfecho = desfecho.estado
+            if desfecho.pedido is not None:
+                medida.intencao, medida.projeto = desfecho.pedido.intencao, desfecho.pedido.projeto
+            registo.nota(f"desfecho: {desfecho.estado} | {desfecho.motivo}")
+        if not registo.tem_etapa(4):
+            registo.marcar(4, "nada a executar")
+        registo.fechar(f"desfecho: {medida.desfecho}")
+
+    # -- conversa com o Claude
+
+    def _responder_na_conversa(
+        self, frase: Frase, registo: RegistoDaFrase, medida: MedidaDaFrase
+    ) -> Desfecho | None:
+        """A frase dita na janela: sair, ou a resposta literal com confirmacao rapida."""
+        estado = self.janela.fechar()
+        self._fechar_escuta()
+        if estado is None:  # fechada entretanto: a frase nao chega a ser tratada
+            registo.marcar(3, "conversa: a janela ja tinha fechado (nada interpretado)")
+            return None
+        medida.projeto = estado.projeto
+        if conversa.e_para_sair(frase.texto):
+            medida.intencao = "sair_da_conversa"
+            registo.marcar(3, f"conversa com o {estado.projeto}: sair (nada enviado)")
+            self._dizer(self._texto("conversa_fim"))
+            return Desfecho("cancelado", "saiu da conversa")
+        nomes = tuple(projeto.nome for projeto in self.config.projetos)
+        interpretacao = conversa.resposta_literal(frase.texto, estado.projeto, nomes)
+        medida.intencao = interpretacao.intencao
+        registo.marcar(3, "conversa: resposta literal na janela | " + self._detalhe_da_interpretacao(interpretacao))
+        return self.confirmacao.iniciar(interpretacao)
+
+    def _abrir_conversa(self, projeto: str) -> None:
+        """A resposta do Claude acabou numa pergunta: ouve a resposta sem palavra de ativacao."""
+        self.janela.abrir(projeto)
+        abrir = getattr(self.ouvido, "abrir_escuta", None)
+        sem_ativacao = bool(abrir(self.janela.limite_s)) if abrir is not None else False
+        self.log.linha(
+            f"conversa | o {projeto} fez uma pergunta: janela de {self.janela.limite_s:.0f} s "
+            + ("a ouvir sem palavra de ativacao" if sem_ativacao else "so com a tecla de falar")
+            + "; 'sai da conversa' fecha"
+        )
+
+    def _fechar_escuta(self) -> None:
+        fechar = getattr(self.ouvido, "fechar_escuta", None)
+        if fechar is not None:
+            fechar()
+
+    def _fechar_conversa(self, motivo: str) -> None:
+        estado = self.janela.fechar()
+        if estado is None:
+            return
+        self._fechar_escuta()
+        self.log.linha(f"conversa | janela do {estado.projeto} fechada ({motivo}); nada enviado")
+
+    def _alguem_a_falar(self) -> bool:
+        """O utilizador esta a falar ou ha uma frase dele a caminho."""
+        return bool(getattr(self.ouvido, "ocupado", False)) or not self.ocioso()
+
+    # -- avisos
+
+    def _entregar_aviso(self, aviso: Aviso) -> str:
+        """Diz um aviso da fila se ninguem estiver a falar nem a espera; senao, espera."""
+        if self.estado.adormecido:
+            return DESCARTADO
+        if self.estado.mudo or not self.com_voz or voz.esta_calado():
+            return SO_ECRA
+        if not self._tranca.acquire(blocking=False):
+            return OCUPADO
+        try:
+            if self._alguem_a_falar() or self.confirmacao.a_espera or self.janela.aberta():
+                return OCUPADO
+            self._local.registo = None
+            self._local.medida = None
+            self._dizer(aviso.texto)
+            self.painel.mudar(self._estado_de_repouso())
+            return FALADO
+        finally:
+            self._tranca.release()
+
+    @staticmethod
+    def _detalhe_da_interpretacao(interpretacao: Interpretacao) -> str:
+        return (
+            f"intencao={interpretacao.intencao} projeto={interpretacao.projeto or '-'} "
+            f"origem={interpretacao.origem} modelo={interpretacao.modelo or '-'} "
+            f"llm={interpretacao.latencia_s * 1000:.0f} ms | prompt: {interpretacao.prompt!r} "
+            f"| motivo: {interpretacao.motivo}"
+        )
+
+    def _decidir(self, interpretacao: Interpretacao) -> Desfecho | None:
+        if interpretacao.intencao == "conversa" and interpretacao.projeto is None:
+            self._marcar_decisao("conversa sem projeto: nada a confirmar")
+            self._dizer(self._texto("conversa_sem_projeto"))
+            return Desfecho("nao_percebido", "conversa sem projeto")
+        return self.confirmacao.iniciar(interpretacao)
+
+    # -- saida para o ecra e para a voz
+
+    def _marcar_decisao(self, detalhe: str) -> None:
+        registo = getattr(self._local, "registo", None)
+        if registo is not None and not registo.tem_etapa(4):
+            registo.marcar(4, detalhe)
+
+    def _mostrar(self, texto: str) -> None:
+        """O ecra da confirmacao (recap, cancelado, ...): cada linha no log."""
+        primeira = texto.splitlines()[0] if texto else ""
+        self._marcar_decisao(f"ecra: {primeira}")
+        for linha in texto.splitlines() or [""]:
+            self.log.linha(f"ecra | {linha}")
+
+    def _dizer(self, texto: str) -> voz.ResultadoFala | None:
+        """Fala (ou mostra) uma resposta do jarvis, e regista quando comecou a soar."""
+        falado = " ".join((texto or "").split())
+        if not falado:
+            return None
         if len(falado) > MAXIMO_ABSOLUTO_FALADO:  # ultima rede, nunca deve disparar
-            # D59.3: mesmo este corte de emergencia nunca parte uma palavra ao meio. Nao havendo
-            # um unico espaco dentro do limite (uma "palavra" de centenas de caracteres, que
-            # nunca e linguagem natural), diz-se a frase de recurso em vez de ler meia palavra —
-            # e sem ficar calado. O texto inteiro ja foi para o log.
-            falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or (
-                FRASE_RECURSO_SEM_CORTE_SEGURO
-            )
+            falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or FRASE_RECURSO_SEM_CORTE_SEGURO
+        registo: RegistoDaFrase | None = getattr(self._local, "registo", None)
+        medida: MedidaDaFrase | None = getattr(self._local, "medida", None)
+        self._marcar_decisao("resposta sem accao")
+        if medida is not None and medida.primeira_fala is None:
+            medida.primeira_fala = falado
+
+        def marcar(detalhe: str) -> None:
+            if registo is not None:
+                registo.marcar(5, detalhe)
+            else:
+                self.log.linha(f"voz | {detalhe}")
+
         if voz.esta_calado():
-            # Depois de um Ctrl+C (ou da saida do processo) nada novo e
-            # falado: nem o resto da frase, nem uma despedida, nem esta
-            # resposta do Claude Code que acabou de chegar.
-            registo.marcar(5, f"silenciado a pedido (D60): nada e falado | texto: {falado!r}")
-            return
+            marcar(f"silenciado a pedido: nada e falado | texto: {falado!r}")
+            return None
         if self.estado.mudo or not self.com_voz:
-            razao = "modo calado (D4.d)" if self.estado.mudo else "--sem-voz"
-            registo.marcar(5, f"voz desligada ({razao}); resposta so na consola: {falado!r}")
-            return
-        # com_som=True: o UNICO opt-in explicito da D61 que liga as colunas a
-        # serio. E o jarvis a serio (este processo): tem de falar, por isso
-        # liga-se aqui, sempre — o interruptor continua a ser --sem-voz (que
-        # ja fez `self.com_voz` chegar a False e devolver mais acima, nunca
-        # chegando a esta linha) e o "cala-te"/adormecido (idem). Sem este
-        # opt-in, `jarvis.voz.falar()` recusa-se a abrir o dispositivo.
-        resultado = self._falar(falado, com_som=True)
-        if resultado.falou:
-            registo.marcar(5, f"falado em pt-PT (Piper): {falado!r}")
+            razao = "modo calado" if self.estado.mudo else "voz desligada"
+            marcar(f"{razao}; resposta so no ecra: {falado!r}")
+            return None
+        with self._tranca_da_voz:
+            self.painel.mudar(A_FALAR)
+            resultado = self._falar(falado)
+        primeiro_audio = getattr(resultado, "primeiro_audio", None)
+        if primeiro_audio is not None and registo is not None and registo.fim_da_fala is not None:
+            ms = (primeiro_audio - registo.fim_da_fala) * 1000
+            if medida is not None and medida.primeira_fala_ms is None:
+                medida.primeira_fala_ms = ms
+            registo.nota(f"inicio da resposta falada: {ms:.0f} ms desde o fim da fala")
+        if getattr(resultado, "falou", False):
+            marcar(f"falado: {falado!r}")
         else:
-            registo.marcar(
-                5,
-                f"voz falhou, resposta em texto na consola (D35.4): {resultado.motivo_falha} "
-                f"| texto: {falado!r}",
-            )
-
-    # -- a frase inteira, da transcricao a resposta
-
-    def tratar_transcricao(self, texto: str, registo: RegistoDaFrase) -> ResultadoRouter:
-        resultado = self.encaminhar(texto, registo)
-        if resultado.tipo == "nada":
-            registo.descartar(resultado.motivo)
-            registo.fechar("descartada: zero accoes, zero tokens")
-            return resultado
-        resposta = self.agir(resultado, registo)
-        self.responder(resposta, registo)
-        if resultado.tipo == "local":
-            fim = f"accao local '{resultado.nome_acao}' (zero tokens)"
-        else:
-            fim = "entregue ao Claude Code"
-        if self.estado.adormecido and resultado.nome_acao != "acordar":
-            fim = "ignorada (jarvis adormecido)"
-        registo.fechar(fim)
+            motivo = getattr(resultado, "motivo_falha", "") or "sem motivo"
+            marcar(f"voz falhou, resposta so no ecra ({motivo}) | texto: {falado!r}")
         return resultado
+
+    # -- executor: so recebe pedidos sem efeito ou confirmados com "sim"
+
+    def _executar(self, pedido: Pedido) -> object:
+        intencao = pedido.intencao
+        self._marcar_decisao(
+            f"a executar '{intencao}'" + (f" no projeto {pedido.projeto}" if pedido.projeto else "")
+        )
+        if intencao == "calar":
+            self.calar_agora("cala-te dito ao jarvis", definitivo=False)
+            self.avisos.descartar("cala-te")
+            self._fechar_conversa("cala-te")
+            self.estado.mudo = True
+            self._dizer(self._texto("calado"))
+            return "calado"
+        if intencao == "dormir":
+            self.avisos.descartar("a dormir")
+            self._fechar_conversa("a dormir")
+            self.estado.adormecido = True
+            self._dizer(self._texto("dormir"))
+            return "a dormir"
+        if intencao == "acordar":
+            self.estado.adormecido = False
+            self.estado.mudo = False
+            self._dizer(self._texto("acordado"))
+            return "acordado"
+        if intencao in acoes_locais.INTENCOES_LOCAIS:
+            feito = self._executar_local(
+                intencao, pedido.projeto, self.config, detalhe=pedido.detalhe, lingua=self.lingua
+            )
+            if feito.comando:
+                self.log.linha(f"accao local | {feito.nome_acao} | comando: {feito.comando}")
+            self._dizer(feito.texto)
+            return feito
+        if intencao in INTENCOES_DA_FORJA:
+            if self.forja is None:
+                self.log.linha(f"forja | indisponivel: '{intencao}' NAO foi feito")
+                self._dizer(self._texto("sem_forja"))
+                return None
+            resposta = self.forja.executar(intencao, pedido.projeto, pedido.prompt, self.lingua)
+            # O detalhe (e o relatorio inteiro) so no ecra; a voz diz a frase curta.
+            for linha in resposta.ecra:
+                self.log.linha(f"ecra | {linha}")
+            self._dizer(resposta.falado)
+            return resposta
+        if intencao in INTENCOES_DO_CANAL and pedido.projeto:
+            if self.canal is None:
+                self.log.linha("canal | indisponivel: o prompt confirmado NAO foi enviado")
+                self._dizer(self._texto("sem_canal"))
+                return None
+            ja_aberta = self.canal.enviar(pedido.projeto, pedido.prompt, self._ao_responder)
+            self.log.linha(f"canal | prompt confirmado entregue ao canal do {pedido.projeto}: {pedido.prompt!r}")
+            self._dizer(self._texto("enviado" if ja_aberta else "a_abrir", projeto=pedido.projeto))
+            return pedido
+        raise acoes_locais.AcaoError(f"'{intencao}' ainda nao se faz por voz")
+
+    def _ao_responder(self, projeto: str, entrega) -> None:
+        """Resposta (ou falha) de uma entrega, vinda da thread do canal."""
+        texto = getattr(entrega, "texto", "") or ""
+        erro = getattr(entrega, "erro", "") or ""
+        caminho = getattr(entrega, "caminho", "?")
+        if not erro:
+            # O Stop que chega logo a seguir repetia o que ja se vai ouvir.
+            self.avisos.houve_resposta(projeto)
+        # A resposta inteira fica so no log (pasta ignorada); a voz so diz o
+        # que passa o filtro da resposta falada.
+        self.log.linha(f"canal | resposta do {projeto} (caminho={caminho}): {texto!r}" + (f" | erro: {erro}" if erro else ""))
+        retomar = getattr(entrega, "comando_para_retomar", "")
+        if retomar:
+            self.log.linha(f"canal | para retomar essa sessao, na pasta do projeto: {retomar}")
+        if erro:
+            falar = (
+                entrega.frase_para_o_utilizador()
+                if self.lingua == "pt" and hasattr(entrega, "frase_para_o_utilizador")
+                else self._texto("sem_resposta", projeto=projeto)
+            )
+        else:
+            # O filtro corre aqui outra vez, na fronteira da voz, seja qual for o caminho.
+            falar = resumo_falado(texto)
+        if self.estado.adormecido or not falar:
+            return
+        with self._tranca:
+            self._local.registo = None
+            self._local.medida = None
+            self._dizer(falar)
+            if (
+                not erro
+                and conversa.pede_resposta(texto, falar)
+                and not self.confirmacao.a_espera
+                and not self.estado.adormecido
+            ):
+                self._abrir_conversa(projeto)
+            self.painel.mudar(self._estado_de_repouso())
+
+    # -- prazo da confirmacao e silencio
+
+    def verificar_tempo(self) -> None:
+        """Cancela um recap sem resposta dentro do prazo. Chamado pelo ciclo principal."""
+        if not self._tranca.acquire(blocking=False):
+            return
+        try:
+            self._local.registo = None
+            self._local.medida = None
+            desfecho = self.confirmacao.verificar_tempo()
+            if desfecho is not None:
+                self.log.linha(f"confirmacao | {desfecho.estado}: {desfecho.motivo}")
+                self.painel.mudar(self._estado_de_repouso())
+            fechada = self.janela.fechar_se_expirou(alguem_a_falar=self._alguem_a_falar())
+            if fechada is not None:
+                self._fechar_escuta()
+                self.log.linha(
+                    f"conversa | janela do {fechada.projeto} fechada: {self.janela.limite_s:.0f} s sem resposta; "
+                    "nada enviado"
+                )
+                self.painel.mudar(self._estado_de_repouso())
+        finally:
+            self._tranca.release()
 
     def calar_agora(
         self, motivo: str, *, definitivo: bool, ja_calado: bool = False
     ) -> voz.ResultadoSilencio:
-        """Cala a voz JA e escreve as duas linhas com timestamps (D60(4)(b)).
+        """Cala a voz JA pelo mecanismo unico de `jarvis.voz` e regista as duas linhas."""
+        return self._calar(motivo, definitivo=definitivo, registar=None if ja_calado else self.log.linha)
 
-        E o unico caminho de silenciamento do processo: usam-no o handler de
-        Ctrl+C, a saida do processo e a accao "calar" da lista branca da D4.d
-        (e o equivalente ingles quando existir). `ja_calado=True` faz o mesmo
-        trabalho sem repetir as duas linhas no log.
-        """
-        return self._calar(
-            motivo, definitivo=definitivo, registar=None if ja_calado else self.log.linha
-        )
 
-    def fechar(self) -> None:
-        canal = self.canal
-        self.canal = None
-        if canal is not None:
-            fechar = getattr(canal, "fechar", None)
-            if callable(fechar):
-                fechar()
+# --- Arranque ------------------------------------------------------------------------
 
 
-# --- Construcao do gravador (o MESMO nos dois modos) ------------------------
-
-
-def construir_recorder(
-    *,
-    use_microphone: bool,
-    com_wake_word: bool,
-    modelo: str = MODELO_STT,
-    device: str = "cuda",
-    callbacks: dict | None = None,
-):
-    """O `AudioToTextRecorder` do RealtimeSTT, igual nos dois modos.
-
-    A unica diferenca entre o microfone ao vivo e a injeccao de ficheiro e
-    `use_microphone`; a porta da palavra de ativacao (`com_wake_word`) e a
-    unica diferenca entre o modo `--wav` por omissao e `--exigir-wake-word`.
-
-    LIMITE CONHECIDO, do RealtimeSTT e nao deste codigo: o construtor espera
-    pelo modelo com `main_transcription_ready_event.wait()` SEM limite de tempo
-    (audio_recorder.py:968). Se o processo filho nao conseguir carregar o
-    modelo — sem os pesos em models/faster-whisper e sem rede, por exemplo —,
-    isto fica pendurado em vez de levantar, e por isso nao ha aqui nenhum
-    recuo automatico para um modelo mais pequeno: seria codigo que nunca
-    correria. Quem precisar de outro modelo passa `--modelo`.
-    """
-    if device == "cuda":
-        registar_dlls_do_torch()  # tem de correr antes do faster_whisper
-    from RealtimeSTT import AudioToTextRecorder
-
-    opcoes = dict(
-        model=modelo,
-        download_root=str(PASTA_MODELOS_FASTER_WHISPER),
-        # A lingua e FIXA aqui.
-        #
-        # A deteccao automatica ja foi ligada neste mesmo sitio (`language=None`,
-        # que e o que o RealtimeSTT traduz para deteccao: ele faz
-        # `language=self.language if self.language else None` antes de chamar o
-        # faster-whisper, audio_recorder.py:200 e :2402) e mediu-a. O A/B
-        # controlado — os MESMOS 20 WAV por combinacao, transcritos com a
-        # lingua fixa e com deteccao — deu o acerto de intencao em portugues a
-        # DESCER (21/40 -> 20/40), e a regra era reverter se descesse.
-        #
-        # A causa medida: com deteccao, o argmax LIVRE do faster-whisper (~100
-        # linguas) e que descodifica, e caiu fora de {pt, en} em 3 das 20
-        # frases portuguesas sem prefixo — uma delas, uma frase inteira e
-        # limpa, saiu em grego e deixou de ser encaminhada.
-        #
-        # O ingles nao depende disto: o encaminhamento casa sempre contra AS
-        # DUAS listas brancas, e o mesmo A/B deu ZERO linhas
-        # inglesas a mudar de acerto.
-        language=LINGUA_FIXA_DO_PRODUTO,
-        device=device,
-        compute_type="float16" if device == "cuda" else "int8",
-        use_microphone=use_microphone,
-        spinner=False,
-        no_log_file=True,
-        initial_prompt=INITIAL_PROMPT,  # D51: desligado no caminho vivo
-        beam_size=5,
-        post_speech_silence_duration=0.6,
-        min_length_of_recording=0.3,
-        pre_recording_buffer_duration=1.0,
-        # `normalize_audio=True` foi medido nas quatro combinacoes (pt/en,
-        # com/sem prefixo), nos MESMOS WAV da medicao dos modelos, e NAO
-        # melhorou o acerto
-        # de intencao em nenhuma das quatro (identico: 11/20, 10/20, 10/20,
-        # 10/20) — piorou ligeiramente o WER em EN com prefixo e nao mudou o
-        # WER nas outras tres. Pela regra "se nao melhorar os numeros, nao
-        # entra", fica DESLIGADO por omissao. O
-        # mecanismo (`normalizar_pico_pcm16`, jarvis/audio_util.py) e o teste
-        # ficam no repositorio, so nao ligados aqui.
-    )
-    if com_wake_word:
-        if not MODELO_WAKE_WORD.is_file():
-            raise FileNotFoundError(
-                f"modelo da palavra de ativacao em falta: '{MODELO_WAKE_WORD}' "
-                "(ver docs/MODELOS.md)"
-            )
-        opcoes.update(
-            wakeword_backend="oww",
-            wake_words="hey jarvis",
-            openwakeword_model_paths=str(MODELO_WAKE_WORD),
-            openwakeword_inference_framework="onnx",
-            wake_words_sensitivity=SENSIBILIDADE_WAKE_WORD,
-            wake_word_timeout=5.0,
-        )
-    opcoes.update(callbacks or {})
-    return AudioToTextRecorder(**opcoes)
-
-
-def detalhe_da_transcricao(recorder, texto: str) -> str:
-    """A linha da etapa 2: device real, modelo, prompt, lingua e o texto.
-
-    LINGUA (criterio 2): escreve a lingua de CADA frase. Hoje o
-    recorder e construido com a lingua FIXA (o A/B controlado
-    mostrou o acerto em portugues a descer com a deteccao ligada), e entao a
-    linha diz `lingua=pt FIXA (...)` — sem probabilidade nenhuma, porque nao ha
-    nenhuma medida e escrever `p=0.00 hesitou` daria a entender que uma
-    deteccao correu e falhou.
-
-    Se o recorder for construido sem lingua (`language=None`, a deteccao que
-    ja foi medida e que volta a ligar-se no dia em que houver numeros que a
-    sustentem), a mesma linha escreve a lingua detetada, a probabilidade e se a
-    deteccao HESITOU (probabilidade nao acima do limiar de 0,5). Os dois
-    caminhos continuam testados.
-
-    ACHADO da medicao da lingua, registado aqui porque e onde ele se ve: o RealtimeSTT 0.3.104
-    so expoe o TOP-1 da deteccao (`detected_language` /
-    `detected_language_probability`, `audio_recorder.py:1533-1534`) e deita
-    fora o resto do `info` do faster-whisper — o `all_language_probs` nunca
-    chega ate aqui, nem por `recorder.text()` nem por `recorder.transcribe()`,
-    que tambem devolve so a string. Por isso o caminho vivo aplica o argmax
-    restrito a {pt, en} sobre o unico numero que tem: se o top-1 for uma
-    terceira lingua, ela nao entra na escolha do produto (fica o portugues por
-    omissao, com o motivo escrito). Sem monkeypatch ao RealtimeSTT.
-
-    LINGUA-TERCEIRA: o que o caminho vivo NAO consegue e evitar
-    que essa terceira lingua descodifique o audio — o RealtimeSTT tambem chama
-    o faster-whisper com `language=None`, logo o top-1 que ele devolve E a
-    lingua com que o texto foi descodificado. Quando cai fora de {pt, en}, a
-    linha desta etapa leva a marca `lingua-terceira(<codigo> descodificou)`, na
-    medida exata em que a biblioteca deixa: aqui so ha o top-1, nao ha o
-    `all_language_probs` e nao ha forma de repetir a transcricao. A frase segue
-    o caminho normal, nunca e descartada.
-
-    Nada disto muda o encaminhamento: a frase casa sempre contra as DUAS
-    listas brancas, hesite a deteccao ou nao.
-    """
-    # `recorder.language` e o que foi pedido na construcao (RealtimeSTT guarda
-    # o argumento tal e qual): com ele preenchido nao houve deteccao nenhuma, e
-    # o `detected_language` que a biblioteca escreve nesse caso e so o eco do
-    # que lhe demos, a 1.0 de probabilidade — um numero que ninguem mediu.
-    lingua_pedida = (getattr(recorder, "language", "") or "").strip()
-    if lingua_pedida:
-        deteccao = lingua_fixada(lingua_pedida)
-    else:
-        deteccao = decidir_lingua_do_top1(
-            getattr(recorder, "detected_language", None),
-            getattr(recorder, "detected_language_probability", 0.0),
-        )
-    detalhe_da_lingua = deteccao.para_log()
-    if deteccao.hesitou or deteccao.lingua_terceira:
-        detalhe_da_lingua += f" [{deteccao.motivo}]"
-    return (
-        f"device={getattr(recorder, 'device', '?')} modelo={getattr(recorder, 'main_model_type', '?')} "
-        f"prompt={ESTADO_PROMPT_DESLIGADO} (D51) {detalhe_da_lingua} "
-        f"| texto: {texto!r}"
-    )
-
-
-# --- Ruido de terceiros no encerramento --------------------------------------
-#
-# Onde nasce o ruido: `RealtimeSTT/audio_recorder.py:134` faz
-# `logging.error(f"Error receiving data from connection: {e}", exc_info=True)`
-# dentro de `TranscriptionWorker.poll_connection`, quando o pipe ja foi fechado
-# pelo `recorder.shutdown()`. Em Windows esse worker NAO corre neste processo:
-# `_start_thread` (audio_recorder.py:996) usa `mp.Process` sempre que o sistema
-# nao e Linux, por isso a mensagem e escrita no logger raiz do PROCESSO FILHO e
-# sai pelo stderr herdado. Um filtro instalado so aqui no pai nunca e consultado
-# pelo filho — e por isso que o silenciador tem duas metades:
-#
-#   1. `instalar_silenciador_no_processo_filho()`, chamado no corpo deste modulo,
-#      que so faz alguma coisa quando o modulo esta a ser executado DENTRO de um
-#      filho de multiprocessing. Em Windows (start method `spawn`) o filho volta
-#      a executar o modulo `__main__` do pai como `__mp_main__`
-#      (`multiprocessing/spawn.py`, `prepare()` -> `_fixup_main_from_name`), e o
-#      `__main__` do caminho real e precisamente este modulo
-#      (`python -m jarvis.app`); quando o ponto de entrada e outro, esse outro
-#      importa na mesma `jarvis.app` para chegar a `correr_wav`/`correr_microfone`.
-#      De qualquer das formas este corpo corre no filho, antes de o worker existir.
-#   2. `silenciar_ruido_do_shutdown()`, usado so a volta das duas chamadas
-#      `recorder.shutdown()`. Esta metade NAO resolve o caso Windows (o emissor
-#      esta noutro processo): serve de defesa em profundidade e cobre o caso
-#      Linux, onde `_start_thread` usa uma `threading.Thread` deste processo e
-#      portanto o mesmo logger raiz.
-#
-# Em ambas as metades descarta-se um unico registo — o que traz as DUAS partes
-# da mensagem conhecida — e tudo o resto, de qualquer nivel, passa intacto.
-
-_RUIDO_DE_ENCERRAMENTO = ("Error receiving data from connection", "WinError 6")
-
-
-class _FiltroDoRuidoDeEncerramento(logging.Filter):
-    """Descarta so o traceback conhecido do WinError 6 no shutdown do RealtimeSTT.
-
-    Intermitente, aparece DEPOIS de a resposta ja
-    ter sido dada, em `recorder.shutdown()`. Qualquer outro registo, de
-    qualquer nivel, passa sem tocar (tem de trazer as DUAS partes da mensagem
-    exata, nunca so uma).
-    """
-
-    MENSAGEM_1, MENSAGEM_2 = _RUIDO_DE_ENCERRAMENTO
-
-    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - API do logging
-        mensagem = record.getMessage()
-        return not (self.MENSAGEM_1 in mensagem and self.MENSAGEM_2 in mensagem)
-
-
-def _num_processo_filho_de_multiprocessing() -> bool:
-    """Este modulo esta a ser executado dentro de um filho de multiprocessing?
-
-    Em `spawn` (Windows) o corpo do modulo corre durante a preparacao do filho,
-    antes de `_bootstrap`, por isso `parent_process()` ainda devolve `None`;
-    nessa janela o sinal disponivel e `_inheriting` (posto por
-    `multiprocessing/spawn.py::_main`) e o nome do processo, que `prepare()` ja
-    substituiu por "Process-N". Testam-se os tres: qualquer um chega.
-    """
-    if multiprocessing.parent_process() is not None:
-        return True
-    processo = multiprocessing.current_process()
-    if getattr(processo, "_inheriting", False):
-        return True
-    return processo.name != "MainProcess"
-
-
-def instalar_silenciador_no_processo_filho() -> bool:
-    """No processo filho do RealtimeSTT: descarta so o WinError 6 conhecido.
-
-    Devolve True se instalou (e portanto se estamos num filho). No processo
-    principal nao faz absolutamente nada — nenhum filtro, nenhum handler,
-    nenhum toque no stderr. Qualquer falha e engolida de proposito: no pior
-    caso o filtro nao fica instalado e o programa comporta-se exatamente como
-    antes, com a linha de ruido a aparecer.
-    """
-    try:
-        if not _num_processo_filho_de_multiprocessing():
-            return False
-        logging.getLogger().addFilter(_FiltroDoRuidoDeEncerramento())
-    except Exception:  # noqa: BLE001 - nunca partir um filho por causa de ruido
-        return False
-    return True
-
-
-@contextlib.contextmanager
-def silenciar_ruido_do_shutdown() -> Iterator[None]:
-    """So a volta de `recorder.shutdown()`: tira do stderr o WinError 6 conhecido.
-
-    Defesa em profundidade e cobertura do caso Linux (worker em thread deste
-    processo). Em Windows o emissor esta noutro processo e quem trata dele e
-    `instalar_silenciador_no_processo_filho()`.
-
-    Instala o filtro no logger raiz e remove-o sempre no `finally`, mesmo que
-    o shutdown levante. Se a instalacao ou a remocao falharem por qualquer
-    razao, o pior caso e o filtro nao ter efeito (ou ficar por instalar) — o
-    `shutdown()` corre exatamente como corria antes disto existir; nunca
-    engole excecoes do proprio shutdown.
-    """
-    logger_raiz = logging.getLogger()
-    filtro = _FiltroDoRuidoDeEncerramento()
-    try:
-        logger_raiz.addFilter(filtro)
-    except Exception:  # noqa: BLE001 - nunca impedir o shutdown por causa disto
-        yield
-        return
-    try:
-        yield
-    finally:
-        logger_raiz.removeFilter(filtro)
-
-
-# Corre no corpo do modulo de proposito: em `spawn` esta e a unica janela em que
-# ainda se chega ao filho antes de o worker do RealtimeSTT comecar a falar.
-_SILENCIADOR_INSTALADO_NO_FILHO = instalar_silenciador_no_processo_filho()
-
-
-# --- Modo (b): ficheiro -----------------------------------------------------
-
-
-def correr_wav(
-    caminho: Path,
-    jarvis: Jarvis,
-    *,
-    exigir_wake_word: bool = False,
-    device: str = "cuda",
-    modelo: str = MODELO_STT,
-) -> int:
-    """Injeta um WAV no mesmo pipeline e escreve o registo das cinco etapas."""
-    log = jarvis.log
-    if not caminho.is_file():
-        log.linha(f"ERRO: ficheiro nao encontrado: '{caminho}'")
-        return 1
-    try:
-        frames = list(frames_do_wav(caminho))
-    except (ValueError, OSError) as erro:
-        log.linha(f"ERRO: nao consegui ler '{caminho}': {erro}")
-        return 1
-    if not frames:
-        log.linha(f"ERRO: '{caminho}' nao tem audio nenhum")
-        return 1
-
-    duracao_s = len(frames) * duracao_do_chunk_s()
-    log.bruto("")
-    log.bruto("=" * LARGURA_DA_SEPARACAO)
-    log.bruto("  JARVIS - MODO FICHEIRO (o microfone NAO e usado)")
-    log.bruto(f"  WAV: {caminho}  ({duracao_s:.2f} s, 16 kHz mono)")
-    log.bruto(
-        "  porta da palavra de ativacao: "
-        + (
-            "FECHADA (oww hey_jarvis; so transcreve depois de disparar)"
-            if exigir_wake_word
-            else "ABERTA (injeccao a partir da etapa 2, D33) + monitor oww nos mesmos frames"
-        )
-    )
-    log.bruto("=" * LARGURA_DA_SEPARACAO)
-
-    jarvis.frases += 1
-    registo = RegistoDaFrase(numero=jarvis.frases, log=log)
-    primeira_deteccao = threading.Event()
-
-    def ao_detetar_wake_word() -> None:
-        if not primeira_deteccao.is_set():
-            primeira_deteccao.set()
-            registo.marcar(
-                1,
-                f"DETETADA no ficheiro pelo backend oww do RealtimeSTT "
-                f"(modelo hey_jarvis, limiar {SENSIBILIDADE_WAKE_WORD})",
-            )
-
-    recorder = construir_recorder(
-        use_microphone=False,
-        com_wake_word=exigir_wake_word,
-        device=device,
-        modelo=modelo,
-        callbacks={
-            "on_wakeword_detected": ao_detetar_wake_word,
-            "on_recording_start": registo.marcar_inicio_da_fala,
-            "on_recording_stop": registo.marcar_fim_da_fala,
-        },
-    )
-    monitor = None if exigir_wake_word else MonitorWakeWord()
-    registo.reiniciar_relogio()  # os modelos ja estao carregados: o relogio da frase comeca aqui
-    log.linha(
-        f"frase #{registo.numero} | a injetar {len(frames)} chunks de "
-        f"{BYTES_POR_CHUNK} bytes ({duracao_s:.2f} s) no pipeline "
-        f"(feed_audio, use_microphone=False)"
-    )
-
-    # Ritmo real do audio: alimentar de rajada encheria a fila do RealtimeSTT
-    # (`handle_buffer_overflow` deita chunks fora acima de 100) e as latencias
-    # medidas deixariam de querer dizer nada.
-    espera = duracao_do_chunk_s()
-    alimentacao_terminada = threading.Event()
-
-    def alimentar() -> None:
-        try:
-            for chunk in frames:
-                recorder.feed_audio(chunk)
-                if monitor is not None:
-                    ja_tinha_detetado = monitor.detetou
-                    monitor.processar(chunk)
-                    if monitor.detetou and not ja_tinha_detetado:
-                        registo.marcar(
-                            1,
-                            "DETETADA nos mesmos frames pelo modelo hey_jarvis "
-                            f"(score {monitor.score_maximo:.4f} >= limiar "
-                            f"{SENSIBILIDADE_WAKE_WORD}); neste modo a porta esta aberta, "
-                            "por isso a cadeia nao esperou por ela",
-                            instante=monitor.instante_da_deteccao,
-                        )
-                time.sleep(espera)
-            if monitor is not None and not monitor.detetou:
-                registo.marcar(
-                    1,
-                    "NAO detetada no ficheiro (score maximo "
-                    f"{monitor.score_maximo:.4f} < limiar {SENSIBILIDADE_WAKE_WORD}): "
-                    "o WAV nao tem palavra de ativacao; a cadeia segue por injeccao a partir "
-                    "da etapa 2 (D33) e a etapa 1 prova-se a parte com --prova-wake-word",
-                )
-            for chunk in chunks_de_silencio(SILENCIO_DEPOIS_DO_FICHEIRO_S):
-                recorder.feed_audio(chunk)
-                time.sleep(espera)
-        finally:
-            alimentacao_terminada.set()
-
-    alimentador = threading.Thread(target=alimentar, name="alimentador-wav", daemon=True)
-    resultado_texto: list[str] = []
-
-    def transcrever() -> None:
-        resultado_texto.append(recorder.text())
-
-    leitor = threading.Thread(target=transcrever, name="transcricao", daemon=True)
-    try:
-        alimentador.start()
-        leitor.start()
-        alimentacao_terminada.wait(timeout=duracao_s + SILENCIO_DEPOIS_DO_FICHEIRO_S + 30)
-        leitor.join(timeout=ESPERA_MAXIMA_DEPOIS_DO_FICHEIRO_S)
-        if leitor.is_alive():
-            registo.nota(
-                f"sem frase fechada {ESPERA_MAXIMA_DEPOIS_DO_FICHEIRO_S:.0f} s depois do fim do "
-                "ficheiro: o VAD nao encontrou fala util, a abortar a escuta"
-            )
-            recorder.abort()
-            leitor.join(timeout=30)
-        texto = (resultado_texto[0] if resultado_texto else "").strip()
-        if exigir_wake_word and not primeira_deteccao.is_set():
-            # A etapa 1 fica no log mesmo quando a porta nunca abriu: e a
-            # diferenca entre "nao detetou" e "nao se sabe se correu".
-            registo.marcar(
-                1,
-                "NAO detetada com a porta FECHADA: o modelo hey_jarvis nao disparou em nenhum "
-                "frame deste WAV, por isso o pipeline nunca chegou a transcrever nada",
-            )
-        # `desde=fim_da_fala` so quando houve mesmo fala: sem VAD a disparar, a
-        # etapa 2 mede-se desde a etapa anterior e o TOTAL diz "sem fala".
-        registo.marcar(2, detalhe_da_transcricao(recorder, texto), desde=registo.fim_da_fala)
-        jarvis.tratar_transcricao(texto, registo)
-    finally:
-        with silenciar_ruido_do_shutdown():
-            recorder.shutdown()
-        jarvis.fechar()
-    return 0
-
-
-# --- Modo (a): microfone ao vivo -------------------------------------------
-
-
-def correr_microfone(jarvis: Jarvis, *, device: str = "cuda", modelo: str = MODELO_STT) -> int:
-    """O ciclo ao vivo: uma frase de cada vez, sempre com o mesmo registo."""
-    log = jarvis.log
-    estado_da_frase: dict[str, RegistoDaFrase] = {}
-
-    def novo_registo() -> RegistoDaFrase:
-        jarvis.frases += 1
-        registo = RegistoDaFrase(numero=jarvis.frases, log=log)
-        estado_da_frase["registo"] = registo
-        return registo
-
-    def registo_atual() -> RegistoDaFrase | None:
-        return estado_da_frase.get("registo")
-
-    def ao_detetar_wake_word() -> None:
-        registo = registo_atual()
-        if registo is None or registo.marcas:
-            return
-        registo.marcar(
-            1,
-            f"DETETADA ao microfone (openWakeWord hey_jarvis, limiar {SENSIBILIDADE_WAKE_WORD})",
-        )
-        log.bruto(">>> A OUVIR A FRASE <<<")
-
-    def ao_expirar_wake_word() -> None:
-        """Palavra de ativacao sem frase atras: e o falso despertar da D5."""
-        registo = registo_atual()
-        if registo is None or not registo.marcas or registo.inicio_da_fala is not None:
-            return
-        registo.descartar(
-            "palavra de ativacao seguida de silencio: nenhuma frase para transcrever"
-        )
-        registo.fechar("descartada: zero accoes, zero tokens")
-        novo_registo()
-
-    def ao_comecar_a_fala() -> None:
-        registo = registo_atual()
-        if registo is not None:
-            registo.marcar_inicio_da_fala()
-
-    def ao_acabar_a_fala() -> None:
-        registo = registo_atual()
-        if registo is not None:
-            registo.marcar_fim_da_fala()
-
-    recorder = construir_recorder(
-        use_microphone=True,
-        com_wake_word=True,
-        device=device,
-        modelo=modelo,
-        callbacks={
-            "on_wakeword_detected": ao_detetar_wake_word,
-            "on_wakeword_timeout": ao_expirar_wake_word,
-            "on_recording_start": ao_comecar_a_fala,
-            "on_recording_stop": ao_acabar_a_fala,
-        },
-    )
-    log.bruto("")
-    log.bruto("=" * LARGURA_DA_SEPARACAO)
-    log.bruto("   JARVIS ESTA A OUVIR   -   diz:  \"hey jarvis, que horas sao?\"")
-    log.bruto(f"   microfone LIGADO   |   transcricao em {getattr(recorder, 'device', '?')}")
-    log.bruto("   fechar esta janela (ou Ctrl+C) cala a voz e desliga o microfone (D30/D60)")
-    log.bruto("=" * LARGURA_DA_SEPARACAO)
-    novo_registo()
-    try:
-        while True:
-            texto = (recorder.text() or "").strip()
-            # Pode nao ser o registo com que a volta comecou: um falso
-            # despertar (wake word sem frase) fecha o anterior e abre outro.
-            registo = registo_atual()
-            if registo is None:  # defensivo: nunca acontece com novo_registo()
-                registo = novo_registo()
-            if not registo.marcas:
-                registo.marcar(1, "sem palavra de ativacao registada nesta frase")
-            registo.marcar(2, detalhe_da_transcricao(recorder, texto), desde=registo.fim_da_fala)
-            jarvis.tratar_transcricao(texto, registo)
-            novo_registo()
-            log.bruto(">>> A OUVIR - diz \"hey jarvis\" <<<")
-    except KeyboardInterrupt:
-        log.bruto("")
-        # PRIMEIRO calar: matar a sintese em curso e parar a reproducao,
-        # ANTES do `recorder.shutdown()` do `finally`, que demora segundos. Era
-        # aqui que o jarvis so desligava o microfone e continuava a falar.
-        jarvis.calar_agora("Ctrl+C (D30/D60)", definitivo=True, ja_calado=voz.esta_calado())
-        log.linha("Ctrl+C: voz calada, a desligar o microfone e a fechar o jarvis (D30/D60)")
-        return 0
-    finally:
-        with silenciar_ruido_do_shutdown():
-            recorder.shutdown()
-        jarvis.fechar()
-
-
-# --- Arranque ---------------------------------------------------------------
-
-
-def carregar_config_tolerante(caminho: Path, log: LogDaSessao) -> Config:
+def carregar_config_tolerante(caminho: Path, log) -> Config:
     """A config privada, ou uma config vazia com o aviso escrito no log.
 
-    Sem `config.toml` o jarvis continua a servir os comandos que nao precisam
-    de projeto (horas, data, calar, adormecer, acordar); "abre o VS Code no
-    <projeto>" deixa de ter projetos por onde escolher e, pela D4, vai como
-    texto para o Claude Code em vez de adivinhar — nunca "o mais parecido".
+    Sem `config.toml` o jarvis continua a servir o que nao precisa de projeto
+    (horas, data, calar, dormir, acordar); nenhum projeto e adivinhado.
     """
     try:
         return carregar_config(caminho)
     except ConfigError as erro:
-        log.linha(
-            f"AVISO: configuracao privada por carregar ({erro}). O jarvis segue SEM projetos: "
-            "os comandos com projeto nao viram accao local (D4)."
-        )
+        log.linha(f"AVISO: configuracao privada por carregar ({erro}). O jarvis segue SEM projetos.")
         return Config(microfone="", projetos=())
+
+
+def construir_ouvido(
+    jarvis: Jarvis,
+    *,
+    com_som: bool = False,
+    com_ativacao: bool = True,
+    wavs: list[Path] | None = None,
+    motor=None,
+    fonte=None,
+    tecla=None,
+    detetor=None,
+    vad=None,
+    ritmo_real: bool = False,
+) -> Ouvido:
+    """O ouvido residente ligado ao `Jarvis`. As pecas entram so nos testes.
+
+    Com `wavs`, os ficheiros fazem de microfone e de tecla (sem maos-livres),
+    um de cada vez: o seguinte entra quando a frase anterior esta tratada.
+    """
+    log = jarvis.log
+    config_ouvido = jarvis.config.ouvido
+    nome_da_tecla = config_ouvido.tecla
+    if wavs:
+        pcms = [pcm_do_wav(caminho) for caminho in wavs]
+        fonte = FonteDeSequencia(
+            pcms,
+            pronto=lambda n: jarvis.frases >= n and jarvis.ocioso(),
+            ritmo_real=ritmo_real,
+            descricao=f"{len(pcms)} ficheiro(s) WAV (o microfone NAO e usado)",
+            avisar=log.linha,
+        )
+        tecla = TeclaDoFicheiro(fonte)
+        nome_da_tecla = "tecla simulada pelo ficheiro"
+        com_ativacao = False
+    if motor is None:
+        motor = criar_motor(config_ouvido.motor, config_ouvido.device)
+    if fonte is None:
+        fonte = MicrofonePyAudio(jarvis.config.microfone, avisar=log.linha)
+    if tecla is None:
+        tecla = TeclaWindows(config_ouvido.codigo_da_tecla)
+    if com_ativacao and detetor is None:
+        try:
+            detetor, vad = DetetorOpenWakeWord(modelo_de_ativacao(config_ouvido.lingua)), vad or VadWebRtc()
+        except (FileNotFoundError, ImportError) as erro:
+            log.linha(f"AVISO: maos-livres desligadas ({erro}); fica so a tecla de falar")
+            detetor = vad = None
+    if not com_ativacao:
+        detetor = vad = None
+    ouvido = Ouvido(
+        fonte,
+        motor,
+        jarvis.ao_ouvir,
+        tecla=tecla,
+        detetor=detetor,
+        vad=vad,
+        lingua=config_ouvido.lingua,
+        limiar_de_ativacao=config_ouvido.limiar_ativacao,
+        escrever=log.linha,
+        com_som=com_som,
+        nome_da_tecla=nome_da_tecla,
+    )
+    jarvis.ouvido = ouvido
+    return ouvido
+
+
+@dataclass
+class Arranque:
+    """O que o arranque mediu: tempos de cada peca, VRAM e o total."""
+
+    total_s: float
+    pecas_ms: dict[str, float]
+    erros: dict[str, str]
+    resultados: dict[str, object] = field(default_factory=dict)
+    vram_antes: object = None
+    vram_depois: object = None
+
+    @property
+    def dentro_da_meta(self) -> bool:
+        return self.total_s <= LIMITE_DO_ARRANQUE_S
+
+
+def aquecer_em_paralelo(
+    tarefas: dict[str, Callable[[], object]],
+    log,
+    *,
+    medir: Callable[[], object] = medir_vram,
+    relogio: Callable[[], float] = time.perf_counter,
+    inicio: float | None = None,
+) -> Arranque:
+    """Corre as tarefas de aquecimento ao mesmo tempo e escreve o que cada uma levou."""
+    inicio = relogio() if inicio is None else inicio
+    vram_antes = medir()
+    log.linha(f"arranque | VRAM antes: {vram_antes if vram_antes is not None else 'sem nvidia-smi'}")
+    pecas_ms: dict[str, float] = {}
+    erros: dict[str, str] = {}
+    resultados: dict[str, object] = {}
+
+    def correr(nome: str, tarefa: Callable[[], object]) -> None:
+        antes = relogio()
+        try:
+            resultados[nome] = tarefa()
+        except Exception as erro:  # noqa: BLE001 - cada peca diz o seu erro
+            erros[nome] = f"{type(erro).__name__}: {erro}"
+        pecas_ms[nome] = (relogio() - antes) * 1000
+
+    fios = [threading.Thread(target=correr, args=item, name=f"aquecer-{item[0]}", daemon=True) for item in tarefas.items()]
+    for fio in fios:
+        fio.start()
+    for fio in fios:
+        fio.join(timeout=LIMITE_DO_ARRANQUE_S * 4)
+    for nome in tarefas:
+        if nome not in pecas_ms:
+            erros[nome] = "nao acabou de aquecer"
+            continue
+        resultado = resultados.get(nome)
+        detalhe = erros.get(nome) or str(getattr(resultado, "motivo", None) or resultado or "pronto")
+        log.linha(f"arranque | {nome}: {pecas_ms[nome]:.0f} ms | {detalhe}")
+    vram_depois = medir()
+    log.linha(f"arranque | VRAM depois: {vram_depois if vram_depois is not None else 'sem nvidia-smi'}")
+    return Arranque(relogio() - inicio, pecas_ms, erros, dict(resultados), vram_antes, vram_depois)
+
+
+def arrancar(
+    jarvis: Jarvis,
+    ouvido: Ouvido,
+    *,
+    com_voz: bool,
+    inicio: float | None = None,
+    medir: Callable[[], object] = medir_vram,
+) -> Arranque:
+    """Aquece transcricao, voz e interprete em paralelo e diz quanto levou."""
+    tarefas: dict[str, Callable[[], object]] = {
+        "transcricao": lambda: f"{ouvido.motor.descrever()} pronto em {ouvido.preparar():.0f} ms",
+        "interprete": lambda: jarvis.interprete.aquecer(medir=medir),
+    }
+    if com_voz:
+        tarefas["voz"] = voz.aquecer
+    arranque = aquecer_em_paralelo(tarefas, jarvis.log, medir=medir, inicio=inicio)
+    if "voz" in arranque.erros:
+        jarvis.log.linha("AVISO: voz por carregar; as respostas saem so no ecra")
+        jarvis.com_voz = False
+    escolha = arranque.resultados.get("interprete")
+    if "interprete" in arranque.erros or getattr(escolha, "modelo", None) is None:
+        jarvis.log.linha("AVISO: interprete sem LLM; so os comandos da lista branca sao percebidos")
+    return arranque
+
+
+def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
+    log = jarvis.log
+    config_ouvido = jarvis.config.ouvido
+    log.bruto("")
+    log.bruto("=" * LARGURA_DA_SEPARACAO)
+    log.bruto(
+        f"   JARVIS PRONTO em {arranque.total_s:.1f} s (meta <= {LIMITE_DO_ARRANQUE_S:.0f} s)"
+        + ("" if arranque.dentro_da_meta else "  -- ACIMA DA META")
+    )
+    log.bruto(f"   ouvido: {ouvido.fonte.descricao}")
+    log.bruto(f"   segura '{ouvido.nome_da_tecla}' para falar, solta para acabar")
+    if ouvido.detetor is not None:
+        log.bruto(f'   maos-livres: diz "{palavra_de_ativacao(config_ouvido.lingua)}" e a frase')
+    else:
+        log.bruto("   maos-livres desligadas: so a tecla de falar")
+    log.bruto('   depois do recap: "sim" envia, "nao, muda X para Y" corrige, "cancela" cancela')
+    log.bruto('   pergunta do Claude: 8 s para responder sem palavra de ativacao; "sai da conversa" fecha')
+    log.bruto("   Ctrl+C ou fechar esta janela cala a voz e desliga o microfone")
+    log.bruto("=" * LARGURA_DA_SEPARACAO)
+
+
+def correr(
+    jarvis: Jarvis,
+    ouvido: Ouvido,
+    *,
+    com_voz: bool = True,
+    inicio: float | None = None,
+    medir: Callable[[], object] = medir_vram,
+) -> int:
+    """Arranca, fica a ouvir ate Ctrl+C (ou ate os ficheiros acabarem) e fecha."""
+    log = jarvis.log
+    try:
+        arranque = arrancar(jarvis, ouvido, com_voz=com_voz, inicio=inicio, medir=medir)
+        jarvis.arranque = arranque
+        if "transcricao" in arranque.erros:
+            log.linha(f"ERRO: transcricao por carregar ({arranque.erros['transcricao']})")
+            return 2
+        _cabecalho(jarvis, ouvido, arranque)
+        jarvis.iniciar()
+        ouvido.iniciar()
+    except (MotorIndisponivel, OSError) as erro:
+        log.linha(f"ERRO: {erro}")
+        jarvis.fechar()
+        return 2
+    for tentativa in getattr(ouvido.fonte, "tentativas", []):
+        log.linha(f"ouvido: posto de parte {tentativa}")
+    try:
+        while ouvido.a_correr():
+            ouvido.esperar(0.2)
+            jarvis.verificar_tempo()
+        # Fonte acabada (modo ficheiro): as frases ja entregues ainda acabam.
+        jarvis.esperar_ocioso(ESPERA_ENTRE_FICHEIROS_S)
+    except KeyboardInterrupt:
+        log.bruto("")
+        # Calar primeiro; so depois desligar o microfone.
+        jarvis.calar_agora("Ctrl+C", definitivo=True, ja_calado=voz.esta_calado())
+        log.linha("Ctrl+C: voz calada, a desligar o microfone e a fechar o jarvis")
+        return 0
+    finally:
+        ouvido.parar()
+        ouvido.esperar(3.0)
+        jarvis.fechar()
+    return 0
+
+
+def construir_canal(
+    config: Config, log, ao_evento: Callable[[str, str, str], object] | None = None
+) -> CanalParaSessoes | None:
+    """O canal real para as sessoes, ou None (com o motivo no log) se nao arrancar.
+
+    `ao_evento` recebe os avisos dos hooks das sessoes abertas pelo jarvis.
+    """
+    if not config.projetos:
+        log.linha("canal | sem projetos na configuracao: os ditados nao tem para onde ir")
+        return None
+    try:
+        return CanalDasSessoes(config, log.linha, ao_evento=ao_evento).iniciar()
+    except Exception as erro:  # noqa: BLE001 - sem canal, o resto do jarvis funciona
+        log.linha(f"AVISO: canal para o Claude Code por arrancar ({erro}); os ditados nao sao enviados")
+        return None
 
 
 def construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m jarvis.app",
-        description=__doc__.splitlines()[0],
+        prog="python -m jarvis",
+        description="jarvis residente: tecla de falar ou palavra de ativacao, recap, confirmacao e resposta falada.",
+    )
+    parser.add_argument(
+        "--config", default=None, metavar="FICHEIRO", help="configuracao privada (por omissao: config.toml na raiz)"
     )
     parser.add_argument(
         "--wav",
+        nargs="+",
         metavar="FICHEIRO",
-        help="injeta um WAV no mesmo pipeline em vez de abrir o microfone (D33)",
+        help="um ou mais WAV em vez do microfone, um de cada vez, como frases ditas com a tecla",
     )
+    parser.add_argument("--sem-voz", action="store_true", help="respostas so na consola e no log")
+    parser.add_argument("--sem-ativacao", action="store_true", help="desliga as maos-livres: so a tecla de falar")
     parser.add_argument(
-        "--exigir-wake-word",
+        "--com-som",
         action="store_true",
-        help=(
-            "no modo --wav, fecha a porta da palavra de ativacao: o pipeline so transcreve "
-            "depois de o oww disparar a partir do ficheiro"
-        ),
+        help="bip curto no inicio e no fim da escuta; com --wav, e a unica forma de a voz tocar",
     )
-    parser.add_argument(
-        "--prova-wake-word",
-        metavar="FICHEIRO",
-        help="corre so o modelo openWakeWord sobre um WAV e imprime o que mediu",
-    )
-    parser.add_argument(
-        "--config",
-        default=None,
-        metavar="FICHEIRO",
-        help="ficheiro de configuracao privada (por omissao: config.toml na raiz)",
-    )
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument(
-        "--modelo",
-        default=MODELO_STT,
-        choices=MODELOS_STT_PERMITIDOS,
-        help="modelo do faster-whisper (por omissao: medium)",
-    )
-    parser.add_argument(
-        "--sem-voz",
-        action="store_true",
-        help="nao usa o Piper: as respostas saem so na consola e no log",
-    )
-    parser.add_argument(
-        "--autoteste",
-        action="store_true",
-        help="corre a regressao das partes puras (sem GPU, sem microfone, sem Piper)",
-    )
+    # A tecla de falar passou a ser o caminho normal; a flag antiga continua aceite.
+    parser.add_argument("--ptt", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--autoteste", action="store_true", help="regressao das partes puras (sem hardware)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    inicio = time.perf_counter()
     forcar_consola_utf8()
     args = construir_parser().parse_args(argv)
-
     if args.autoteste:
         return _autoteste()
 
-    if args.prova_wake_word:
-        medido = prova_da_wake_word(Path(args.prova_wake_word))
-        print("=== jarvis - prova da etapa 1 (openWakeWord hey_jarvis) ===")
-        print(f"ficheiro    = {medido['ficheiro']}")
-        print(f"chunks      = {medido['chunks']} de {BYTES_POR_CHUNK} bytes")
-        print(f"limiar      = {medido['sensibilidade']}")
-        print(f"score maximo= {medido['score_maximo']:.4f}")
-        print(f"chunks acima do limiar = {medido['chunks_acima_do_limiar']}")
-        print("DETETADA" if medido["detetou"] else "NAO DETETADA")
-        return 0 if medido["detetou"] else 1
-
     log = LogDaSessao()
     log.linha(f"jarvis a arrancar | log em {log.caminho}")
-    config = carregar_config_tolerante(
-        Path(args.config) if args.config else CAMINHO_CONFIG_PADRAO, log
-    )
+    config = carregar_config_tolerante(Path(args.config) if args.config else CAMINHO_CONFIG_PADRAO, log)
+    lingua = "en" if config.ouvido.lingua == "en" else "pt"
+    voz.definir_lingua_da_voz(lingua)
+    modo_ficheiro = bool(args.wav)
+    com_voz = not args.sem_voz and (not modo_ficheiro or args.com_som)
     log.linha(
-        f"configuracao: {len(config.projetos)} projeto(s) conhecido(s) | "
-        f"voz={'ligada' if not args.sem_voz else 'desligada'} | device pedido={args.device}"
+        f"configuracao: {len(config.projetos)} projeto(s) | lingua={lingua} | motor={config.ouvido.motor} "
+        f"({config.ouvido.device}) | voz={'ligada' if com_voz else 'desligada'} "
+        f"| forja={'configurada' if config.forja else 'sem [forja] no config.toml: so as sessoes'}"
     )
-    jarvis = Jarvis(config, log, com_voz=not args.sem_voz)
-    # Ultima rede da saida do processo: mesmo que o processo acabe por
-    # um caminho que nao passe pelo `finally` abaixo, nao fica um `piper.exe`
-    # vivo a falar. Sem `registar`: nesse ponto o log ja pode estar fechado.
+    interprete = Interprete(config)
+    forja = ForjaPorVoz(config)
+    jarvis = Jarvis(
+        config,
+        log,
+        interprete=interprete,
+        forja=forja,
+        com_voz=com_voz,
+        painel=Painel(log.linha, titulo=not modo_ficheiro),
+    )
+    jarvis.canal = construir_canal(config, log, ao_evento=jarvis.avisos.receber)
+    if config.forja is not None and config.projetos and not modo_ficheiro:
+        jarvis.vigia = VigiaDosRuns(
+            config.projetos, forja.estado.ler_run, jarvis.avisos.receber_run, escrever=log.linha
+        )
+    # Ultima rede da saida do processo: a voz nunca fica a falar sozinha.
     atexit.register(voz.calar_agora, "saida do processo (atexit)", definitivo=True)
 
-    def ao_ctrl_c(numero_do_sinal, _quadro):
-        """Cala ANTES de a excecao desenrolar a pilha.
-
-        Sem isto, o `KeyboardInterrupt` sobe primeiro por dentro de
-        `jarvis.voz.falar()`, que larga o registo da voz ativa no seu
-        `finally` — e o handler la em baixo ja nao teria o `piper.exe` a mao
-        para matar. Um handler de sinal corre na thread principal, entre
-        bytecodes, que e o instante mais cedo possivel.
-        """
-        jarvis.calar_agora("Ctrl+C (D30/D60)", definitivo=True)
+    def ao_ctrl_c(_numero, _quadro):
+        """Cala ANTES de a excecao desenrolar a pilha (o instante mais cedo possivel)."""
+        jarvis.calar_agora("Ctrl+C", definitivo=True)
         raise KeyboardInterrupt
 
     try:
         handler_anterior = signal.signal(signal.SIGINT, ao_ctrl_c)
     except ValueError:
-        # Fora da thread principal nao ha handlers de sinal. O Ctrl+C continua
-        # a ser apanhado pelo `except KeyboardInterrupt` de `correr_microfone`
-        # e pelo `finally` daqui: so se perde o instante mais cedo.
-        handler_anterior = None
+        handler_anterior = None  # fora da thread principal nao ha handlers de sinal
     try:
-        if args.wav:
-            return correr_wav(
-                Path(args.wav),
+        try:
+            ouvido = construir_ouvido(
                 jarvis,
-                exigir_wake_word=args.exigir_wake_word,
-                device=args.device,
-                modelo=args.modelo,
+                com_som=args.com_som and not modo_ficheiro,
+                com_ativacao=not args.sem_ativacao,
+                wavs=[Path(caminho) for caminho in args.wav] if modo_ficheiro else None,
             )
-        return correr_microfone(jarvis, device=args.device, modelo=args.modelo)
+        except (ValueError, OSError) as erro:
+            log.linha(f"ERRO: {erro}")
+            jarvis.fechar()
+            return 1
+        return correr(jarvis, ouvido, com_voz=com_voz, inicio=inicio)
     finally:
         if handler_anterior is not None:
             signal.signal(signal.SIGINT, handler_anterior)
-        # Gatilho 3: a saida do processo cala pelo MESMO mecanismo. Se
-        # o Ctrl+C ja calou, isto corre na mesma (nao ha nada para matar) mas
-        # sem repetir as duas linhas no log.
         jarvis.calar_agora("saida do processo", definitivo=True, ja_calado=voz.esta_calado())
         log.linha("jarvis terminado")
         log.fechar()
 
 
-# --- Autoteste das partes puras (sem GPU, sem microfone, sem Piper) --------
+# --- Autoteste das partes puras (sem microfone, sem Ollama, sem som) ----------
 
 
 def _autoteste() -> int:
-    """Verifica o formato do log, a aritmetica das latencias e o corte do WAV."""
-    import tempfile
-
-    from jarvis.audio_util import escrever_wav_pcm16
-
+    """Formato do log, aritmetica das latencias e a fonte de varios ficheiros."""
     falhas: list[str] = []
 
     def verificar(nome: str, obtido: object, esperado: object) -> None:
@@ -1390,26 +1500,24 @@ def _autoteste() -> int:
         caminho_do_log(datetime.datetime(2026, 9, 20), Path("logs")).name,
         "jarvis-2026-09-20.log",
     )
-
     tempos = iter([0.0, 1.0, 1.5])
     registo = RegistoDaFrase(numero=1, relogio=lambda: next(tempos))
     verificar("latencia da primeira etapa", round(registo.marcar(1, "x").latencia_ms), 1000)
     verificar("latencia da segunda etapa", round(registo.marcar(2, "y").latencia_ms), 500)
 
-    with tempfile.TemporaryDirectory() as pasta:
-        caminho = Path(pasta) / "t.wav"
-        escrever_wav_pcm16(caminho, b"\x01\x00" * 1000, 16000, 1)
-        pedacos = list(frames_do_wav(caminho))
-        verificar("chunks de um WAV de 1000 amostras", len(pedacos), 2)
-        verificar("ultimo chunk completado com silencio", len(pedacos[-1]), BYTES_POR_CHUNK)
-        verificar("silencio de 1 s", len(list(chunks_de_silencio(1.0))), 31)
+    fonte = FonteDeSequencia([b"\x01\x00" * 480, b"\x02\x00" * 480], silencio_depois_s=0.03, dormir=lambda _s: None)
+    fonte.abrir()
+    lidos = []
+    while (chunk := fonte.ler()) is not None:
+        lidos.append(fonte.dentro_do_audio)
+    verificar("dois ficheiros com silencio depois de cada um", lidos, [True, False, False, True, False])
 
     if falhas:
         print("\nFALHAS:")
         for falha in falhas:
             print(f"  - {falha}")
         return 1
-    print("\nOK: autoteste das partes puras do orquestrador.")
+    print("\nOK: autoteste das partes puras do jarvis.")
     return 0
 
 
