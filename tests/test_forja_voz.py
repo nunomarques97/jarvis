@@ -458,7 +458,7 @@ class TestNaoExistePorVoz(_Base):
         self.assertFalse(m.jarvis.confirmacao.a_espera)
 
 
-# --- Ligado ao jarvis: tudo passa pela confirmacao ---------------------------
+# --- Ligado ao jarvis: o que muda passa pela confirmacao --------------------
 
 
 class TestPeloJarvis(_Base):
@@ -467,13 +467,12 @@ class TestPeloJarvis(_Base):
         m.jarvis.forja = self.forja()
         return m
 
-    def test_estado_depois_do_sim_diz_ate_tres_frases_e_mostra_o_detalhe(self) -> None:
+    def test_estado_corre_logo_diz_ate_tres_frases_e_mostra_o_detalhe(self) -> None:
         self.cenario({"saida": estado_json()})
         m = self.montar([resposta_llm("estado", "atlas")])
         m.ouvir("como está o run do atlas")
-        self.assertEqual(self.clis.chamadas(), [])
-        m.avancar()
-        m.ouvir("sim")
+        self.assertFalse(m.jarvis.confirmacao.a_espera, "ver o estado so le: sem recap nem sim")
+        self.assertEqual(len(m.falados), 1)
         self.assertTrue(m.falados[-1].startswith("O run do atlas está a correr"))
         self.assertIn("ecra | estado do atlas:", m.log.texto())
 

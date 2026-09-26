@@ -1,7 +1,11 @@
 """Conversa maos-livres com o Claude: quando a resposta acaba em pergunta, o jarvis ouve.
 
-Uma resposta do Claude que chega pelo canal e acaba numa pergunta (no texto
-inteiro e no que foi dito em voz alta) abre uma JANELA DE ESCUTA de 8 s:
+Uma resposta do Claude de um projeto (pelo canal ou pelo caminho headless) que
+faz uma pergunta, e cuja pergunta foi dita em voz alta, abre uma JANELA DE
+ESCUTA de 8 s. Basta uma pergunta em qualquer frase: o Claude pergunta muitas
+vezes primeiro e explica depois ("Which two files do you mean? ... I won't
+touch either file until you answer."). Um falso positivo custa so uma janela
+de escuta, porque nada se envia sem o "sim" do recap.
 
   - o ouvido escuta sem palavra de ativacao (o VAD decide o fim da fala) e a
     tecla de falar continua a funcionar;
@@ -34,6 +38,7 @@ from jarvis.interprete import (
     pedido_financeiro,
     sem_palavra_de_ativacao,
 )
+from jarvis.resposta_falada import tem_pergunta
 from jarvis.router import _normalizar
 
 #: Quanto tempo a janela espera que o utilizador comece a responder.
@@ -68,8 +73,12 @@ def acaba_em_pergunta(texto: str | None) -> bool:
 
 
 def pede_resposta(texto: str | None, falado: str | None) -> bool:
-    """A resposta do Claude acaba numa pergunta que o utilizador ouviu."""
-    return acaba_em_pergunta(texto) and acaba_em_pergunta(falado)
+    """A resposta do Claude faz uma pergunta e o utilizador ouviu-a.
+
+    `falado` e o que a voz disse (ja filtrado a partir de `texto`): e nele que a
+    pergunta tem de estar, porque uma pergunta que o filtro cortou nao foi ouvida.
+    """
+    return "?" in (texto or "") and tem_pergunta(falado)
 
 
 def e_para_sair(texto: str | None) -> bool:

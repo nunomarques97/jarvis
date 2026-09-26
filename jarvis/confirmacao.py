@@ -8,21 +8,26 @@ Recebe a `Interpretacao` de uma frase e decide:
     so le, nao mexe em nada nem vai a uma sessao de projeto;
   - uma frase que nao se percebeu (ou que o LLM nao interpretou) nao faz
     nada: o jarvis pede para repetir;
+  - ver o estado ou ler o relatorio de um projeto so le: corre logo, sem
+    recap; sem projeto, o jarvis pergunta qual e corre logo que ele e dito;
   - todas as outras intencoes tem efeito (enviar um prompt, abrir o editor
-    ou a pasta, lancar, retomar ou parar um run, responder numa conversa,
-    ler estado ou relatorio) e ficam PENDENTES: o jarvis mostra na consola o
-    que percebeu e o texto exato a enviar, e diz em voz alta um resumo com
-    no maximo duas frases.
+    ou a pasta, lancar, retomar ou parar um run, responder numa conversa) e
+    ficam PENDENTES: o jarvis mostra na consola o que percebeu e o texto
+    exato a enviar, e diz em voz alta um resumo com no maximo duas frases.
 
 Com um pedido pendente, cada resposta do utilizador e uma de:
 
   - "sim" / "envia" / "manda" / "confirma" (ou "yes" / "yeah" / "send it" /
-    "go ahead" / "do it", ver `FRASES_DE_CONFIRMAR`): executa o pedido do
-    ultimo recap, exatamente o que foi mostrado, e so esse;
+    "go ahead" / "do it"), sozinhos ou juntos com cortesias ("Go, yes.",
+    "yes please", "ok yes", ver `PALAVRAS_DE_CONFIRMAR`): executa o pedido
+    do ultimo recap, exatamente o que foi mostrado, e so esse;
+  - "aborta" / "abort" (a palavra principal), "cancela" / "cancel" ou "nao"
+    sozinho: cancela sem enviar. Um cancelar mal ouvido ("Uh castle.",
+    "Can't sell it.", "a board") tambem conta, e e visto antes das correcoes,
+    por isso nunca chega a regra financeira; um "sim" tem de ser claro, e
+    uma resposta que confirma e cancela ao mesmo tempo pergunta de novo;
   - "nao, muda X para Y" / "acrescenta ...": o interprete reescreve o pedido
     mantendo o resto, e o jarvis volta a recapitular;
-  - "cancela" (ou "nao" sozinho): cancela sem enviar; um "cancel" mal
-    ouvido ("Uh castle.") tambem conta, mas um "sim" tem de ser claro;
   - "que horas sao" / "what time is it" (a frase inteira, na lista branca
     do router): o jarvis diz as horas e o pedido continua pendente;
   - outra coisa: o jarvis volta a perguntar; a terceira vez cancela.
@@ -74,6 +79,11 @@ from jarvis.interprete import (
 )
 from jarvis.router import _normalizar, encaminhar
 
+#: Intencoes de um projeto que so leem: correm logo, sem recap nem "sim",
+#: quando o projeto e conhecido. Sem projeto, o jarvis pergunta qual e corre
+#: logo que ele e dito. Lancar, retomar e parar um run continuam a confirmar.
+INTENCOES_SO_DE_LEITURA = frozenset({"estado", "ler_relatorio"})
+
 #: No maximo este numero de palavras do prompt e dito em voz alta; um prompt
 #: mais longo e resumido na voz e mostrado inteiro na consola.
 PALAVRAS_DITAS = 30
@@ -101,45 +111,45 @@ TipoDeResposta = Literal["confirmar", "cancelar", "corrigir", "acrescentar", "ou
 
 # --- Resposta do utilizador ------------------------------------------------------
 
-#: A frase inteira tem de ser uma destas (depois de normalizada) para enviar.
+#: Palavras (ou pares) que confirmam. Para enviar, a resposta inteira tem de
+#: ser feita so destas e de cortesias, com pelo menos uma destas: "yes",
+#: "Go, yes.", "yes, send it", "yeah go ahead", "yes yes". Sem aproximacao.
+PALAVRAS_DE_CONFIRMAR = frozenset(
+    {
+        "sim", "envia", "envia isso", "manda", "confirma",
+        "yes", "yeah", "yep", "yup", "sure", "send", "send it", "go", "go ahead", "confirm", "do it",
+    }
+)
+#: Cortesias que podem acompanhar um "sim", mas sozinhas nunca enviam.
+PALAVRAS_DE_CORTESIA = frozenset({"ok", "okay", "please", "por favor"})
+#: Exemplos de respostas que enviam (a regra e `PALAVRAS_DE_CONFIRMAR`).
 FRASES_DE_CONFIRMAR = frozenset(
     {
-        "sim",
-        "envia",
-        "sim envia",
-        "envia sim",
-        "sim envia isso",
-        "envia isso",
-        "manda",
-        "confirma",
-        "yes",
-        "yeah",
-        "yep",
-        "yup",
-        "sure",
-        "send",
-        "send it",
-        "yes send",
-        "yes send it",
-        "go",
-        "go ahead",
-        "confirm",
-        "do it",
-        "ok send it",
-        "okay send it",  # como o STT escreve "ok send it"
+        "sim", "envia", "sim envia", "envia sim", "sim envia isso", "envia isso", "manda", "confirma",
+        "yes", "yeah", "yep", "yup", "sure", "send", "send it", "yes send", "yes send it", "go", "go ahead",
+        "confirm", "do it", "ok send it", "okay send it", "go yes", "yes please", "yeah go ahead", "ok yes",
+        "yes yes",
     }
 )
 #: Um "sim" no inicio de "sim, mas muda X": o resto e a correcao.
 _SINS = ("sim", "yes", "yeah", "yep", "yup")
 _CORTESIAS_NO_FIM = ("por favor", "please")
 _NEGACOES = frozenset({"nao", "no", "nope"})
+#: Palavras que, no inicio da resposta, cancelam. "abort" e a principal.
 _PALAVRAS_DE_CANCELAR = frozenset(
     {
-        "cancela", "cancelar", "cancele", "cancel", "cancelled", "esquece", "esquecer", "aborta",
-        "abortar", "abort", "envies", "mandes", "dont", "don",
+        "abort", "aborta", "abortar", "aborte", "cancela", "cancelar", "cancele", "cancel", "cancelled",
+        "esquece", "esquecer", "envies", "mandes", "dont", "don",
     }
 )
 _PARES_DE_CANCELAR = frozenset({"deixa estar", "forget it", "never mind", "nevermind", "do not"})
+#: Palavras que, numa resposta que confirma e cancela ao mesmo tempo ("yes
+#: abort"), fazem a resposta ambigua: nao envia nem cancela, pergunta de novo.
+_PALAVRAS_DE_CONFIRMAR_NA_MISTURA = frozenset(
+    {"sim", "yes", "yeah", "yep", "yup", "sure", "confirm", "confirma", "ok", "okay", "send", "envia", "manda", "go"}
+)
+#: Um verbo de enviar a seguir a isto nao confirma: "don't send it" cancela.
+_NEGAM_O_VERBO = frozenset({"dont", "not", "never", "nao"})
 _VERBOS_DE_TROCA = frozenset(
     {
         "muda", "mudar", "mude", "troca", "trocar", "troque", "substitui", "substituir", "substitua",
@@ -163,10 +173,13 @@ _HESITACAO_NO_INICIO = re.compile(
     re.IGNORECASE,
 )
 
-#: Formas de cancelar aceites por aproximacao ("Uh castle.", "cancer", "can
-#: sell"). Cancelar nunca tem efeito, por isso pode ser tolerante; enviar
-#: nunca e aproximado.
-_FRASES_DE_CANCELAR_APROXIMADAS = ("cancel", "cancel it", "cancela", "cancelar", "cancele", "cancelo", "cancela isso")
+#: Formas de cancelar aceites por aproximacao ("Uh castle.", "Can't sell it.",
+#: "a board", "abored"). Cancelar nunca tem efeito, por isso pode ser
+#: tolerante; enviar nunca e aproximado.
+_FRASES_DE_CANCELAR_APROXIMADAS = (
+    "abort", "abort it", "aborta", "abortar", "aborta isso",
+    "cancel", "cancel it", "cancela", "cancelar", "cancele", "cancelo", "cancela isso",
+)
 #: Uma frase mais comprida do que isto nunca e um cancelar mal ouvido.
 _PALAVRAS_DO_CANCELAR_APROXIMADO = 3
 #: Diferencas maximas entre os esqueletos de consoantes (Levenshtein).
@@ -243,7 +256,7 @@ _ESQUELETOS_DE_CANCELAR = frozenset(_esqueleto(frase.split()) for frase in _FRAS
 
 
 def _parece_cancelar(palavras: list[str]) -> bool:
-    """A frase curta soa a "cancel"/"cancela". Deterministico."""
+    """A frase curta soa a "abort"/"cancel"/"cancela". Deterministico."""
     if not palavras or len(palavras) > _PALAVRAS_DO_CANCELAR_APROXIMADO:
         return False
     esqueleto = _esqueleto(palavras)
@@ -252,14 +265,84 @@ def _parece_cancelar(palavras: list[str]) -> bool:
     return any(_distancia(esqueleto, alvo) <= _DISTANCIA_DO_CANCELAR_APROXIMADO for alvo in _ESQUELETOS_DE_CANCELAR)
 
 
+def _juntar_contracoes(palavras: list[str]) -> list[str]:
+    """"can t" -> "cant", "don t" -> "dont": o apostrofo sai na normalizacao."""
+    juntas: list[str] = []
+    for palavra in palavras:
+        if palavra == "t" and juntas:
+            juntas[-1] += "t"
+        else:
+            juntas.append(palavra)
+    return juntas
+
+
+def _sem_repeticoes(palavras: list[str]) -> list[str]:
+    """"castle castle" -> "castle": a mesma palavra seguida conta uma vez."""
+    return [palavra for i, palavra in enumerate(palavras) if i == 0 or palavra != palavras[i - 1]]
+
+
+def _e_confirmacao(palavras: list[str]) -> bool:
+    """A frase inteira e feita so de confirmacoes e cortesias, com pelo menos um "sim".
+
+    Cada palavra (ou par, como "send it" ou "por favor") tem de estar numa
+    das listas fechadas; uma palavra a mais ("yes sir", "send it to atlas")
+    ou uma hesitacao no meio ("yes uh send it") nunca envia.
+    """
+    confirma = False
+    i = 0
+    while i < len(palavras):
+        par = " ".join(palavras[i : i + 2])
+        if len(palavras) > i + 1 and (par in PALAVRAS_DE_CONFIRMAR or par in PALAVRAS_DE_CORTESIA):
+            confirma = confirma or par in PALAVRAS_DE_CONFIRMAR
+            i += 2
+        elif palavras[i] in PALAVRAS_DE_CONFIRMAR:
+            confirma = True
+            i += 1
+        elif palavras[i] in PALAVRAS_DE_CORTESIA:
+            i += 1
+        else:
+            return False
+    return confirma
+
+
+def _tem_confirmacao(palavras: list[str]) -> bool:
+    """A frase tem alguma palavra de confirmar que nao esta negada ("don't send")."""
+    return any(
+        palavra in _PALAVRAS_DE_CONFIRMAR_NA_MISTURA and (i == 0 or palavras[i - 1] not in _NEGAM_O_VERBO)
+        for i, palavra in enumerate(palavras)
+    )
+
+
+def _cancelamento(palavras: list[str]) -> tuple[bool, bool]:
+    """(cancela, por aproximacao). Vem antes das correcoes, sem LLM.
+
+    Uma frase que comeca por um verbo de troca ou de acrescento ("change
+    castle to docs", "add cancel") nunca e um cancelar: e uma correcao.
+    """
+    restantes = list(palavras)
+    while restantes and restantes[0] in _NEGACOES:
+        restantes = restantes[1:]
+    if not restantes:
+        return True, False  # "no" / "nao" sozinho
+    inicio = restantes[1:] if restantes[0] in {"e", "and", "tambem", "also"} else restantes
+    if restantes[0] in _VERBOS_DE_TROCA or (inicio and inicio[0] in _VERBOS_DE_ACRESCENTO):
+        return False, False
+    if restantes[0] in _PALAVRAS_DE_CANCELAR or " ".join(restantes[:2]) in _PARES_DE_CANCELAR:
+        return True, False
+    return _parece_cancelar(_sem_repeticoes(restantes)), True
+
+
 def classificar_resposta(texto: str | None) -> tuple[TipoDeResposta, str]:
     """(tipo, texto da edicao) de uma resposta ao recap. Deterministico.
 
     As hesitacoes (uh, um, hum, ...) e a pontuacao nao contam. So uma frase
-    que e toda ela um "sim"/"envia" confirma, sem aproximacao nenhuma: "sim,
-    mas muda X" e uma correcao, "acrescenta que e urgente" nunca envia.
-    Cancelar aceita um "cancel" mal ouvido ("Uh castle."), mas so depois de
-    se ver que a frase nao confirma, nao corrige nem acrescenta.
+    feita toda ela de "sim"/"envia" e cortesias confirma, sem aproximacao
+    nenhuma: "Go, yes." e "yes please" enviam, "sim, mas muda X" e uma
+    correcao, "acrescenta que e urgente" nunca envia. Cancelar ("abort",
+    "cancel") vem antes das correcoes e aceita formas mal ouvidas ("Uh
+    castle.", "Can't sell it.", "a board"): cancelar nunca envia nada, por
+    isso nunca chega a regra financeira das correcoes. Uma frase que confirma
+    e cancela ao mesmo tempo ("yes abort") nao faz nenhuma das duas.
     """
     tipo, edicao, _aproximado = _classificar(texto)
     return tipo, edicao
@@ -268,18 +351,22 @@ def classificar_resposta(texto: str | None) -> tuple[TipoDeResposta, str]:
 def _classificar(texto: str | None) -> tuple[TipoDeResposta, str, bool]:
     """(tipo, texto da edicao, cancelar por aproximacao)."""
     limpo = _texto_sem_hesitacoes(sem_palavra_de_ativacao(limpar_texto(texto or "")))
-    palavras = _palavras(limpo, hesitacoes_no_fim=True)
+    palavras = _juntar_contracoes(_palavras(limpo, hesitacoes_no_fim=True))
     if not palavras:
         return "outro", "", False
-    if " ".join(palavras) in FRASES_DE_CONFIRMAR:
+    if _e_confirmacao(palavras):
         return "confirmar", "", False
+    cancela, aproximado = _cancelamento(palavras)
+    if cancela:
+        if _tem_confirmacao(palavras):
+            return "outro", "", False  # confirma e cancela ao mesmo tempo: pergunta de novo
+        return "cancelar", "", aproximado
     tipo, edicao = _classificar_sem_confirmar(limpo, palavras)
-    if tipo == "outro" and _parece_cancelar(palavras):
-        return "cancelar", "", True
     return tipo, edicao, False
 
 
 def _classificar_sem_confirmar(limpo: str, palavras: list[str]) -> tuple[TipoDeResposta, str]:
+    """Correcao, acrescento ou outro; o cancelar ja foi visto antes."""
     if palavras[0] in _SINS and len(palavras) > 2 and palavras[1] in {"mas", "but"}:
         palavras = palavras[2:]
         limpo = _SIM_MAS_NO_INICIO.sub("", limpo, count=1)
@@ -288,9 +375,9 @@ def _classificar_sem_confirmar(limpo: str, palavras: list[str]) -> tuple[TipoDeR
         negada = True
         palavras = palavras[1:]
     if not palavras:
-        return "cancelar", ""
+        return "outro", ""
     if palavras[0] in _PALAVRAS_DE_CANCELAR or " ".join(palavras[:2]) in _PARES_DE_CANCELAR:
-        return "cancelar", ""
+        return "outro", ""  # "yes but cancel": confirma e cancela, pergunta de novo
     if palavras[0] in _VERBOS_DE_TROCA:
         return "corrigir", limpo
     inicio = palavras[1:] if palavras[0] in {"e", "and", "tambem", "also"} else palavras
@@ -339,6 +426,11 @@ class Pedido:
     projeto: str | None
     prompt: str
     detalhe: str | None = None
+
+
+def _pedido_de_leitura(interpretacao: Interpretacao) -> Pedido:
+    """O pedido de uma leitura (estado, relatorio): so a intencao e o projeto."""
+    return Pedido(interpretacao.intencao, interpretacao.projeto, "", interpretacao.detalhe)
 
 
 @dataclass(frozen=True)
@@ -407,14 +499,14 @@ _FRASES = {
         "nao_percebi": "Não percebi. Repete, por favor.",
         "cancelado": "Cancelado, não enviei nada.",
         "expirado": "Sem resposta, cancelei. Não enviei nada.",
-        "de_novo": "Diz sim para enviar, muda, acrescenta ou cancela.",
+        "de_novo": "Diz sim para enviar, ou aborta.",
         "correcao_falhou": "Não consegui aplicar essa correção; o pedido fica igual. {pergunta}",
         "falhou": "Não consegui fazer isso.",
         "nada_para_corrigir": "Não há nenhum pedido à espera para corrigir.",
         "ecra_percebi": "Percebi: {intencao}{projeto}",
         "ecra_enviar": "Texto a enviar:",
-        "ecra_ajuda": 'Responde "sim" para enviar, "não, muda X para Y", "acrescenta ..." ou "cancela".',
-        "ecra_falta_projeto": "Falta o projeto: diz o nome do projeto, ou \"cancela\".",
+        "ecra_ajuda": 'Diz "sim" para enviar, ou "aborta" ("cancela" também serve). Para corrigir: "não, muda X para Y" ou "acrescenta ...".',
+        "ecra_falta_projeto": "Falta o projeto: diz o nome do projeto, ou \"aborta\".",
     },
     "en": {
         "enviar": "Send it?",
@@ -425,14 +517,14 @@ _FRASES = {
         "nao_percebi": "I didn't get that. Please say it again.",
         "cancelado": "Cancelled, nothing was sent.",
         "expirado": "No answer, so I cancelled. Nothing was sent.",
-        "de_novo": "Say yes to send, change, add or cancel.",
+        "de_novo": "Say yes to send, or abort.",
         "correcao_falhou": "I couldn't apply that change; the request stays the same. {pergunta}",
         "falhou": "I couldn't do that.",
         "nada_para_corrigir": "There is no pending request to correct.",
         "ecra_percebi": "Understood: {intencao}{projeto}",
         "ecra_enviar": "Text to send:",
-        "ecra_ajuda": 'Answer "yes" to send, "no, change X to Y", "add ..." or "cancel".',
-        "ecra_falta_projeto": "Missing project: say the project name, or \"cancel\".",
+        "ecra_ajuda": 'Say "yes" to send, or "abort" ("cancel" works too). To correct: "no, change X to Y" or "add ...".',
+        "ecra_falta_projeto": "Missing project: say the project name, or \"abort\".",
     },
 }
 
@@ -593,6 +685,8 @@ class Confirmacao:
         if interpretacao.intencao == INTENCAO_PERGUNTA_GERAL and pergunta and not interpretacao.so_confirmacao:
             pedido = Pedido(INTENCAO_PERGUNTA_GERAL, None, pergunta)
             return self._correr(pedido, None, "pergunta geral: so le, dispensa confirmacao")
+        if interpretacao.intencao in INTENCOES_SO_DE_LEITURA and interpretacao.projeto and not interpretacao.so_confirmacao:
+            return self._correr(_pedido_de_leitura(interpretacao), None, "so leitura: dispensa confirmacao")
         sem_texto = interpretacao.intencao in INTENCOES_COM_PROMPT and not limpar_texto(interpretacao.prompt)
         if interpretacao.so_confirmacao or interpretacao.intencao not in INTENCOES_COM_EFEITO or sem_texto:
             if interpretacao.texto:
@@ -701,7 +795,15 @@ class Confirmacao:
             return Desfecho("pendente", "resposta nao percebida", recap=recap)
         if acao == "projeto":
             projeto = self._projeto_dito(texto)
-            return self._propor(replace(pendente, projeto=projeto, pergunta=None))
+            completa = replace(pendente, projeto=projeto, pergunta=None)
+            if completa.intencao in INTENCOES_SO_DE_LEITURA:
+                # Ver o estado ou ler o relatorio: corre logo que o projeto e dito.
+                with self._trinco:
+                    if self._pendente is not pendente:
+                        return Desfecho("cancelado", "o pedido foi cancelado antes de correr")
+                    self._limpar()
+                return self._correr(_pedido_de_leitura(completa), None, "so leitura: projeto dito")
+            return self._propor(completa)
         return self._aplicar_correcao(pendente, recap, edicao, tipo)
 
     def _horas_pedidas(self, texto: str | None) -> str | None:

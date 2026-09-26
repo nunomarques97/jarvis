@@ -25,9 +25,14 @@ from jarvis.resposta_falada import (
     MAXIMO_CARACTERES_FALADOS,
     MAXIMO_CARACTERES_POR_LINHA,
     MAXIMO_CARACTERES_POR_PALAVRA,
+    MAXIMO_FRASES_FALADAS,
     PREFIXO_DA_RESPOSTA_DO_CLAUDE,
     cortar_no_limite,
+    dividir_em_frases,
+    frase_de_recurso,
+    prefixo_da_resposta,
     resumo_falado,
+    tem_pergunta,
     texto_falavel,
     texto_proibido,
 )
@@ -870,6 +875,130 @@ class TestTetoPorLinhaNaoEOTetoDaRespostaJunta(unittest.TestCase):
         self.assertGreater(len(texto_falavel(resposta)), 19_000)
         falado = self._afirmar_falada_normalmente(resposta)
         self.assertTrue(falado.endswith("."), falado)
+
+
+#: A resposta do caminho headless do log da aceitacao: pergunta primeiro, com um caminho na mesma
+#: linha, e acaba numa afirmacao.
+RESPOSTA_HEADLESS_COM_PERGUNTA = (
+    "Which two test files do you mean? I only found one test file for the anomaly code, "
+    "`tests/test_anomaly.py`, so I can't tell which pair you're thinking of.\n\n"
+    "Please send me the two file names and tell me which one to keep. "
+    "I won't touch either file until you answer."
+)
+
+
+class TestLinguaDaResposta(unittest.TestCase):
+    """O prefixo e as frases de recurso seguem a lingua do jarvis; pt fica como estava."""
+
+    def test_em_ingles_o_prefixo_e_curto(self) -> None:
+        self.assertEqual(prefixo_da_resposta("en"), "Claude says:")
+        self.assertEqual(resumo_falado("All tests pass.", lingua="en"), "Claude says: All tests pass.")
+
+    def test_em_portugues_fica_o_prefixo_de_sempre(self) -> None:
+        self.assertEqual(prefixo_da_resposta("pt"), PREFIXO_DA_RESPOSTA_DO_CLAUDE)
+        self.assertEqual(resumo_falado("Feito."), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.")
+        self.assertEqual(frase_de_recurso("so_tecnico", "pt"), FRASE_RECURSO_SO_TECNICO)
+        self.assertEqual(frase_de_recurso("sem_texto", "pt"), FRASE_RECURSO_SEM_TEXTO)
+
+    def test_em_ingles_cada_frase_de_recurso_tem_versao_inglesa(self) -> None:
+        self.assertEqual(resumo_falado("", lingua="en"), frase_de_recurso("sem_texto", "en"))
+        self.assertEqual(resumo_falado('{"a": 1}', lingua="en"), frase_de_recurso("so_tecnico", "en"))
+        for caso in ("sem_texto", "so_tecnico", "sem_corte_seguro"):
+            with self.subTest(caso=caso):
+                frase = frase_de_recurso(caso, "en")
+                self.assertNotEqual(frase, frase_de_recurso(caso, "pt"))
+                self.assertIn("screen", frase)
+                self.assertFalse(texto_proibido(frase))
+
+
+class TestSemMarcacaoMarkdown(unittest.TestCase):
+    """A marcacao markdown sai antes de falar; o texto a volta fica."""
+
+    def test_negrito_da_aceitacao_nunca_se_le_com_asteriscos(self) -> None:
+        falado = resumo_falado("**How I found it**\nThe startup waits for the model.", lingua="en")
+        self.assertEqual(falado, "Claude says: How I found it. The startup waits for the model.")
+
+    def test_enfase_titulos_listas_links_e_crases(self) -> None:
+        resposta = (
+            "## Summary\n"
+            "- First, I read the [setup guide](https://example.com/guide).\n"
+            "- Then *the* `warmup` step __runs twice__.\n"
+            "1. Nothing else changed"
+        )
+        falado = resumo_falado(resposta, lingua="en")
+        self.assertEqual(
+            falado, "Claude says: First, I read the setup guide. Then the warmup step runs twice. Nothing else changed."
+        )
+        for marca in ("*", "#", "[", "]", "(", "`", "__", "example", "https", "- ", "Summary"):
+            self.assertNotIn(marca, falado)
+
+    def test_o_paragrafo_colado_ao_titulo_continua_a_falar_se(self) -> None:
+        self.assertEqual(
+            resumo_falado("## Result\nThe startup is slow in the model load.", lingua="en"),
+            "Claude says: The startup is slow in the model load.",
+        )
+
+    def test_um_titulo_com_codigo_continua_a_fechar_o_bloco(self) -> None:
+        falado = resumo_falado("# rm -rf build/\nrm -rf build", lingua="en")
+        self.assertEqual(falado, frase_de_recurso("so_tecnico", "en"))
+
+    def test_link_sem_forma_completa_continua_a_sair_pelo_filtro(self) -> None:
+        falado = resumo_falado('Done.\nSee [the guide](https://x.io/a "title").', lingua="en")
+        self.assertEqual(falado, "Claude says: Done.")
+
+    def test_identificadores_com_sublinhado_nao_viram_enfase(self) -> None:
+        self.assertEqual(resumo_falado("Done.\nI changed __init__ now.", lingua="en"), "Claude says: Done.")
+
+
+class TestSoAsPrimeirasFrases(unittest.TestCase):
+    """Uma resposta longa: so as primeiras frases a voz, dentro dos limites; o resto no ecra."""
+
+    def test_so_as_primeiras_tres_frases(self) -> None:
+        resposta = "One is done. Two is done. Three is done. Four is done. Five is done."
+        self.assertEqual(MAXIMO_FRASES_FALADAS, 3)
+        self.assertEqual(
+            resumo_falado(resposta, lingua="en"), "Claude says: One is done. Two is done. Three is done."
+        )
+
+    def test_continua_dentro_do_limite_de_caracteres(self) -> None:
+        frase = "This sentence is long enough to fill a good part of the spoken limit on its own. "
+        falado = resumo_falado(frase * 3, lingua="en")
+        corpo = falado[len("Claude says: ") :]
+        self.assertLessEqual(len(corpo), MAXIMO_CARACTERES_FALADOS)
+        self.assertLessEqual(len(falado), MAXIMO_ABSOLUTO_FALADO)
+        self.assertTrue(corpo.endswith("."))
+
+    def test_o_ponto_de_um_numero_nao_parte_a_frase(self) -> None:
+        self.assertEqual(dividir_em_frases("It took 3.5 seconds. Done."), ["It took 3.5 seconds.", "Done."])
+
+    def test_uma_pergunta_depois_das_primeiras_frases_ainda_se_ouve(self) -> None:
+        resposta = "One is done. Two is done. Three is done. Four is done. Shall I commit?"
+        falado = resumo_falado(resposta, lingua="en")
+        self.assertTrue(falado.endswith("Shall I commit?"), falado)
+        self.assertLessEqual(len(dividir_em_frases(falado[len("Claude says: ") :])), MAXIMO_FRASES_FALADAS)
+
+
+class TestPerguntaDoClaudeOuveSe(unittest.TestCase):
+    """A pergunta do Claude chega a voz, mesmo quando a linha dela tem um caminho."""
+
+    def test_resposta_headless_da_aceitacao(self) -> None:
+        falado = resumo_falado(RESPOSTA_HEADLESS_COM_PERGUNTA, lingua="en")
+        self.assertTrue(falado.startswith("Claude says: Which two test files do you mean?"), falado)
+        for proibido in ("tests/", "test_anomaly", ".py", "`"):
+            self.assertNotIn(proibido, falado)
+        self.assertTrue(tem_pergunta(falado))
+        self.assertFalse(texto_proibido(falado))
+
+    def test_a_pergunta_so_volta_se_passar_o_filtro_sozinha(self) -> None:
+        falado = resumo_falado("Done.\nShould I delete tests/test_anomaly.py? It is old.", lingua="en")
+        self.assertEqual(falado, "Claude says: Done.")
+
+    def test_sinais_de_pergunta_sem_palavras_nao_sao_pergunta(self) -> None:
+        self.assertEqual(resumo_falado("Done.\n?? tests/fixtures/", lingua="en"), "Claude says: Done.")
+
+    def test_as_linhas_seguintes_do_bloco_proibido_nunca_voltam(self) -> None:
+        falado = resumo_falado("Done.\nI ran `x = 1`.\nShall I commit?", lingua="en")
+        self.assertEqual(falado, "Claude says: Done.")
 
 
 if __name__ == "__main__":

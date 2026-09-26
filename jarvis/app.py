@@ -15,11 +15,11 @@ O CAMINHO VIVO de cada frase:
               decide o fim. Transcricao residente e quente.
   interprete  intencao, projeto e, num ditado, o prompt reescrito claro.
   confirmacao tudo o que tem efeito (enviar um prompt, abrir o editor ou a
-              pasta, ver o estado, ler o relatorio, lancar, retomar ou parar
-              um run) e recapitulado em voz alta e no ecra e so corre depois
-              de um "sim"; "nao, muda X para Y", "acrescenta ..." e
-              "cancela" corrigem ou cancelam. Horas/data, calar, dormir e
-              acordar correm logo.
+              pasta, lancar, retomar ou parar um run) e recapitulado em voz
+              alta e no ecra e so corre depois de um "sim"; "nao, muda X
+              para Y" e "acrescenta ..." corrigem, "aborta" (ou "cancela")
+              cancela. Ver o estado e ler o relatorio de um projeto so leem
+              e correm logo, tal como horas/data, calar, dormir e acordar.
   perguntas   uma pergunta geral ou de atualidade (tempo, desporto,
               noticias, factos) que nao e sobre um projeto corre logo, sem
               recap: o jarvis diz "Let me check." e passa-a ao Claude Code
@@ -39,6 +39,17 @@ Conversa (`jarvis.conversa`): quando a resposta do Claude acaba numa pergunta,
 abre-se uma janela de escuta de 8 s sem palavra de ativacao; o que o
 utilizador disser vai tal e qual para a confirmacao rapida e so um "sim" o
 envia. "sai da conversa" ou 8 s sem resposta fecham a janela.
+
+Uma so instancia (`jarvis.instancia`): com o microfone, o jarvis so arranca
+com a tranca `logs/jarvis.lock` (o PID dele); se outro jarvis vivo a tem, diz
+isso no ecra e sai antes de carregar modelos. `--wav` e `--autoteste` nao a
+tiram.
+
+Dormir: a dormir nada e interpretado. Acorda com "acorda"/"wake up" (lista
+branca) ou com a palavra de ativacao (score >= `[ouvido] limiar_ativacao`)
+seguida so de um acordar curto ("Up.", "wake", "awake", nada). A primeira
+frase normal com palavra de ativacao ouve uma vez que o jarvis esta a dormir
+e como o acordar; as seguintes do mesmo sono sao ignoradas em silencio.
 
 Avisos (`jarvis.avisos`): a sessao de um projeto acabou ou esta a espera do
 utilizador (hooks do Claude Code, pelo IPC do canal), ou um run FORJA terminou
@@ -88,6 +99,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import datetime
+import os
 import queue
 import signal
 import sys
@@ -104,11 +116,26 @@ from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_c
 from jarvis.confirmacao import Confirmacao, Desfecho, Pedido
 from jarvis.consola import forcar_consola_utf8
 from jarvis.forja_voz import INTENCOES_POR_VOZ, ForjaPorVoz
-from jarvis.interprete import INTENCAO_PERGUNTA_GERAL, Interpretacao, Interprete, medir_vram
+from jarvis.instancia import (
+    NOME_DA_TRANCA,
+    DonoDaTranca,
+    OutraInstanciaAberta,
+    TrancaDaInstancia,
+    mensagem_de_recusa,
+)
+from jarvis.interprete import (
+    INTENCAO_CORTESIA,
+    INTENCAO_PERGUNTA_GERAL,
+    Interpretacao,
+    Interprete,
+    medir_vram,
+    so_cortesia,
+)
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
     ESCUTA_RECAP,
+    GATILHO_ATIVACAO,
     GATILHO_JANELA,
     GATILHO_TECLA,
     PALAVRAS_DE_ATIVACAO,
@@ -126,12 +153,12 @@ from jarvis.ouvido import (
 )
 from jarvis.pergunta_geral import Consulta, PerguntasGerais
 from jarvis.resposta_falada import (
-    FRASE_RECURSO_SEM_CORTE_SEGURO,
     MAXIMO_ABSOLUTO_FALADO,
     cortar_no_limite,
+    frase_de_recurso,
     resumo_falado,
 )
-from jarvis.router import encaminhar
+from jarvis.router import _normalizar, encaminhar
 from jarvis.stt import MotorIndisponivel, criar_motor
 
 # --- Constantes ---------------------------------------------------------------
@@ -142,6 +169,9 @@ PASTA_LOGS = RAIZ / "logs"
 
 #: Meta do arranque: do inicio do processo a "PRONTO".
 LIMITE_DO_ARRANQUE_S = 30.0
+
+#: Codigo de saida quando outro jarvis com o microfone ja esta aberto.
+CODIGO_OUTRA_INSTANCIA = 3
 
 #: Frases ja transcritas a espera de vez. Cheia, a frase nova e descartada
 #: com uma linha no log (nunca cresce sem limite).
@@ -182,11 +212,20 @@ INTENCOES_DO_CANAL = frozenset({"ditar_prompt", "conversa"})
 #: dormir nunca sao lidas como resposta ao recap.
 ACOES_QUE_PASSAM_A_FRENTE = {"calar": "calar", "adormecer": "dormir", "acordar": "acordar"}
 
+#: Com o jarvis a dormir, a palavra de ativacao (score >= limiar) seguida so de
+#: uma destas formas curtas acorda-o: o motor de voz corta "wake up" em "Up.".
+#: Sem nada depois da palavra de ativacao tambem acorda (tupla vazia).
+ACORDAR_CURTO = frozenset({(), ("up",), ("wake",), ("wake", "up"), ("awake",), ("acorda",)})
+
+#: Palavras soltas que nao contam para saber se a frase e so um acordar curto.
+_HESITACOES_AO_ACORDAR = frozenset({"uh", "um", "uhm", "er", "erm", "ah", "eh", "hmm", "hum", "oh"})
+
 _TEXTOS = {
     "pt": {
         "calado": "Fico calado.",
         "dormir": "Vou dormir. Diz acorda quando precisares.",
         "acordado": "Estou acordado.",
+        "a_dormir": "Estou a dormir. Para me acordar, diz boas jarvis, acorda.",
         "enviado": "Enviado para o {projeto}.",
         "a_abrir": "Vou abrir a sessão do {projeto}. Aceita o aviso na janela nova e o pedido segue.",
         "sem_forja": "O estado e os runs da FORJA não estão disponíveis. Não fiz nada.",
@@ -198,11 +237,13 @@ _TEXTOS = {
         "pergunta_falhou": "Não consegui obter resposta a isso.",
         "pergunta_recusada": "Isso não faço por voz: pedidos de dinheiro ou de bolsa ficam de fora.",
         "sem_perguntas": "As perguntas gerais não estão disponíveis.",
+        "cortesia": "Está bem.",
     },
     "en": {
         "calado": "I'll be quiet.",
         "dormir": "Going to sleep. Say wake up when you need me.",
         "acordado": "I'm awake.",
+        "a_dormir": "I'm asleep. To wake me, say hey jarvis, wake up.",
         "enviado": "Sent to {projeto}.",
         "a_abrir": "Opening the {projeto} session. Accept the notice in the new window and the request follows.",
         "sem_forja": "Project status and FORJA runs are not available. I did nothing.",
@@ -214,11 +255,27 @@ _TEXTOS = {
         "pergunta_falhou": "I couldn't get an answer to that.",
         "pergunta_recusada": "I don't do that by voice: money and trading requests are off limits.",
         "sem_perguntas": "General questions are not available.",
+        "cortesia": "Okay.",
     },
 }
 
 
 # --- Log ------------------------------------------------------------------------
+
+
+def e_acordar_curto(texto: str, lingua: str) -> bool:
+    """True se, sem a palavra de ativacao e hesitacoes, a frase e so um acordar curto.
+
+    'Up.', 'wake', 'wake up', 'awake', 'acorda' ou nada (so a palavra de
+    ativacao). Qualquer outra palavra deixa de ser um acordar curto.
+    """
+    ativacao = set(_normalizar(PALAVRAS_DE_ATIVACAO.get(lingua, "")).split())
+    palavras = tuple(
+        palavra
+        for palavra in _normalizar(texto).split()
+        if palavra not in ativacao and palavra not in _HESITACOES_AO_ACORDAR
+    )
+    return palavras in ACORDAR_CURTO
 
 
 def agora_iso(quando: datetime.datetime | None = None) -> str:
@@ -619,6 +676,8 @@ class EstadoDoProcesso:
 
     adormecido: bool = False
     mudo: bool = False
+    #: O aviso "estou a dormir" ja foi dito neste sono (so se diz uma vez).
+    aviso_de_sono_dado: bool = False
 
 
 @dataclass
@@ -812,6 +871,20 @@ class Jarvis:
             )
             self._concluir()
 
+    def ao_ativar_sem_fala(self, frase: Frase) -> None:
+        """Callback do ouvido: so a palavra de ativacao, sem fala depois.
+
+        Acordado nao ha nada a fazer. A dormir segue como uma frase de texto
+        vazio, que acorda se o score chegar ao limiar.
+        """
+        if not self.estado.adormecido:
+            self.log.linha(
+                f"palavra de ativacao sem fala (score {frase.score_ativacao or 0:.2f}) "
+                "| o jarvis esta acordado: nada a fazer"
+            )
+            return
+        self.ao_ouvir(frase)
+
     def _tratar_em_ciclo(self) -> None:
         fila = self._fila
         assert fila is not None
@@ -881,14 +954,25 @@ class Jarvis:
         )
         registo.nota(f"primeiro sinal de vida: {medida.sinal_de_vida_ms:.0f} ms desde o fim da fala (linha A PENSAR)")
 
-        rapida = self._acao_rapida(frase.texto)
-        if self.estado.adormecido and rapida != "acordar":
-            registo.marcar(3, "ignorada: o jarvis esta a dormir; diz 'acorda' para voltar (nada interpretado)")
+        if not frase.texto.strip() and not self.estado.adormecido:
+            # So a palavra de ativacao, e o jarvis ja acordou entretanto.
+            registo.marcar(3, "so a palavra de ativacao com o jarvis acordado (nada interpretado)")
             medida.desfecho = "ignorada"
-            registo.fechar("ignorada (a dormir)")
+            registo.fechar("ignorada (so a palavra de ativacao)")
             return
 
-        if self.confirmacao.a_espera and rapida is None:
+        rapida = self._acao_rapida(frase.texto)
+        acordar_pela_palavra = self.estado.adormecido and rapida != "acordar" and self._acorda_pela_palavra(frase)
+        if self.estado.adormecido and rapida != "acordar" and not acordar_pela_palavra:
+            self._ignorar_a_dormir(frase, registo, medida)
+            return
+
+        if acordar_pela_palavra:
+            registo.marcar(3, "palavra de ativacao seguida de um acordar curto (nada interpretado)")
+            desfecho = self._decidir(
+                Interpretacao(frase.texto, "acordar", None, "", "regra", "acordar pela palavra de ativacao")
+            )
+        elif self.confirmacao.a_espera and rapida is None:
             medida.resposta_ao_recap = True
             registo.marcar(3, "resposta ao recap pendente")
             desfecho = self.confirmacao.responder(frase.texto, dito_em=frase.inicio_da_escuta)
@@ -898,6 +982,12 @@ class Jarvis:
             # "nao, muda X para Y" sem nada a espera nao vira um ditado novo.
             registo.marcar(3, "correcao sem nenhum pedido pendente (nada interpretado)")
             desfecho = self.confirmacao.correcao_sem_pedido()
+        elif rapida is None and so_cortesia(frase.texto):
+            # "Excellent.", "Yeah." soltos: nada a pedir, nunca vao ao LLM nem
+            # ao Claude, e nao cortam uma resposta que ainda esteja a caminho.
+            medida.intencao = INTENCAO_CORTESIA
+            registo.marcar(3, "so cortesia fora de um recap ou de uma conversa (nada interpretado)")
+            desfecho = self._decidir(Interpretacao(frase.texto, INTENCAO_CORTESIA, None, "", "regra", "so cortesia"))
         else:
             self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
             # Um pedido novo: a resposta de uma pergunta anterior ja nao se diz.
@@ -916,6 +1006,32 @@ class Jarvis:
         if not registo.tem_etapa(4):
             registo.marcar(4, "nada a executar")
         registo.fechar(f"desfecho: {medida.desfecho}")
+
+    # -- dormir
+
+    def _acorda_pela_palavra(self, frase: Frase) -> bool:
+        """Palavra de ativacao com score >= limiar e so um acordar curto ('Up.', 'wake up')."""
+        if frase.gatilho != GATILHO_ATIVACAO or frase.score_ativacao is None:
+            return False
+        if frase.score_ativacao < self.config.ouvido.limiar_ativacao:
+            return False
+        return e_acordar_curto(frase.texto, self.config.ouvido.lingua)
+
+    def _ignorar_a_dormir(self, frase: Frase, registo: RegistoDaFrase, medida: MedidaDaFrase) -> None:
+        """A dormir nada e interpretado; a primeira frase com palavra de ativacao ouve como se acorda."""
+        medida.desfecho = "ignorada"
+        pela_palavra = (
+            frase.gatilho == GATILHO_ATIVACAO
+            and frase.score_ativacao is not None
+            and frase.score_ativacao >= self.config.ouvido.limiar_ativacao
+        )
+        if pela_palavra and not self.estado.aviso_de_sono_dado:
+            self.estado.aviso_de_sono_dado = True
+            registo.marcar(3, "ignorada: o jarvis esta a dormir; diz uma vez como o acordar (nada interpretado)")
+            self._dizer(self._texto("a_dormir"))
+        else:
+            registo.marcar(3, "ignorada: o jarvis esta a dormir (nada interpretado)")
+        registo.fechar("ignorada (a dormir)")
 
     # -- conversa com o Claude
 
@@ -1046,6 +1162,10 @@ class Jarvis:
         )
 
     def _decidir(self, interpretacao: Interpretacao) -> Desfecho | None:
+        if interpretacao.intencao == INTENCAO_CORTESIA:
+            self._marcar_decisao("so cortesia: nada enviado")
+            self._dizer(self._texto("cortesia"))
+            return Desfecho("ignorado", "so cortesia")
         if interpretacao.intencao == "conversa" and interpretacao.projeto is None:
             self._marcar_decisao("conversa sem projeto: nada a confirmar")
             self._dizer(self._texto("conversa_sem_projeto"))
@@ -1072,7 +1192,9 @@ class Jarvis:
         if not falado:
             return None
         if len(falado) > MAXIMO_ABSOLUTO_FALADO:  # ultima rede, nunca deve disparar
-            falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or FRASE_RECURSO_SEM_CORTE_SEGURO
+            falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or frase_de_recurso(
+                "sem_corte_seguro", self.lingua
+            )
         registo: RegistoDaFrase | None = getattr(self._local, "registo", None)
         medida: MedidaDaFrase | None = getattr(self._local, "medida", None)
         self._marcar_decisao("resposta sem accao")
@@ -1130,6 +1252,7 @@ class Jarvis:
             self.avisos.descartar("a dormir")
             self._fechar_conversa("a dormir")
             self.estado.adormecido = True
+            self.estado.aviso_de_sono_dado = False
             self._dizer(self._texto("dormir"))
             return "a dormir"
         if intencao == "acordar":
@@ -1191,7 +1314,7 @@ class Jarvis:
             )
         else:
             # O filtro corre aqui outra vez, na fronteira da voz, seja qual for o caminho.
-            falar = resumo_falado(texto)
+            falar = resumo_falado(texto, lingua=self.lingua)
         if self.estado.adormecido or not falar:
             return
         with self._tranca:
@@ -1256,7 +1379,7 @@ class Jarvis:
         if estado == "cancelada":
             return
         if estado == "respondida":
-            falar = resumo_falado(resultado.texto)
+            falar = resumo_falado(resultado.texto, lingua=self.lingua)
         elif estado == "recusada":
             falar = self._texto("pergunta_recusada")
         else:
@@ -1404,6 +1527,7 @@ def construir_ouvido(
         escrever=log.linha,
         com_som=com_som,
         nome_da_tecla=nome_da_tecla,
+        ao_ativar_sem_fala=jarvis.ao_ativar_sem_fala,
     )
     jarvis.ouvido = ouvido
     return ouvido
@@ -1491,6 +1615,13 @@ def arrancar(
     return arranque
 
 
+#: As respostas ao recap no cabecalho, com as palavras a dizer na lingua do ouvido.
+_RESPOSTAS_AO_RECAP = {
+    "pt": '"sim" envia, "aborta" cancela ("cancela" tambem), "nao, muda X para Y" ou "acrescenta ..." corrigem',
+    "en": '"yes" envia, "abort" cancela ("cancel" tambem), "no, change X to Y" ou "add ..." corrigem',
+}
+
+
 def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
     log = jarvis.log
     config_ouvido = jarvis.config.ouvido
@@ -1506,7 +1637,7 @@ def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
         log.bruto(f'   maos-livres: diz "{palavra_de_ativacao(config_ouvido.lingua)}" e a frase')
     else:
         log.bruto("   maos-livres desligadas: so a tecla de falar")
-    log.bruto('   depois do recap: "sim" envia, "nao, muda X para Y" corrige, "cancela" cancela')
+    log.bruto(f"   depois do recap: {_RESPOSTAS_AO_RECAP.get(config_ouvido.lingua, _RESPOSTAS_AO_RECAP['pt'])}")
     prazo = f"{jarvis.confirmacao.limite_s:g} s"
     if getattr(ouvido, "vad", None) is not None:
         log.bruto(f"   a resposta ao recap diz-se logo, sem palavra de ativacao, dentro de {prazo}")
@@ -1613,9 +1744,50 @@ def main(argv: list[str] | None = None) -> int:
     if args.autoteste:
         return _autoteste()
 
+    caminho_da_config = Path(args.config) if args.config else CAMINHO_CONFIG_PADRAO
+    modo_ficheiro = bool(args.wav)
+    if modo_ficheiro:
+        return _arrancar_e_correr(args, inicio, caminho_da_config)
+    # So o microfone tira a tranca: antes de carregar modelos ou abrir o microfone.
+    tranca = TrancaDaInstancia(PASTA_LOGS / NOME_DA_TRANCA)
+    try:
+        substituida = tranca.adquirir()
+    except OutraInstanciaAberta as erro:
+        print(texto_para_a_consola(mensagem_de_recusa(erro.pid, _lingua_da_config(caminho_da_config))), flush=True)
+        return CODIGO_OUTRA_INSTANCIA
+    except OSError as erro:
+        print(texto_para_a_consola(f"ERRO: tranca da instancia por criar em {tranca.caminho} ({erro})"), flush=True)
+        return 2
+    try:
+        return _arrancar_e_correr(args, inicio, caminho_da_config, tranca_substituida=substituida)
+    finally:
+        tranca.libertar()
+
+
+def _lingua_da_config(caminho: Path) -> str:
+    """A lingua configurada, so para a mensagem de recusa (sem log nem modelos)."""
+    try:
+        lingua = carregar_config(caminho).ouvido.lingua
+    except Exception:  # noqa: BLE001 - na duvida, a lingua por omissao
+        lingua = Config(microfone="", projetos=()).ouvido.lingua
+    return "en" if lingua == "en" else "pt"
+
+
+def _arrancar_e_correr(
+    args: argparse.Namespace,
+    inicio: float,
+    caminho_da_config: Path,
+    *,
+    tranca_substituida: DonoDaTranca | None = None,
+) -> int:
     log = LogDaSessao()
-    log.linha(f"jarvis a arrancar | log em {log.caminho}")
-    config = carregar_config_tolerante(Path(args.config) if args.config else CAMINHO_CONFIG_PADRAO, log)
+    log.linha(f"jarvis a arrancar | pid {os.getpid()} | log em {log.caminho}")
+    if tranca_substituida is not None:
+        log.linha(
+            f"tranca da instancia: a anterior (pid {tranca_substituida.pid or '?'}) era de um jarvis "
+            "que ja nao esta a correr; substituida por esta"
+        )
+    config = carregar_config_tolerante(caminho_da_config, log)
     lingua = "en" if config.ouvido.lingua == "en" else "pt"
     voz.definir_lingua_da_voz(lingua)
     modo_ficheiro = bool(args.wav)

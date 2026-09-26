@@ -26,8 +26,11 @@ nunca contam. Sem sessão, a evidência fica "PENDENTE — passo do Sponsor".
    (o pedido começa com a tecla de falar ou "hey jarvis"), Enter quando o
    jarvis acabar. Depois responde com `s` ou `n` às perguntas. `p` salta a
    tarefa; `q` guarda e sai (`--continuar` retoma onde ficou).
-4. A resposta ao recap ("sim", "não, muda X para Y", "cancela") diz-se logo
-   depois de o jarvis acabar de o ler, sem "hey jarvis" nem tecla: a linha de
+4. A resposta ao recap diz-se logo depois de o jarvis acabar de o ler, sem
+   "hey jarvis" nem tecla: "yes" / "sim" envia, "abort" / "aborta" cancela
+   ("cancel" / "cancela" também serve), "no, change X to Y" / "não, muda X
+   para Y" e "add ..." / "acrescenta ..." corrigem. Se o jarvis não perceber,
+   pergunta de novo: "Say yes to send, or abort." A linha de
    estado mostra `À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA`. Tens
    `[interprete] confirmacao_s` segundos (30 por omissão), a contar do fim do
    recap. A tecla e "hey jarvis" também funcionam.
@@ -56,7 +59,7 @@ da janela de uma tarefa conta para essa tarefa.
 
 Fluxos: `imediato` corre sem recap; `confirmar` é recap e "sim"; `corrigir` é
 recap, uma correção ou um acrescento, e "sim" ao recap novo; `cancelar` é
-recap e "cancela", sem nada enviado; `projeto` é um ditado sem projeto, a
+recap e "abort" (ou "cancel"), sem nada enviado; `projeto` é um ditado sem projeto, a
 resposta à pergunta "para que projeto?" e "sim"; `conversa` é um ditado que
 pede ao Claude uma pergunta, a resposta dada na janela de conversa e "sim".
 
@@ -68,15 +71,15 @@ Os exemplos são só exemplos: nos ditados, diz um pedido teu, como o escreveria
 | a-01 | a | Dita ao <projeto-1> um pedido curto, de uma frase, e confirma. | tell <projeto-1> to add a test for the config loader | diz ao <projeto-1> para acrescentar um teste ao carregador da configuração | ditar_prompt | <projeto-1> | confirmar |
 | a-02 | a | Dita ao <projeto-2> um pedido com dois detalhes (um nome e um número) e confirma. | in <projeto-2>, rename the timeout option to wait seconds and set it to thirty | no <projeto-2>, muda o nome da opção timeout para segundos de espera e põe-na a trinta | ditar_prompt | <projeto-2> | confirmar |
 | a-03 | a | Dita ao <projeto-1> um pedido longo, de duas ou três frases, como o escreverias, e confirma. | for <projeto-1>: the startup is slow. Find out which step takes longest and tell me before changing anything | para o <projeto-1>: o arranque está lento. Descobre que passo demora mais e diz-me antes de mudar alguma coisa | ditar_prompt | <projeto-1> | confirmar |
-| b-01 | b | Pergunta como está o run do <projeto-1> e confirma. | how is the run on <projeto-1> going | como está o run do <projeto-1> | estado | <projeto-1> | confirmar |
-| b-02 | b | Pede para ler o relatório do <projeto-1> e confirma. | read the report for <projeto-1> | lê o relatório do <projeto-1> | ler_relatorio | <projeto-1> | confirmar |
+| b-01 | b | Pergunta como está o run do <projeto-1>; o jarvis responde logo, sem recap. | how is the run on <projeto-1> going | como está o run do <projeto-1> | estado | <projeto-1> | imediato |
+| b-02 | b | Pede para ler o relatório do <projeto-1>; o jarvis lê logo, sem recap. | read the report for <projeto-1> | lê o relatório do <projeto-1> | ler_relatorio | <projeto-1> | imediato |
 | a-04 | a | Dita ao <projeto-2> um pedido; no recap corrige uma palavra ("não, muda X para Y") e confirma o recap novo. | tell <projeto-2> to add tests to the login screen | diz ao <projeto-2> para acrescentar testes ao ecrã de login | ditar_prompt | <projeto-2> | corrigir |
 | l-02 | local | Pede para abrir o editor no <projeto-2> e confirma. | open the editor on <projeto-2> | abre o editor no <projeto-2> | abrir_editor | <projeto-2> | confirmar |
 | a-05 | a | Dita ao <projeto-1> um pedido; no recap acrescenta um detalhe ("acrescenta que...") e confirma. | ask <projeto-1> to review the README | pede ao <projeto-1> para rever o README | ditar_prompt | <projeto-1> | corrigir |
-| a-06 | a | Dita ao <projeto-2> um pedido e cancela no recap. | tell <projeto-2> to delete the old logs | diz ao <projeto-2> para apagar os logs antigos | ditar_prompt | <projeto-2> | cancelar |
+| a-06 | a | Dita ao <projeto-2> um pedido e cancela no recap com "abort". | tell <projeto-2> to delete the old logs | diz ao <projeto-2> para apagar os logs antigos | ditar_prompt | <projeto-2> | cancelar |
 | l-03 | local | Pergunta as horas outra vez. | tell me the time | diz-me as horas | horas | — | imediato |
 | a-07 | a | Dita um pedido sem dizer o projeto; quando o jarvis perguntar, diz o <projeto-1> e confirma. | tell claude to list the tasks that are left | diz ao claude para listar as tarefas que faltam | ditar_prompt | — | projeto |
-| b-03 | b | Pergunta o estado do <projeto-2> e confirma. | what is the status of <projeto-2> | qual é o estado do <projeto-2> | estado | <projeto-2> | confirmar |
+| b-03 | b | Pergunta o estado do <projeto-2>; o jarvis responde logo, sem recap. | what is the status of <projeto-2> | qual é o estado do <projeto-2> | estado | <projeto-2> | imediato |
 | c-01 | c | Lança um run no <projeto-teste> com um objetivo curto e inofensivo e confirma. | start a run on <projeto-teste> to fix a typo in the README | lança um run no <projeto-teste> para corrigir uma gralha no README | lancar_run | <projeto-teste> | confirmar |
 | c-02 | c | Pede para parar o run do <projeto-teste> e confirma. | stop the run on <projeto-teste> | para o run do <projeto-teste> | parar_run | <projeto-teste> | confirmar |
 | c-03 | c | Pede para retomar o run do <projeto-teste> e confirma. | resume the run on <projeto-teste> | retoma o run do <projeto-teste> | retomar_run | <projeto-teste> | confirmar |

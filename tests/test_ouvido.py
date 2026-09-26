@@ -351,6 +351,31 @@ class TestMaosLivres(Base):
         self.assertEqual(ouvido.estado, "repouso")
         self.assertTrue(any("seguida de silencio" in linha for linha in self.linhas))
 
+    def test_ativacao_seguida_de_silencio_vai_ao_callback_sem_transcrever(self) -> None:
+        motor = MotorFalso()
+        so_ativacao: list[Frase] = []
+        ouvido, _ = self.ouvido_maos_livres(motor, ao_ativar_sem_fala=so_ativacao.append)
+        ouvido.processar(chunk(ATIVACAO), False)
+        self.alimentar(ouvido, SILENCIO, chunks_em(ESPERA_PELA_FALA_S) + 1)
+        ouvido.transcrever_pendentes()
+        self.assertEqual(motor.recebidos, [], "nada a transcrever")
+        self.assertEqual(self.frases, [], "nao e uma frase ouvida")
+        self.assertEqual(len(so_ativacao), 1)
+        self.assertEqual(so_ativacao[0].texto, "")
+        self.assertEqual(so_ativacao[0].gatilho, GATILHO_ATIVACAO)
+        self.assertEqual(so_ativacao[0].score_ativacao, 0.9)
+        self.assertEqual(ouvido.estado, "repouso")
+
+    def test_janela_sem_resposta_nunca_vai_ao_callback_da_ativacao(self) -> None:
+        motor = MotorFalso()
+        so_ativacao: list[Frase] = []
+        ouvido, _ = self.ouvido_maos_livres(motor, ao_ativar_sem_fala=so_ativacao.append)
+        self.assertTrue(ouvido.abrir_escuta(2.0))
+        self.alimentar(ouvido, SILENCIO, chunks_em(2.0) + 2)
+        ouvido.transcrever_pendentes()
+        self.assertEqual(so_ativacao, [])
+        self.assertEqual(self.frases, [])
+
     def test_o_fim_da_palavra_logo_apos_a_ativacao_nao_abre_a_fala(self) -> None:
         motor = MotorFalso()
         ouvido, _ = self.ouvido_maos_livres(motor)

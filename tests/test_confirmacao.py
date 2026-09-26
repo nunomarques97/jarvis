@@ -30,6 +30,9 @@ from jarvis.config import (
 )
 from jarvis.confirmacao import (
     FRASES_DE_CONFIRMAR,
+    INTENCOES_SO_DE_LEITURA,
+    PALAVRAS_DE_CONFIRMAR,
+    PALAVRAS_DE_CORTESIA,
     TENTATIVAS,
     Confirmacao,
     Pedido,
@@ -205,14 +208,14 @@ class TestPoliticaDeConfirmacao(Base):
 
     def test_cem_por_cento_das_intencoes_com_efeito_esperam_pelo_sim(self) -> None:
         for lingua in ("pt", "en"):
-            for intencao in sorted(INTENCOES_COM_EFEITO):
+            for intencao in sorted(INTENCOES_COM_EFEITO - INTENCOES_SO_DE_LEITURA):
                 with self.subTest(lingua=lingua, intencao=intencao):
                     confirmacao = self.montar(lingua=lingua)
                     desfecho = confirmacao.iniciar(self.pedido(intencao))
                     self.assertEqual(desfecho.estado, "pendente")
                     self.assertEqual(self.canal.recebidos, [])
                     self.assertEqual(len(self.falas), 1)
-                    for talvez in ("ok", "claro", "surely", "podes", "hum", "sim sim sim", "yes maybe"):
+                    for talvez in ("ok", "claro", "surely", "podes", "hum", "sim talvez", "yes maybe"):
                         confirmacao.responder(talvez)
                         if not confirmacao.a_espera:
                             break
@@ -298,7 +301,7 @@ class TestPoliticaDeConfirmacao(Base):
                 self.assertEqual(classificar_resposta(frase)[0], "confirmar")
         for frase in (
             "", "simples", "sim mas", "assim", "envia ao orbita", "yes and no", "okay", "claro", "surely",
-            "acrescenta que sim", "muda sim para nao", "send it to orbita", "sim sim sim", "yesterday",
+            "acrescenta que sim", "muda sim para nao", "send it to orbita", "sim sim talvez", "yesterday",
             "não envies", "yes but change tests to docs",
         ):
             with self.subTest(frase=frase):
@@ -743,8 +746,8 @@ class TestRespostasMalOuvidas(Base):
 
     def test_enviar_so_com_sim_claro(self) -> None:
         for frase in (
-            "yet", "yeah no", "guess", "yes sir change it", "jess", "yes yes", "yess", "yeahh", "yes uh send it",
-            "says", "send in", "sin", "uh", "confirmed", "sent it", "yes cancel",
+            "yet", "yeah no", "guess", "yes sir change it", "jess", "yess", "yeahh", "yes uh send it",
+            "says", "send in", "sin", "uh", "confirmed", "sent it", "yes cancel", "yes yes maybe",
         ):
             with self.subTest(frase=frase):
                 self.assertNotEqual(classificar_resposta(frase)[0], "confirmar")
@@ -757,7 +760,7 @@ class TestRespostasMalOuvidas(Base):
                 self.assertEqual(confirmacao.responder(frase).estado, "pendente")
                 self.assertTrue(confirmacao.a_espera)
                 self.assertEqual(self.canal.recebidos, [])
-                self.assertEqual(self.falas[-1], "Say yes to send, change, add or cancel.")
+                self.assertEqual(self.falas[-1], "Say yes to send, or abort.")
 
     def test_sim_claro_envia_exatamente_o_recap(self) -> None:
         for frase in ("yes", "Uh, yes.", "yes, send it."):
@@ -783,7 +786,6 @@ class TestRespostasMalOuvidas(Base):
     def test_aproximacao_nunca_transforma_correcao_ou_acrescento_em_cancelar(self) -> None:
         casos = {
             "change castle to docs": "corrigir",
-            "no, castle": "corrigir",
             "add cancel": "acrescentar",
             "add castle": "acrescentar",
             "muda cancer para castle": "corrigir",
@@ -835,7 +837,7 @@ class TestRespostasClarasDeConfirmar(Base):
     def test_quase_confirmacoes_nunca_enviam(self) -> None:
         for frase in (
             "yeah but change X", "yes but ...", "go to atlas", "yellow", "surely not", "send it to atlas and",
-            "yeah sure", "go go", "ok", "okay", "do it later", "manda ao orbita", "confirma depois", "goat",
+            "yeah sure thing", "go go go now", "ok", "okay", "do it later", "manda ao orbita", "confirma depois", "goat",
             "yeah, no", "sure thing", "send it now to atlas",
         ):
             with self.subTest(frase=frase):
@@ -901,7 +903,7 @@ class TestPrazoDepoisDaFala(Base):
         self.relogio.avancar(20.0)
         desfecho = confirmacao.responder("maybe")
         self.assertEqual((desfecho.estado, desfecho.motivo), ("pendente", "resposta nao percebida"))
-        self.assertEqual(self.falas[-1], "Say yes to send, change, add or cancel.")
+        self.assertEqual(self.falas[-1], "Say yes to send, or abort.")
         fim_da_fala = self.fins_da_fala[-1]
         self.assertEqual(confirmacao._prazo, fim_da_fala + 30.0)
         self.assertEqual(confirmacao.prazo_restante(), 30.0)
@@ -1145,14 +1147,199 @@ class TestDialogoCompleto(Base):
         self.assertEqual(self.canal.recebidos, [Pedido("abrir_editor", "atlas", "")])
 
     def test_confirmacoes_aceites_sao_so_as_da_lista_fechada(self) -> None:
-        palavras = {palavra for frase in FRASES_DE_CONFIRMAR for palavra in frase.split()}
+        palavras = {palavra for frase in PALAVRAS_DE_CONFIRMAR | PALAVRAS_DE_CORTESIA for palavra in frase.split()}
         self.assertEqual(
             palavras,
             {
                 "sim", "envia", "isso", "manda", "confirma", "yes", "yeah", "yep", "yup", "sure", "send", "it",
-                "go", "ahead", "confirm", "do", "ok", "okay",
+                "go", "ahead", "confirm", "do", "ok", "okay", "please", "por", "favor",
             },
         )
+        for frase in FRASES_DE_CONFIRMAR:
+            with self.subTest(frase=frase):
+                self.assertEqual(classificar_resposta(frase), ("confirmar", ""))
+        for cortesia in PALAVRAS_DE_CORTESIA:
+            with self.subTest(cortesia=cortesia):
+                self.assertNotEqual(classificar_resposta(cortesia)[0], "confirmar", "cortesia sozinha nunca envia")
+
+
+
+# --- Respostas reais ao recap: abort/cancel primeiro, "sim" exato --------------
+
+#: Transcricoes reais (e variantes de "abort") que tem de cancelar.
+CANCELAMENTOS_OUVIDOS = (
+    "Can't sell it.", "No, can't sell it.", "Castle Castle.", "Uh castle.", "Uh cancel.", "abort", "abort it",
+    "a board", "aboard", "a bored", "abored", "uh abort", "cancel",
+)
+#: Combinacoes claras de confirmar e cortesia que enviam.
+CONFIRMACOES_COMBINADAS = ("Go, yes.", "yes please", "yes, send it", "yeah go ahead", "ok yes", "yes yes")
+#: Respostas que confirmam e cancelam ao mesmo tempo, ou com outro conteudo.
+RESPOSTAS_AMBIGUAS = (
+    "yes abort", "yes cancel", "send it no cancel", "abort yes", "yes, abort it", "cancel, send it",
+    "yeah, cancel", "yes please abort", "yes send it now", "ok yes to atlas", "yes buy it",
+)
+
+
+class TestAbortECancelarAntesDaRegraFinanceira(Base):
+    lingua = "en"
+
+    def montar_com_espia(self) -> Confirmacao:
+        confirmacao = self.montar()
+        self.correcoes: list[tuple] = []
+        corrigir = self.interprete.corrigir
+
+        def espia(*args, **kwargs):
+            self.correcoes.append(args)
+            return corrigir(*args, **kwargs)
+
+        self.interprete.corrigir = espia
+        return confirmacao
+
+    def test_cada_cancelamento_ouvido_cancela_sem_enviar_nem_recusar(self) -> None:
+        for frase in CANCELAMENTOS_OUVIDOS:
+            with self.subTest(frase=frase):
+                confirmacao = self.montar_com_espia()
+                confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module."))
+                desfecho = confirmacao.responder(frase)
+                self.assertEqual(desfecho.estado, "cancelado")
+                self.assertFalse(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertEqual(self.correcoes, [], "o cancelar nunca passa pelas correcoes")
+                self.assertEqual(self.llm.pedidos, [])
+                self.assertEqual(self.falas[-1], "Cancelled, nothing was sent.")
+                self.assertNotIn("recusad", " ".join(self.ecra))
+
+    def test_cancelar_e_classificado_antes_das_correcoes(self) -> None:
+        for frase in CANCELAMENTOS_OUVIDOS:
+            with self.subTest(frase=frase):
+                self.assertEqual(classificar_resposta(frase), ("cancelar", ""))
+
+    def test_pedidos_e_correcoes_financeiras_continuam_recusados(self) -> None:
+        confirmacao = self.montar_com_espia()
+        confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module."))
+        desfecho = confirmacao.responder("no, change tests to buy 10 shares")
+        self.assertEqual(desfecho.estado, "recusado")
+        self.assertEqual(len(self.correcoes), 1)
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertFalse(confirmacao.a_espera)
+        interprete = Interprete(_config("en"), cliente=LlmFalso())
+        self.assertEqual(interprete.interpretar("tell atlas to sell my shares").intencao, INTENCAO_RECUSADA)
+
+    def test_combinacoes_claras_enviam_exatamente_o_recap(self) -> None:
+        for frase in CONFIRMACOES_COMBINADAS:
+            with self.subTest(frase=frase):
+                confirmacao = self.montar()
+                recap = confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module.")).recap
+                self.assertEqual(confirmacao.responder(frase).estado, "executado")
+                self.assertEqual(self.canal.recebidos, [recap.pedido])
+
+    def test_confirmar_e_cancelar_juntos_ou_outro_conteudo_pergunta_de_novo(self) -> None:
+        for frase in RESPOSTAS_AMBIGUAS:
+            with self.subTest(frase=frase):
+                confirmacao = self.montar()
+                confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module."))
+                desfecho = confirmacao.responder(frase)
+                self.assertEqual(desfecho.estado, "pendente")
+                self.assertTrue(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertEqual(self.falas[-1], "Say yes to send, or abort.")
+
+    def test_aproximacao_nunca_confirma(self) -> None:
+        for frase in ("yess", "yea please", "yes pls", "go yess", "send et", "yez yes", "ok", "please", "ok please"):
+            with self.subTest(frase=frase):
+                self.assertNotEqual(classificar_resposta(frase)[0], "confirmar")
+
+    def test_correcao_e_acrescento_continuam_a_dar_recap_novo(self) -> None:
+        confirmacao = self.montar([_llm("ditar_prompt", "atlas", "Add tests to the signup module.")])
+        confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module."))
+        desfecho = confirmacao.responder("no, change login to signup")
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertIn("signup", desfecho.recap.pedido.prompt)
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertEqual(classificar_resposta("add that it is urgent")[0], "acrescentar")
+
+    def test_ecra_de_ajuda_nomeia_yes_abort_e_as_correcoes(self) -> None:
+        for lingua, esperados in (
+            ("en", ('"yes"', '"abort"', '"cancel"', '"no, change X to Y"', '"add ..."')),
+            ("pt", ('"sim"', '"aborta"', '"cancela"', '"não, muda X para Y"', '"acrescenta ..."')),
+        ):
+            with self.subTest(lingua=lingua):
+                confirmacao = self.montar(lingua=lingua)
+                confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module."))
+                ecra = "\n".join(self.ecra)
+                for esperado in esperados:
+                    self.assertIn(esperado, ecra)
+                confirmacao.responder("purple elephants")
+                self.assertEqual(
+                    self.falas[-1], {"en": "Say yes to send, or abort.", "pt": "Diz sim para enviar, ou aborta."}[lingua]
+                )
+
+
+class TestEstadoERelatorioSemConfirmacao(Base):
+    lingua = "en"
+
+    def test_estado_e_relatorio_com_projeto_correm_logo(self) -> None:
+        for intencao in ("estado", "ler_relatorio"):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                desfecho = confirmacao.iniciar(self.pedido(intencao, "atlas"))
+                self.assertEqual(desfecho.estado, "executado")
+                self.assertFalse(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [Pedido(intencao, "atlas", "")])
+                self.assertFalse(any("Confirm?" in fala or "Send it?" in fala for fala in self.falas))
+
+    def test_what_is_the_status_of_jarvis_corre_logo(self) -> None:
+        llm = LlmFalso([_llm("estado", "jarvis")])
+        config = Config(
+            microfone="Microfone Ficticio",
+            projetos=(Projeto("jarvis", Path("D:/caminho/para/jarvis")),),
+            ouvido=ConfigOuvido(lingua="en"),
+            interprete=ConfigInterprete(),
+        )
+        interprete = Interprete(config, cliente=llm)
+        canal = CanalFalso()
+        falas: list[str] = []
+        confirmacao = Confirmacao(interprete, canal, falar=falas.append, mostrar=lambda _t: None, relogio=RelogioFalso())
+        interpretacao = interprete.interpretar("What is the status of Jarvis?")
+        self.assertEqual((interpretacao.intencao, interpretacao.projeto), ("estado", "jarvis"))
+        desfecho = confirmacao.iniciar(interpretacao)
+        self.assertEqual(desfecho.estado, "executado")
+        self.assertEqual(canal.recebidos, [Pedido("estado", "jarvis", "")])
+        self.assertFalse(any("Confirm?" in fala for fala in falas))
+
+    def test_sem_projeto_pergunta_qual_e_corre_logo_que_e_dito(self) -> None:
+        for intencao in ("estado", "ler_relatorio"):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                desfecho = confirmacao.iniciar(self.pedido(intencao, None))
+                self.assertEqual(desfecho.estado, "pendente")
+                self.assertTrue(desfecho.recap.falta_projeto)
+                self.assertTrue(self.falas[-1].endswith("Which project?"))
+                self.assertNotIn("Send it?", self.falas[-1])
+                self.assertEqual(self.canal.recebidos, [])
+                desfecho = confirmacao.responder("atlas")
+                self.assertEqual(desfecho.estado, "executado")
+                self.assertFalse(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [Pedido(intencao, "atlas", "")])
+
+    def test_runs_continuam_a_pedir_recap_e_sim(self) -> None:
+        for intencao in ("lancar_run", "retomar_run", "parar_run"):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                extra = {"prompt": "Fix a typo in the README."} if intencao == "lancar_run" else {}
+                desfecho = confirmacao.iniciar(self.pedido(intencao, "atlas", **extra))
+                self.assertEqual(desfecho.estado, "pendente")
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertEqual(confirmacao.responder("yes").estado, "executado")
+                self.assertEqual(len(self.canal.recebidos), 1)
+
+    def test_runs_sem_projeto_pedem_o_sim_depois_do_projeto(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("parar_run", None))
+        self.assertEqual(confirmacao.responder("atlas").estado, "pendente")
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("parar_run", "atlas", "")])
 
 
 if __name__ == "__main__":

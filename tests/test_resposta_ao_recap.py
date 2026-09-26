@@ -258,7 +258,7 @@ class TestRespostaSemPalavraDeAtivacao(unittest.TestCase):
         cena = Cena([DITADO_EN])
         cena.com_recap()
         cena.dizer("purple elephants")
-        self.assertEqual(cena.falados[-1], "Say yes to send, change, add or cancel.")
+        self.assertEqual(cena.falados[-1], "Say yes to send, or abort.")
         self.assertTrue(cena.jarvis.confirmacao.a_espera)
         self.assertEqual(cena.aberturas[-1][0], cena.fins_da_fala[-1])
         self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
@@ -615,6 +615,53 @@ class TestCabecalho(unittest.TestCase):
 
     def test_sem_vad_diz_que_e_com_a_tecla(self) -> None:
         self.assertIn("a resposta ao recap diz-se com a tecla de falar, dentro de 30 s", self._cabecalho(None))
+
+
+
+class TestRespostasReaisAoRecap(unittest.TestCase):
+    """As transcricoes reais da aceitacao, ditas sem palavra de ativacao."""
+
+    def test_cancelamentos_ouvidos_cancelam_sem_regra_financeira(self) -> None:
+        for frase in (
+            "Can't sell it.", "No, can't sell it.", "Castle Castle.", "Uh castle.", "Uh cancel.", "abort", "abort it",
+            "a board", "aboard", "a bored", "abored", "uh abort", "cancel",
+        ):
+            with self.subTest(frase=frase):
+                cena = Cena([DITADO_EN])
+                cena.com_recap()
+                pedidos_ao_llm = len(cena.m.llm.pedidos)
+                cena.dizer(frase)
+                self.assertFalse(cena.jarvis.confirmacao.a_espera)
+                self.assertEqual(cena.canal.recebidos, [])
+                self.assertEqual(len(cena.m.llm.pedidos), pedidos_ao_llm, "cancelar nunca vai ao LLM")
+                self.assertEqual(cena.falados[-1], "Cancelled, nothing was sent.")
+                self.assertNotIn("recusad", cena.log())
+
+    def test_combinacoes_claras_enviam_uma_vez(self) -> None:
+        for frase in ("Go, yes.", "yes please", "yes, send it", "yeah go ahead", "ok yes", "yes yes"):
+            with self.subTest(frase=frase):
+                cena = Cena([DITADO_EN])
+                cena.com_recap()
+                cena.dizer(frase)
+                self.assertEqual(cena.canal.recebidos, [("atlas", "Fix the login test.")])
+
+    def test_confirmar_e_cancelar_juntos_pergunta_de_novo(self) -> None:
+        for frase in ("yes abort", "yes cancel", "send it no cancel"):
+            with self.subTest(frase=frase):
+                cena = Cena([DITADO_EN])
+                cena.com_recap()
+                cena.dizer(frase)
+                self.assertTrue(cena.jarvis.confirmacao.a_espera)
+                self.assertEqual(cena.canal.recebidos, [])
+                self.assertEqual(cena.falados[-1], "Say yes to send, or abort.")
+                self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
+
+    def test_estado_do_jarvis_corre_sem_recap(self) -> None:
+        cena = Cena([resposta_llm("estado", "jarvis")], nomes=("atlas", "jarvis"))
+        cena.pedir("What is the status of Jarvis?")
+        self.assertFalse(cena.jarvis.confirmacao.a_espera)
+        self.assertFalse(any("Confirm?" in fala for fala in cena.falados))
+        self.assertIn("desfecho: executado", cena.log())
 
 
 if __name__ == "__main__":

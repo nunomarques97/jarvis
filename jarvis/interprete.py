@@ -100,6 +100,11 @@ INTENCOES: tuple[str, ...] = (
 #: intencoes: so a regra deterministica ou a marca `financeiro` a produzem.
 INTENCAO_RECUSADA = "recusado"
 
+#: Intencao de uma frase so de cortesia ("Excellent.", "Yeah.", "obrigado")
+#: fora de um recap ou de uma conversa. Tambem fora do esquema do LLM: so a
+#: lista fechada `_CORTESIAS` a produz, e nunca vai ao LLM nem ao Claude.
+INTENCAO_CORTESIA = "cortesia"
+
 #: Intencoes que agem sobre um projeto: sem projeto dito, o jarvis pergunta.
 INTENCOES_COM_PROJETO = frozenset(
     {
@@ -1365,12 +1370,20 @@ _EXEMPLOS_DE_PROMPT: dict[str, tuple[tuple[str, str], ...]] = {
             "Add a field for the phone number to the user model.",
         ),
         ("for project harbor fix the typo in the page header", "Fix the typo in the page header."),
+        (
+            "for harbor, the page load is slow. find out which query takes longest and tell me before changing anything",
+            "The page load is slow. Find out which query takes longest and tell me before changing anything.",
+        ),
         ("tell LumenApp to attest to the configuration module", "Add tests to the configuration module."),
     ),
     "pt": (
         (
             "pede ao harbor para hum corrigir o erro de login na página de definições",
             "Corrige o erro de login na página de definições.",
+        ),
+        (
+            "para o harbor, a página demora a abrir. descobre que consulta demora mais e diz-me antes de mudar alguma coisa",
+            "A página demora a abrir. Descobre que consulta demora mais e diz-me antes de mudar alguma coisa.",
         ),
         (
             "diz ao LumenApp para a crescentar testes ao módulo de configuração",
@@ -1645,6 +1658,149 @@ def pergunta_literal(frase: str, lingua: str) -> str:
     return limpa if _PALAVRA_ORIGINAL.search(limpa) else frase
 
 
+# --- Cortesia solta ------------------------------------------------------------
+
+#: Palavras so de cortesia ou de acknowledgement. Uma frase feita so delas,
+#: fora de um recap ou de uma conversa, nao pede nada a ninguem.
+_CORTESIAS = frozenset(
+    {
+        "excellent", "great", "thanks", "thank", "ok", "okay", "yeah", "yes", "yep", "nice", "cool",
+        "perfect", "awesome", "good", "alright", "fine",
+        "obrigado", "obrigada", "fixe", "otimo", "perfeito", "excelente", "boa", "bem", "sim",
+    }
+)
+
+#: Palavras que acompanham a cortesia sem lhe juntar um pedido ("thank you
+#: very much", "that's great", "muito obrigado", "hey jarvis, thanks").
+_ACOMPANHAM_A_CORTESIA = frozenset(
+    {"you", "very", "much", "so", "that", "thats", "s", "muito", "ta", "esta", "hey", "jarvis", "boas"}
+) | _HESITACOES
+
+
+def so_cortesia(frase: str) -> bool:
+    """A frase so tem cortesia ("Excellent.", "Yeah.", "thank you", "fixe").
+
+    Lista fechada e deterministica: pelo menos uma palavra de cortesia, e as
+    outras so hesitacoes, a palavra de ativacao ou "you"/"very"/"muito".
+    """
+    palavras = _normalizar(frase).split()
+    return (
+        any(palavra in _CORTESIAS for palavra in palavras)
+        and all(palavra in _CORTESIAS or palavra in _ACOMPANHAM_A_CORTESIA for palavra in palavras)
+    )
+
+
+# --- Pergunta sem projeto que fala de trabalho num projeto ------------------------
+
+#: Vocabulario de trabalho num projeto: tarefas, runs, testes, codigo,
+#: ficheiros, commits, relatorio, estado. Uma pergunta sem projeto que o usa
+#: e um pedido a um projeto por escolher, nunca uma pergunta geral.
+_VOCABULARIO_DE_PROJETO = re.compile(
+    r"\b(?:tasks?|runs?|tests?|testing|code|codebase|files?|commits?|reports?|status|bugs?|branch(?:es)?"
+    r"|tarefas?|testes?|codigo|ficheiros?|arquivos?|relatorios?|estado(?!\s+do\s+tempo))\b"
+)
+
+#: Temas de uma pergunta geral: com eles, "report" ou "estado" nao sao de um
+#: projeto ("the weather report", "o estado das estradas").
+_TEMAS_GERAIS = re.compile(
+    r"\b(?:weather|temperature|rain|forecast|news|football|game|match|traffic|roads?"
+    r"|tempo|temperatura|chuva|chover|noticias|futebol|jogo|transito|estradas?)\b"
+)
+
+
+def fala_de_projeto(frase: str) -> bool:
+    """A frase fala de tarefas, runs, testes, codigo, ficheiros, commits, relatorio ou estado."""
+    normalizada = _normalizar(frase)
+    return bool(_VOCABULARIO_DE_PROJETO.search(normalizada)) and not _TEMAS_GERAIS.search(normalizada)
+
+
+# --- Conteudo da fala que a reescrita nao pode perder -----------------------------
+
+#: Palavras que uma reescrita pode tirar sem perder informacao: ligacoes,
+#: pronomes, auxiliares, formas de pedir ("can you", "podes") e os nomes do
+#: assistente. Todas as outras palavras da fala tem de ficar no prompt.
+_PALAVRAS_SEM_INFORMACAO = (
+    _PALAVRAS_VAZIAS
+    | _HESITACOES
+    | frozenset(
+        {
+            # ingles
+            "i", "me", "my", "mine", "myself", "you", "your", "yours", "we", "us", "our", "he", "him",
+            "his", "she", "her", "they", "them", "their", "its", "is", "are", "was", "were", "be", "been",
+            "being", "am", "do", "does", "did", "can", "could", "would", "will", "should", "shall", "may",
+            "might", "must", "just", "like", "maybe", "perhaps", "actually", "basically", "really", "kind",
+            "sort", "gonna", "wanna", "gotta", "going", "want", "need", "let", "lets", "s", "d", "ll", "re",
+            "ve", "m", "hey", "jarvis", "claude", "ok", "okay", "yeah", "thanks", "thank", "well", "right",
+            "if", "at", "by", "from", "into", "about", "there", "here", "so", "very", "much",
+            # portugues
+            "eu", "mim", "comigo", "tu", "te", "ti", "voce", "lhe", "lhes", "ele", "ela", "eles", "elas",
+            "meu", "minha", "meus", "minhas", "teu", "tua", "seu", "sua", "sao", "esta", "estao", "era",
+            "foi", "ser", "estar", "ter", "tem", "tens", "ha", "podes", "pode", "podia", "podias",
+            "consegues", "consegue", "queria", "quero", "gostava", "preciso", "vai", "vais", "vou", "faz",
+            "pa", "la", "ai", "hum", "boas", "obrigado", "obrigada", "ao", "aos", "pelo", "pela", "com",
+        }
+    )
+)
+
+#: Negacoes (depois de `_normalizar`, "don't" da "don t"): uma negacao da fala
+#: fica dita quando o prompt tem outra ("don't delete" -> "Do not delete").
+_NEGACOES = frozenset(
+    {"not", "no", "never", "t", "don", "doesn", "didn", "isn", "aren", "wasn", "won", "cannot", "nao", "nunca", "nem"}
+)
+
+
+#: Num `lancar_run`, o prompt e o objetivo do run: as palavras que pedem o
+#: lancamento ("launch a new run", "lanca um run") ficam de fora dele.
+_PALAVRAS_DE_LANCAR = frozenset(
+    {
+        "launch", "start", "begin", "kick", "off", "open", "new", "run", "runs", "session", "forja",
+        "lanca", "lancar", "lances", "arranca", "arrancar", "comeca", "comecar", "inicia", "iniciar", "abre",
+        "novo", "nova", "sessao",
+    }
+)
+
+
+def _fala_sem_projetos(frase: str, nomes: tuple[str, ...] | list[str]) -> list[str]:
+    """As palavras normalizadas da fala sem o endereco e sem os nomes de projeto."""
+    for projeto in projetos_mencionados(frase, nomes):
+        frase = sem_endereco_ao_projeto(frase, projeto, nomes)
+    palavras = _normalizar(frase).split()
+    tirar: set[int] = set()
+    for inicio, fim, _nome in _mencoes(palavras, nomes):
+        tirar.update(range(inicio, fim))
+    return [palavra for indice, palavra in enumerate(palavras) if indice not in tirar]
+
+
+def palavras_perdidas(
+    frase: str, prompt: str, nomes: tuple[str, ...] | list[str] = (), ignorar: frozenset[str] = frozenset()
+) -> tuple[str, ...]:
+    """As palavras de conteudo da fala que o prompt reescrito ja nao tem.
+
+    Sem hesitacoes, sem o endereco ("tell X to", "for X", "in X", "ask X
+    to") e sem os nomes de projeto, cada palavra que nao e so ligacao ou
+    forma de pedir tem de estar no prompt: igual, numa flexao ("takes" ->
+    "take"), ou corrigida de um erro de reconhecimento que soa como ela
+    ("attest" -> "add tests"). `ignorar` sao palavras que o prompt pode
+    tirar nesta intencao. Vazio quando nada se perdeu.
+    """
+    fala = _fala_sem_projetos(frase, nomes)
+    no_prompt = _normalizar(prompt).split()
+    perdidas: list[str] = []
+    for indice, palavra in enumerate(fala):
+        if palavra in _PALAVRAS_SEM_INFORMACAO or palavra in ignorar or palavra in perdidas:
+            continue
+        if palavra in _NEGACOES and any(dita in _NEGACOES for dita in no_prompt):
+            continue
+        if any(_mesma_palavra(palavra, dita) or _mesma_palavra(dita, palavra) for dita in no_prompt):
+            continue
+        # Papeis trocados: a palavra da fala (sozinha ou com uma vizinha) soa
+        # como um troco do prompt que a fala nao tem ("attest" / "add tests").
+        if _dito_de_ouvido(indice, fala, no_prompt):
+            continue
+        perdidas.append(palavra)
+    return tuple(perdidas)
+
+
 # --- Interprete ---------------------------------------------------------------
 
 _ACOES_DO_ROUTER = {
@@ -1782,6 +1938,10 @@ class Interprete:
                 "so a palavra de ativacao, sem pedido",
                 so_confirmacao=True,
             )
+        if so_cortesia(frase):
+            return Interpretacao(
+                literal, INTENCAO_CORTESIA, None, "", "regra", "so cortesia: nada a pedir, nunca vai ao LLM"
+            )
 
         termo = pedido_financeiro(frase, self._nomes)
         if termo is not None:
@@ -1914,6 +2074,14 @@ class Interprete:
                     motivos.append(
                         f"prompt reescrito acrescenta pedidos ({', '.join(acrescentados)}): fica o texto literal"
                     )
+                elif intencao != INTENCAO_PERGUNTA_GERAL:
+                    ignorar = _PALAVRAS_DE_LANCAR if intencao == "lancar_run" else frozenset()
+                    perdidas = palavras_perdidas(frase, prompt, self._nomes, ignorar)
+                    if perdidas:
+                        prompt = pergunta_literal(frase, self.lingua)
+                        motivos.append(
+                            f"prompt reescrito perde palavras da fala ({', '.join(perdidas)}): fica a fala limpa"
+                        )
             # O projeto ja vai a parte: o endereco a ele sai do que se envia.
             sem_endereco = sem_endereco_ao_projeto(prompt, projeto, self._nomes)
             if sem_endereco != prompt:
@@ -1950,9 +2118,20 @@ class Interprete:
         Um comando local imediato sem as palavras dele passa a pergunta geral;
         uma conversa sem projeto dito tambem, a nao ser que responda ao Claude
         ou lhe seja dirigida (essa continua a pedir o projeto). Uma pergunta
-        geral que diz um projeto e um pedido a esse projeto. Sem conteudo
-        nenhum ("sim", "ok", "hum"), a frase fica `desconhecido`.
+        geral que diz um projeto e um pedido a esse projeto, e uma que fala
+        de tarefas, runs, testes, codigo, ficheiros, commits, relatorio ou
+        estado sem projeto e um pedido que pergunta "qual projeto?". Sem
+        conteudo nenhum ("sim", "ok", "hum"), a frase fica `desconhecido`.
         """
+        intencao, prompt = self._guardar_intencao_do_llm(frase, intencao, prompt, ditos, motivos)
+        if intencao == INTENCAO_PERGUNTA_GERAL and not ditos and fala_de_projeto(frase):
+            motivos.append("pergunta sem projeto sobre trabalho num projeto: pedido, falta o projeto")
+            return "ditar_prompt", prompt
+        return intencao, prompt
+
+    def _guardar_intencao_do_llm(
+        self, frase: str, intencao: str, prompt: str, ditos: tuple[str, ...], motivos: list[str]
+    ) -> tuple[str, str]:
         if intencao in _PALAVRAS_DO_COMANDO and not comando_local_dito(intencao, frase, self._nomes):
             if sem_conteudo(frase):
                 motivos.append(f"{intencao} do LLM sem as palavras do comando e sem conteudo")

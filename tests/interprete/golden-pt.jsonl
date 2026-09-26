@@ -107,3 +107,7 @@
 {"id": "pt-107", "texto": "vai chover amanhã em lisboa", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["chov"], "proibidos": ["commit"], "nota": ""}
 {"id": "pt-108", "texto": "qual é o preço da bitcoin hoje", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "preco de um ativo"}
 {"id": "pt-109", "texto": "quanto valem as ações da galp", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "preco de um ativo"}
+{"id": "pt-110", "texto": "Para o kanban light, o arranque está lento. Descobre que passo demora mais e diz-me antes de mudar alguma coisa.", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["arranque", "lento", "demora", "antes"], "proibidos": ["commit", "teste"], "nota": "ditado longo: a reescrita guarda todas as frases"}
+{"id": "pt-111", "texto": "Fixe.", "intencao": "cortesia", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "so cortesia: nunca enviada"}
+{"id": "pt-112", "texto": "Obrigado.", "intencao": "cortesia", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "so cortesia: nunca enviada"}
+{"id": "pt-113", "texto": "lista as tarefas que faltam", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["tarefas"], "proibidos": ["commit"], "nota": "trabalho de projeto sem projeto: pergunta qual"}

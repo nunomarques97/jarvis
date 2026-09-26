@@ -13,6 +13,7 @@ Corre com:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import select
@@ -1339,7 +1340,7 @@ class TestPerguntaGeral(unittest.TestCase):
         self.assertEqual((resultado.intencao, resultado.projeto), ("conversa", "atlas"))
 
     def test_respostas_soltas_nunca_viram_pergunta_geral(self) -> None:
-        for frase, lingua in (("yes", "en"), ("no", "en"), ("ok", "en"), ("sim", "pt"), ("não", "pt"), ("uh okay", "en")):
+        for frase, lingua in (("no", "en"), ("não", "pt"), ("uh no", "en")):
             for resposta in (_llm("conversa", prompt=frase), _llm("pergunta_geral", prompt=frase), _llm("horas")):
                 with self.subTest(frase=frase, resposta=resposta["intencao"]):
                     interprete, _ = _interprete([resposta], lingua=lingua)
@@ -1347,6 +1348,12 @@ class TestPerguntaGeral(unittest.TestCase):
                     self.assertEqual(resultado.intencao, "desconhecido")
                     self.assertTrue(resultado.so_confirmacao)
                     self.assertIsNone(resultado.projeto)
+        # "yes", "ok", "sim" soltos sao so cortesia: nem pergunta geral nem LLM.
+        for frase, lingua in (("yes", "en"), ("ok", "en"), ("sim", "pt"), ("uh okay", "en")):
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("pergunta_geral", prompt=frase)], lingua=lingua)
+                self.assertEqual(interprete.interpretar(frase).intencao, interprete_mod.INTENCAO_CORTESIA)
+                self.assertEqual(cliente.pedidos, [])
 
     def test_mensagem_dirigida_ao_claude_sem_projeto_continua_conversa(self) -> None:
         for frase in ("yes, go with the simpler version", "tell it I prefer the second option", "responde ao claude que sim"):
@@ -1430,7 +1437,7 @@ class TestComandosLocaisGuardados(unittest.TestCase):
         for intencao in ("horas", "calar", "dormir", "acordar", "pergunta_geral"):
             with self.subTest(intencao=intencao):
                 interprete, _ = _interprete([_llm(intencao)], lingua="en")
-                resultado = interprete.interpretar("uh okay")
+                resultado = interprete.interpretar("uh no")
                 self.assertEqual(resultado.intencao, "desconhecido")
                 self.assertTrue(resultado.so_confirmacao)
 
@@ -1557,7 +1564,7 @@ class TestGoldenSet(unittest.TestCase):
             with self.subTest(lingua=lingua):
                 self.assertGreaterEqual(len(casos), 80)
                 intencoes = {caso.intencao for caso in casos}
-                self.assertEqual(intencoes, set(INTENCOES) | {INTENCAO_RECUSADA})
+                self.assertEqual(intencoes, set(INTENCOES) | {INTENCAO_RECUSADA, interprete_mod.INTENCAO_CORTESIA})
                 com_prompt = [c for c in casos if c.intencao in interprete_mod.INTENCOES_COM_PROMPT]
                 self.assertTrue(all(c.obrigatorios and c.proibidos for c in com_prompt))
                 self.assertGreaterEqual(sum("STT" in c.nota for c in casos), 3)
@@ -1704,6 +1711,241 @@ class TestAvaliador(unittest.TestCase):
         self.assertEqual(codigo, 2)
         self.assertIn("ollama pull qwen3:8b", saida.getvalue())
 
+
+
+# --- Cortesia solta, conteudo do ditado e perguntas de projeto sem projeto ---------------
+
+CORTESIAS_SOLTAS = (
+    "Excellent.",
+    "Yeah.",
+    "great",
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "yes",
+    "nice",
+    "cool",
+    "perfect",
+    "obrigado",
+    "fixe",
+    "Uh yeah.",
+    "hey jarvis, thanks",
+    "Thank you very much.",
+    "Muito obrigado.",
+)
+
+STARTUP_LENTO = (
+    "For crypto rather, the startup is slow. Find out which step takes longest and tell me before changing anything."
+)
+#: A reescrita truncada que o LLM devolveu na sessao real.
+STARTUP_TRUNCADO = "Find out which step takes longest and tell me before changing anything."
+
+PERGUNTAS_DE_PROJETO_SEM_PROJETO = (
+    "Talk about to list the tasks that are left.",
+    "Which tests are failing?",
+    "How is the run going?",
+    "Read me the report.",
+    "What changed in the last commit?",
+    "Which files did you change?",
+    "What is the status?",
+    "Is the code ready?",
+)
+
+PERGUNTAS_GERAIS_DE_VERDADE = (
+    "What is the weather in Porto today?",
+    "What's the latest news?",
+    "Who won the football game last night?",
+    "How tall is the Eiffel Tower?",
+    "What is the weather report for tomorrow?",
+)
+
+
+class TestCortesiaSolta(unittest.TestCase):
+    def test_frases_so_de_cortesia_nunca_vao_ao_llm(self) -> None:
+        for lingua in ("en", "pt"):
+            for frase in CORTESIAS_SOLTAS:
+                with self.subTest(lingua=lingua, frase=frase):
+                    interprete, cliente = _interprete([_llm("pergunta_geral", "", frase)], lingua=lingua)
+                    resultado = interprete.interpretar(frase)
+                    self.assertEqual(resultado.intencao, interprete_mod.INTENCAO_CORTESIA)
+                    self.assertIsNone(resultado.projeto)
+                    self.assertEqual(resultado.prompt, "")
+                    self.assertEqual(resultado.origem, "regra")
+                    self.assertEqual(cliente.pedidos, [])
+
+    def test_cortesia_fica_fora_do_esquema_do_llm(self) -> None:
+        self.assertNotIn(interprete_mod.INTENCAO_CORTESIA, INTENCOES)
+        self.assertNotIn(
+            interprete_mod.INTENCAO_CORTESIA, interprete_mod._esquema(NOMES)["properties"]["intencao"]["enum"]
+        )
+
+    def test_cortesia_com_um_pedido_nao_e_so_cortesia(self) -> None:
+        for frase in ("yes, add tests to atlas", "thanks, now fix the login", "great, what time is it", "ok atlas"):
+            with self.subTest(frase=frase):
+                self.assertFalse(interprete_mod.so_cortesia(frase))
+
+    def test_hesitacoes_ou_palavra_de_ativacao_sozinhas_nao_sao_cortesia(self) -> None:
+        for frase in ("", "uh", "hey jarvis", "you"):
+            with self.subTest(frase=frase):
+                self.assertFalse(interprete_mod.so_cortesia(frase))
+
+
+class TestDitadoNaoPerdeConteudo(unittest.TestCase):
+    def test_reescrita_truncada_do_log_fica_a_fala_limpa(self) -> None:
+        interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", STARTUP_TRUNCADO)])
+        resultado = interprete.interpretar(STARTUP_LENTO)
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
+        self.assertEqual(
+            resultado.prompt,
+            "The startup is slow. Find out which step takes longest and tell me before changing anything.",
+        )
+        self.assertIn("perde palavras da fala (startup, slow)", resultado.motivo)
+        self.assertNotIn("crypto", resultado.prompt.lower())
+        self.assertNotIn("rather", resultado.prompt.lower())
+
+    def test_reescrita_completa_fica(self) -> None:
+        completa = "The startup is slow. Find out which step takes the longest and tell me before changing anything."
+        interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", completa)])
+        resultado = interprete.interpretar(STARTUP_LENTO)
+        self.assertEqual(resultado.prompt, completa)
+        self.assertNotIn("perde palavras", resultado.motivo)
+
+    def test_palavras_perdidas_ignora_endereco_nome_e_hesitacoes(self) -> None:
+        perdidas = interprete_mod.palavras_perdidas
+        self.assertEqual(perdidas(STARTUP_LENTO, STARTUP_TRUNCADO, NOMES_COM_CRIPTO), ("startup", "slow"))
+        casos = (
+            ("uh tell atlas to fix the uh login page", "Fix the login page."),
+            ("ask atlas to add tests to the parser", "Add tests to the parser."),
+            ("in atlas, run the tests", "Run the tests."),
+            ("for atlas: the menu takes long to open", "The menu take long to open."),
+            ("tell LumenApp to attest to the configuration module", "Add tests to the configuration module."),
+            ("don't delete the old files in atlas", "Do not delete the old files."),
+            ("no atlas corrige os testes do login", "Corrige os testes do login."),
+        )
+        for fala, prompt in casos:
+            with self.subTest(fala=fala):
+                self.assertEqual(perdidas(fala, prompt, (*NOMES, "LumenApp")), ())
+
+    def test_reescrita_que_perde_um_pedido_fica_a_fala_limpa(self) -> None:
+        interprete, _ = _interprete([_llm("ditar_prompt", "atlas", "Fix the login.")], lingua="en")
+        resultado = interprete.interpretar("tell atlas to fix the login and update the readme")
+        self.assertEqual(resultado.prompt, "Fix the login and update the readme.")
+        self.assertIn("perde palavras da fala (update, readme)", resultado.motivo)
+
+    def test_correcao_de_palavra_mal_ouvida_conta_como_presente(self) -> None:
+        interprete, _ = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Add tests to the configuration module.")]
+        )
+        resultado = interprete.interpretar("tell crypto rather to attest to the configuration module")
+        self.assertEqual(resultado.prompt, "Add tests to the configuration module.")
+        self.assertNotIn("perde palavras", resultado.motivo)
+
+    def test_exemplo_few_shot_em_ingles_guarda_todas_as_frases(self) -> None:
+        exemplos = dict(interprete_mod._EXEMPLOS_DE_PROMPT["en"])
+        longos = [fala for fala in exemplos if "is slow" in fala]
+        self.assertEqual(len(longos), 1)
+        fala = longos[0]
+        self.assertNotIn("crypto", fala)
+        self.assertIn("is slow", exemplos[fala])
+        self.assertIn("before changing anything", exemplos[fala])
+        self.assertEqual(interprete_mod.palavras_perdidas(fala, exemplos[fala], ("harbor",)), ())
+
+    def test_golden_en_tem_o_caso_do_arranque_lento(self) -> None:
+        casos = avaliador.ler_golden(RAIZ / "tests" / "interprete" / "golden-en.jsonl")
+        arranque = [caso for caso in casos if "startup is slow" in caso.texto]
+        self.assertEqual(len(arranque), 1)
+        self.assertEqual(arranque[0].intencao, "ditar_prompt")
+        self.assertIn("startup", arranque[0].obrigatorios)
+        self.assertIn("slow", arranque[0].obrigatorios)
+
+
+class TestPerguntaDeProjetoSemProjeto(unittest.TestCase):
+    def test_fala_de_trabalho_num_projeto_pede_o_projeto(self) -> None:
+        for frase in PERGUNTAS_DE_PROJETO_SEM_PROJETO:
+            for resposta in (_llm("pergunta_geral", "", frase), _llm("conversa"), _llm("ditar_prompt", "", frase)):
+                with self.subTest(frase=frase, resposta=resposta["intencao"]):
+                    interprete, _ = _interprete([resposta], lingua="en")
+                    resultado = interprete.interpretar(frase)
+                    self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", None))
+                    self.assertEqual(resultado.pergunta, "Which project?")
+                    self.assertTrue(resultado.prompt)
+
+    def test_frase_real_do_log(self) -> None:
+        interprete, _ = _interprete_com_cripto([_llm("pergunta_geral", "", "List the tasks that are left.")])
+        resultado = interprete.interpretar("Talk about to list the tasks that are left.")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", None))
+        self.assertEqual(resultado.pergunta, "Which project?")
+        self.assertIn("tasks", resultado.prompt)
+
+    def test_em_portugues_pergunta_qual_projeto(self) -> None:
+        interprete, _ = _interprete([_llm("pergunta_geral", "", "Lista as tarefas que faltam.")])
+        resultado = interprete.interpretar("lista as tarefas que faltam")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", None))
+        self.assertTrue(resultado.pergunta)
+
+    def test_perguntas_gerais_de_verdade_continuam_gerais(self) -> None:
+        for frase in PERGUNTAS_GERAIS_DE_VERDADE:
+            with self.subTest(frase=frase):
+                interprete, _ = _interprete([_llm("pergunta_geral", "", frase)], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual((resultado.intencao, resultado.projeto), ("pergunta_geral", None))
+        interprete, _ = _interprete([_llm("pergunta_geral", "", "Como está o estado do tempo?")])
+        self.assertEqual(interprete.interpretar("como está o estado do tempo").intencao, "pergunta_geral")
+
+    def test_com_projeto_dito_segue_para_esse_projeto(self) -> None:
+        interprete, _ = _interprete([_llm("pergunta_geral", "", "List the tasks that are left.")], lingua="en")
+        resultado = interprete.interpretar("in atlas, list the tasks that are left")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "atlas"))
+
+
+class InterpreteQueErra(InterpreteDoGolden):
+    """O interprete do golden, com a intencao errada nos casos indicados."""
+
+    def __init__(self, casos, errados) -> None:
+        super().__init__(casos)
+        self.errados = set(errados)
+
+    def interpretar(self, texto):
+        resultado = super().interpretar(texto)
+        if texto in self.errados:
+            return dataclasses.replace(resultado, intencao="desconhecido")
+        return resultado
+
+
+class TestMinimoDaIntencao(unittest.TestCase):
+    def setUp(self) -> None:
+        self.casos = avaliador.ler_golden(avaliador.PASTA_GOLDEN / "golden-en.jsonl")
+
+    def _correr(self, args, errados=0) -> int:
+        textos = [c.texto for c in self.casos if c.intencao != "desconhecido"][:errados]
+        with contextlib.redirect_stdout(io.StringIO()):
+            return avaliador.principal(
+                ["--lingua", "en", "--verificar", *args],
+                fabrica=lambda config: InterpreteQueErra(self.casos, textos),
+                medir=lambda: None,
+            )
+
+    def test_opcao_em_percentagem(self) -> None:
+        args = avaliador.construir_parser().parse_args(["--minimo-intencao", "99.1"])
+        self.assertAlmostEqual(args.minimo_intencao, 0.991)
+        self.assertIsNone(avaliador.construir_parser().parse_args([]).minimo_intencao)
+        for invalido in ("abc", "101", "-1", "nan"):
+            with self.subTest(invalido=invalido), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    avaliador.construir_parser().parse_args(["--minimo-intencao", invalido])
+
+    def test_verificar_falha_abaixo_do_minimo_pedido(self) -> None:
+        self.assertEqual(self._correr(["--minimo-intencao", "99.1"]), 0)
+        self.assertLess(1 / len(self.casos), 1 - 0.991, "um erro ainda fica acima de 99,1%")
+        self.assertEqual(self._correr(["--minimo-intencao", "99.1"], errados=1), 0)
+        self.assertGreater(2 / len(self.casos), 1 - 0.991)
+        self.assertEqual(self._correr([], errados=2), 0, "sem minimo, a meta base de 95% passa")
+        self.assertEqual(self._correr(["--minimo-intencao", "99.1"], errados=2), 1)
+
+    def test_minimo_nunca_desce_a_meta_base(self) -> None:
+        errados = len(self.casos) // 10
+        self.assertEqual(self._correr(["--minimo-intencao", "50"], errados=errados), 1)
 
 if __name__ == "__main__":
     unittest.main()

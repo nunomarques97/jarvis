@@ -29,6 +29,10 @@ Other options:
 
 Ctrl+C, closing the window or saying "cala-te" / "be quiet" silences the voice at once.
 
+**Only one jarvis at a time.** Two jarvis windows would both hear and answer the same sentence, so jarvis with the microphone refuses to start while another one is running. It says so on screen ("Another jarvis is already running (PID ...). Close it first, then start jarvis again.") and exits before loading anything. Close the other jarvis window and start it again. The check uses `logs/jarvis.lock`, which holds the process ID of the running jarvis and is removed when it closes. If a jarvis crashed and left the file behind, the next start notices that the process is gone, replaces the file and says so in the log. `--wav` and `--autoteste` do not use the lock.
+
+**Sleep and wake up.** "dorme" / "go to sleep" puts jarvis to sleep: while asleep it interprets and sends nothing. To wake it, say "acorda" / "wake up" (with the key or the wake word), or say the wake word followed by a short wake-up ("hey jarvis, wake up", "hey jarvis, awake", or just "hey jarvis" and then stay quiet for a few seconds). The speech engine often hears only "Up." after the wake word, and that wakes jarvis too, but only when the wake word was detected with a score at or above `[ouvido] limiar_ativacao`. If you give jarvis a normal request with the wake word while it is asleep, it says once that it is asleep and how to wake it; later requests in the same sleep are ignored silently.
+
 ## Talking to it
 
 **Push-to-talk key.** Hold the key, speak, release. The default key is right Ctrl; `[ouvido] tecla` in `config.toml` can change it (right Alt, right Shift, Scroll Lock or F13 to F24). This is the main way to talk to jarvis: no false wake-ups and no waiting for the end of speech.
@@ -42,16 +46,16 @@ Ctrl+C, closing the window or saying "cala-te" / "be quiet" silences the voice a
 
 ## Confirming, correcting, cancelling
 
-Everything that has an effect (sending a prompt to Claude Code, opening the editor or a folder) is first recapped out loud and on screen, for example "Para o atlas: Corrige o teste do login. Envio?". Then you answer straight away, without the wake word: as soon as the recap finishes being spoken, jarvis listens for your reply until the end of speech and the status line shows `À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA`. The key and the wake word also work. Without voice activity detection (`--sem-ativacao`) only the key does.
+Everything that has an effect (sending a prompt to Claude Code, opening the editor or a folder, launching, resuming or stopping a FORJA run) is first recapped out loud and on screen, for example "Para o atlas: Corrige o teste do login. Envio?". Then you answer straight away, without the wake word: as soon as the recap finishes being spoken, jarvis listens for your reply until the end of speech and the status line shows `À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA`. The key and the wake word also work. Without voice activity detection (`--sem-ativacao`) only the key does.
 
 | You say (pt) | You say (en) | What happens |
 |---|---|---|
-| "sim", "envia", "manda", "confirma" | "yes", "yeah", "yep", "sure", "send it", "go ahead", "do it", "confirm" | the recapped prompt is sent, exactly as shown |
+| "sim", "envia", "manda", "confirma" (also with "por favor") | "yes", "yeah", "yep", "sure", "send it", "go ahead", "do it", "confirm", or clear combinations such as "Go, yes.", "yes please", "yes, send it", "yeah go ahead", "ok yes" | the recapped prompt is sent, exactly as shown |
 | "não, muda testes para documentação" | "no, change tests to documentation" | jarvis corrects the prompt and recaps again |
 | "acrescenta que é urgente" | "add that it is urgent" | jarvis adds it and recaps again |
-| "cancela" | "cancel" | nothing is sent |
+| "aborta" (or "cancela") | "abort" (or "cancel") | nothing is sent |
 
-Only those whole answers send; anything close but different ("yes but ...", "go to atlas") is never taken as a yes. With no answer within `[interprete] confirmacao_s` seconds (30 by default, counted from the moment the recap finishes being spoken) the request is cancelled without sending anything. Noise or an "uh" on its own does not count as an answer. Telling the time or date, "cala-te" (be quiet), "dorme" (go to sleep) and "acorda" (wake up) run straight away, because they only read or silence.
+"abort" is the main word to cancel and "cancel" still works. Because cancelling never sends anything, a misheard cancel also counts ("Can't sell it.", "Uh castle.", "a board", "aboard"), and it is recognised before any correction, so it is never mistaken for a financial request. Sending is exact: the whole answer must be made only of yes words and courtesy words ("ok", "please"), so anything close but different ("yes but ...", "go to atlas") is never taken as a yes, and an answer that mixes yes and abort ("yes abort") sends nothing and jarvis asks again: "Say yes to send, or abort." Asking for a project's status or report ("What is the status of atlas?", "read the report for atlas") only reads, so it runs straight away without a recap; if you did not name the project, jarvis asks "Which project?" and runs as soon as you say it. With no answer within `[interprete] confirmacao_s` seconds (30 by default, counted from the moment the recap finishes being spoken) the request is cancelled without sending anything. Noise or an "uh" on its own does not count as an answer. Telling the time or date, "cala-te" (be quiet), "dorme" (go to sleep) and "acorda" (wake up) run straight away, because they only read or silence.
 
 The first prompt to a project opens that project's Claude Code session in a new window, with the jarvis channel attached; accept Claude Code's notice in that window once and the prompt follows. If the channel cannot be used, the prompt goes to a headless session in the project folder, and the command to resume that session is shown on screen. Nothing is written into your projects or into `~/.claude`: the files jarvis generates stay in `.jarvis/`, ignored by Git.
 

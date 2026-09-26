@@ -80,8 +80,23 @@ respostas de qualquer origem — nao havia um unico sitio seguro onde cortar. As
 nomeiam a origem (so elas sabem qual e); as tres dizem onde esta a resposta completa. A consola
 e o log levam sempre o texto inteiro, em bruto.
 
-PREFIXO DE ORIGEM (cumpre a D48.4): diz de quem e a frase e que ela nao esta verificada —
-a sessao filha do Claude Code corre sem ferramentas e pode alucinar que as usou.
+PREFIXO DE ORIGEM (cumpre a D48.4): diz de quem e a frase — em portugues diz tambem que ela
+nao esta verificada; em ingles e a forma curta "Claude says:". O prefixo e as frases de recurso
+seguem a lingua configurada: com lingua=en nada disto se diz em portugues.
+
+MARCACAO MARKDOWN: antes do filtro, as marcas de enfase (`**`, `*`, `__x y__`), os marcadores de
+lista (`- `, `* `, `1. `) e a sintaxe de um link (so o texto do link fica, nunca o URL) saem do
+texto; o texto a volta fica. Uma linha que era so enfase ou um item de lista sem pontuacao no fim
+ganha um ponto, para nao se colar a frase seguinte. Os titulos (`## x`) saem inteiros da voz, sem
+levar com eles o paragrafo de baixo. Nada disto enfraquece a exclusao: o filtro corre a seguir, sobre o texto ja limpo.
+
+RESPOSTAS LONGAS: so as primeiras frases (no maximo `MAXIMO_FRASES_FALADAS`) vao a voz, dentro
+dos limites de caracteres; a resposta inteira fica no ecra e no log.
+
+A PERGUNTA OUVE-SE: quando o Claude pergunta alguma coisa e a linha da pergunta sai pelo filtro
+(por ter, noutra frase, um caminho ou codigo), a pergunta volta a entrar SOZINHA se ela propria
+passar o filtro inteiro; e quando as primeiras frases nao a incluem, a pergunta entra no lugar
+das ultimas. A verificacao do texto ja junto continua a correr sobre o resultado.
 
 O LADO SEGURO E CALAR O PEDACO, NAO ARRISCAR: quando uma frase natural tem um sinal destes
 (`Alterei o app.py`, `Ve em publico.pt`), ela sai e fica a frase de recurso, que diz onde esta a
@@ -120,6 +135,38 @@ FRASE_RECURSO_SO_TECNICO = (
 FRASE_RECURSO_SEM_CORTE_SEGURO = (
     "Não tenho nada que se possa ler em voz alta; a resposta completa está na consola."
 )
+
+#: O prefixo e as frases de recurso, por lingua. Em ingles o prefixo e curto.
+PREFIXOS_DA_RESPOSTA_DO_CLAUDE = {"pt": PREFIXO_DA_RESPOSTA_DO_CLAUDE, "en": "Claude says:"}
+FRASES_DE_RECURSO = {
+    "pt": {
+        "sem_texto": FRASE_RECURSO_SEM_TEXTO,
+        "so_tecnico": FRASE_RECURSO_SO_TECNICO,
+        "sem_corte_seguro": FRASE_RECURSO_SEM_CORTE_SEGURO,
+    },
+    "en": {
+        "sem_texto": "Claude says: the reply came back empty; the details are on screen.",
+        "so_tecnico": "Claude says: the reply is only code or technical details; the full reply is on screen.",
+        "sem_corte_seguro": "There is nothing I can read aloud; the full reply is on screen.",
+    },
+}
+
+#: Respostas longas: so estas primeiras frases vao a voz; o resto fica no ecra.
+MAXIMO_FRASES_FALADAS = 3
+
+
+def _lingua(lingua: str | None) -> str:
+    return "en" if lingua == "en" else "pt"
+
+
+def prefixo_da_resposta(lingua: str | None = "pt") -> str:
+    """O prefixo de origem das respostas do Claude, na lingua do jarvis."""
+    return PREFIXOS_DA_RESPOSTA_DO_CLAUDE[_lingua(lingua)]
+
+
+def frase_de_recurso(caso: str, lingua: str | None = "pt") -> str:
+    """Uma frase de recurso ('sem_texto', 'so_tecnico', 'sem_corte_seguro') na lingua do jarvis."""
+    return FRASES_DE_RECURSO[_lingua(lingua)][caso]
 
 # --- padroes de exclusao, categoria a categoria da lista do contrato -------------------
 #
@@ -386,8 +433,116 @@ def _sem_blocos_de_tres_crases(texto: str) -> str:
     return sem_fechados.split("```", 1)[0]
 
 
-def _linhas_falaveis(texto: str) -> list[str]:
-    """As linhas que sobram depois do filtro por exclusao.
+# --- marcacao markdown -----------------------------------------------------------------
+#
+# Todos os quantificadores sao limitados: cada tentativa custa no maximo algumas centenas de
+# caracteres, e o varrimento continua linear no tamanho da linha.
+
+#: Imagem markdown (`![alt](url)`): sai inteira.
+_PADRAO_IMAGEM_MARKDOWN = re.compile(r"!\[[^\[\]\n]{0,200}\]\([^()\s]{0,500}\)")
+#: Link markdown (`[texto](url)`): fica so o texto, o URL nunca. Um link com titulo ou espacos no
+#: URL nao casa e a linha continua a sair pelos parenteses retos.
+_PADRAO_LINK_MARKDOWN = re.compile(r"\[([^\[\]\n]{1,200})\]\([^()\s]{0,500}\)")
+#: Enfase com sublinhado (`__x y__`, `_x y_`). So sai quando o texto de dentro tem um espaco: um
+#: identificador (`__init__`, `_privado_`) fica como esta e continua a sair pelo filtro.
+_PADRAO_ENFASE_SUBLINHADO = re.compile(r"(?<![\w_])(__?)(?=[^\s_])([^_\n]{1,200}?)(?<=[^\s_])\1(?![\w_])")
+#: Marcador de item de lista no inicio da linha: `- `, `* `, `• `, `1. `, `2) `. O `+` fica de
+#: fora de proposito: `+ linha` e o corpo de um diff e tem de continuar a sair pelo filtro.
+_PADRAO_ITEM_DE_LISTA = re.compile(r"^\s*(?:[-*•]|\d{1,3}[.)])\s+(?=\S)")
+#: Uma linha que e so enfase (`**How I found it**`): um titulo disfarcado.
+_PADRAO_LINHA_SO_DE_ENFASE = re.compile(r"^\s*(\*{1,3}|_{1,3})(?=\S).{1,300}?(?<=\S)\1\s*$")
+#: Pontuacao que ja fecha uma linha: um item de lista assim nao ganha ponto.
+_PONTUACAO_DE_FIM_DE_LINHA = ".!?:;,…"
+
+
+def _sem_sublinhado(encontrado: re.Match[str]) -> str:
+    dentro = encontrado.group(2)
+    return dentro if " " in dentro else encontrado.group(0)
+
+
+def _linha_sem_markdown(linha: str) -> str:
+    """A linha sem marcacao markdown: enfase, marcador de lista e sintaxe de link.
+
+    Uma linha que era so enfase, ou um item de lista, e que nao acaba em pontuacao ganha um
+    ponto, para nao se colar a frase seguinte quando as linhas se juntam.
+    """
+    so_enfase = _PADRAO_LINHA_SO_DE_ENFASE.match(linha) is not None
+    item = _PADRAO_ITEM_DE_LISTA.match(linha)
+    if item is not None:
+        linha = linha[item.end() :]
+    linha = _PADRAO_IMAGEM_MARKDOWN.sub("", linha)
+    linha = _PADRAO_LINK_MARKDOWN.sub(r"\1", linha)
+    linha = _PADRAO_ENFASE_SUBLINHADO.sub(_sem_sublinhado, linha)
+    linha = linha.replace("*", "").rstrip()
+    if (so_enfase or item is not None) and linha.strip() and linha[-1] not in _PONTUACAO_DE_FIM_DE_LINHA:
+        linha += "."
+    return linha
+
+
+# --- frases -------------------------------------------------------------------------------
+
+#: Fim de frase: `.`, `!` ou `?` (com as aspas ou o parentese que os fecham) seguido de espaco
+#: ou do fim do texto. O ponto de `3.14` ou de `jarvis.app` nao e fim de frase.
+_PADRAO_FIM_DE_FRASE = re.compile(r"[.!?]{1,3}[\"'”’»)]{0,3}(?=\s|\Z)")
+#: Uma frase que e uma pergunta.
+_PADRAO_PERGUNTA = re.compile(r"[?¿][\"'”’»)]{0,3}\Z")
+
+
+def dividir_em_frases(texto: str) -> list[str]:
+    """As frases de um texto ja numa linha, pela ordem, sem espacos a volta."""
+    frases: list[str] = []
+    inicio = 0
+    for fim in _PADRAO_FIM_DE_FRASE.finditer(texto):
+        frase = texto[inicio : fim.end()].strip()
+        if frase:
+            frases.append(frase)
+        inicio = fim.end()
+    resto = texto[inicio:].strip()
+    if resto:
+        frases.append(resto)
+    return frases
+
+
+def e_pergunta(frase: str) -> bool:
+    return bool(_PADRAO_PERGUNTA.search(frase.strip()))
+
+
+def tem_pergunta(texto: str | None) -> bool:
+    """Alguma frase do texto e uma pergunta (nao so a ultima)."""
+    return any(e_pergunta(frase) for frase in dividir_em_frases(" ".join((texto or "").split())))
+
+
+#: Uma palavra de verdade (letras, com apostrofo ou hifen): `??` ou `(1/2)?` nao sao perguntas.
+_PADRAO_PALAVRA = re.compile(r"[^\W\d_]{2,}")
+
+
+def _perguntas_falaveis(linha: str) -> list[str]:
+    """As perguntas de uma linha proibida que, sozinhas, passam o filtro inteiro.
+
+    So conta uma pergunta com pelo menos duas palavras: `?? tests/` e saida de git, nao fala.
+    """
+    return [
+        frase
+        for frase in dividir_em_frases(" ".join(linha.split()))
+        if e_pergunta(frase) and len(_PADRAO_PALAVRA.findall(frase)) >= 2 and not texto_proibido(frase)
+    ]
+
+
+def _e_titulo_markdown(linha: str) -> bool:
+    """Um titulo markdown (`## Resumo`) cujo texto, sem os cardinais, e fala limpa.
+
+    Sai da voz sozinho, sem abrir um bloco proibido: o paragrafo logo a seguir continua a
+    falar-se mesmo sem linha em branco entre os dois. Um `#` seguido de codigo continua a
+    abrir o bloco.
+    """
+    if not _PADRAO_TITULO_MARKDOWN.match(linha):
+        return False
+    texto = linha.strip().lstrip("#").strip()
+    return bool(texto) and not _linha_proibida(texto)
+
+
+def _linhas_falaveis(texto: str, *, resgatar_perguntas: bool = False) -> list[str]:
+    """As linhas que sobram depois do filtro por exclusao, ja sem marcacao markdown.
 
     Varrimento por BLOCO, nao so por linha: uma vez que uma linha e proibida, as linhas
     seguintes ficam tambem de fora ate a proxima linha em branco — e assim que uma tabela git
@@ -396,7 +551,12 @@ def _linhas_falaveis(texto: str) -> list[str]:
     proprio, nenhuma das marcas da lista.
 
     E aqui, e so aqui, que vale o teto por LINHA (`_linha_longa_demais`): e este o unico sitio
-    onde "linha" quer mesmo dizer uma linha do texto de entrada.
+    onde "linha" quer mesmo dizer uma linha do texto de entrada. O teto corre antes da limpeza
+    do markdown, e uma linha que so tinha marcacao nao conta como linha em branco (nao fecha um
+    bloco proibido).
+
+    Com `resgatar_perguntas`, a linha que abre um bloco proibido ainda deixa passar as perguntas
+    que, sozinhas, passam o filtro inteiro. As linhas seguintes do bloco nunca.
     """
     faladas: list[str] = []
     dentro_de_bloco_proibido = False
@@ -405,14 +565,26 @@ def _linhas_falaveis(texto: str) -> list[str]:
             dentro_de_bloco_proibido = False
             faladas.append(linha)
             continue
-        if dentro_de_bloco_proibido or _linha_longa_demais(linha) or _linha_proibida(linha):
+        if dentro_de_bloco_proibido or _linha_longa_demais(linha):
             dentro_de_bloco_proibido = True
             continue
-        faladas.append(linha)
+        limpa = _linha_sem_markdown(linha)
+        if not limpa.strip() or _e_titulo_markdown(limpa):
+            continue
+        if _linha_proibida(limpa):
+            dentro_de_bloco_proibido = True
+            if resgatar_perguntas:
+                faladas.extend(_perguntas_falaveis(limpa))
+            continue
+        faladas.append(limpa)
     return faladas
 
 
-def texto_falavel(resposta: str) -> str:
+def _juntar(linhas: list[str]) -> str:
+    return " ".join(" ".join(linhas).replace("`", "").split())
+
+
+def texto_falavel(resposta: str, *, resgatar_perguntas: bool = False) -> str:
     """So o que passa o filtro por exclusao, numa unica linha, sem crases nem espacos a mais.
 
     Funcao pura, sem limite de caracteres nem prefixo — usada por `resumo_falado` e pelos
@@ -422,11 +594,13 @@ def texto_falavel(resposta: str) -> str:
     texto natural a volta) e depois outra vez sobre o resultado JA JUNTO. Sem a segunda, duas
     linhas inocentes uma a uma voltam a formar a tag da linha 652 do log depois do filtro; com
     ela, um texto junto que volte a casar com uma categoria proibida devolve "" e quem chama cai
-    na frase de recurso (inteiro ou nada, nunca meio).
+    na frase de recurso (inteiro ou nada, nunca meio). Se o texto so fica proibido por causa de
+    uma pergunta resgatada, fica o texto sem ela.
     """
     sem_blocos = _sem_blocos_de_tres_crases(resposta or "")
-    linhas = _linhas_falaveis(sem_blocos)
-    junto = " ".join(" ".join(linhas).replace("`", "").split())
+    junto = _juntar(_linhas_falaveis(sem_blocos, resgatar_perguntas=resgatar_perguntas))
+    if resgatar_perguntas and texto_proibido(junto):
+        junto = _juntar(_linhas_falaveis(sem_blocos))
     if texto_proibido(junto):
         return ""
     return junto
@@ -480,29 +654,50 @@ def cortar_no_limite(texto: str, limite: int) -> str:
     return ""
 
 
-def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS) -> str:
+def _primeiras_frases(texto: str, limite: int) -> str:
+    """As primeiras frases (ate `MAXIMO_FRASES_FALADAS`) dentro de `limite` caracteres.
+
+    Se o texto tem uma pergunta que assim ficava de fora, a pergunta entra no lugar das
+    ultimas frases escolhidas: o utilizador tem de a ouvir para lhe poder responder.
+    """
+    frases = dividir_em_frases(texto)
+    cortado = cortar_no_limite(" ".join(frases[:MAXIMO_FRASES_FALADAS]), limite)
+    indice = next((i for i, frase in enumerate(frases) if e_pergunta(frase)), None)
+    if indice is None:
+        return cortado
+    pergunta = frases[indice]
+    if pergunta in cortado or len(pergunta) > limite:
+        return cortado
+    antes = frases[: min(indice, MAXIMO_FRASES_FALADAS - 1)]
+    while antes and len(" ".join(antes + [pergunta])) > limite:
+        antes.pop()
+    return " ".join(antes + [pergunta])
+
+
+def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS, lingua: str | None = "pt") -> str:
     """O que a voz le de uma resposta do Claude Code (fecha o defeito da linha 650/652).
 
     So linguagem natural chega a voz (filtro por exclusao, `texto_falavel`); um pedaco proibido
     nunca se le em parte — ou sai inteiro, ou a resposta cai para a frase de recurso fixa; o
-    corte por tamanho nunca parte uma palavra ao meio; a origem fica sempre nomeada, como frase
-    nao verificada. Quem quiser a resposta inteira, em bruto, le o log —
+    corte por tamanho nunca parte uma palavra ao meio; a origem fica sempre nomeada, na lingua
+    do jarvis. So as primeiras frases se dizem, e uma pergunta do Claude nunca fica de fora se
+    ela propria passar o filtro. Quem quiser a resposta inteira, em bruto, le o log —
     esta funcao nunca e chamada para o que vai para o log.
     """
     original = resposta or ""
     if not original.strip():
-        return FRASE_RECURSO_SEM_TEXTO
-    falavel = texto_falavel(original)
+        return frase_de_recurso("sem_texto", lingua)
+    falavel = texto_falavel(original, resgatar_perguntas=True)
     if not falavel:
-        return FRASE_RECURSO_SO_TECNICO
-    cortado = cortar_no_limite(falavel, limite)
+        return frase_de_recurso("so_tecnico", lingua)
+    cortado = _primeiras_frases(falavel, limite)
     if not cortado or texto_proibido(cortado):
         # o corte nunca devia criar conteudo proibido a partir de texto limpo, mas a frase que
         # vai as colunas e verificada na forma exata em que vai ser lida, nao na forma anterior
-        return FRASE_RECURSO_SO_TECNICO
-    falado = f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} {cortado}"
+        return frase_de_recurso("so_tecnico", lingua)
+    falado = f"{prefixo_da_resposta(lingua)} {cortado}"
     if len(falado) > MAXIMO_ABSOLUTO_FALADO:
         # ultima rede, nunca deve disparar dado o limite de conteudo acima — mas se disparar,
         # corta-se pela mesma regra, nunca a meio de uma palavra.
-        falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or FRASE_RECURSO_SO_TECNICO
+        falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or frase_de_recurso("so_tecnico", lingua)
     return falado

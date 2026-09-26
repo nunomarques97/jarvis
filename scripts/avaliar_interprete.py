@@ -20,10 +20,13 @@ Com `--verificar` sai com erro (1) se, em qualquer lingua, a intencao ficar
 abaixo de 95% ou o projeto abaixo de 98%, se houver algum pedido inventado,
 ou se a latencia a quente passar de 1,2 s p50 ou 2,5 s p95. Sai com 2 se
 nenhum modelo configurado estiver disponivel (diz o comando para o instalar).
+`--minimo-intencao 99.1` sobe a meta da intencao (em percentagem) para nao
+deixar o acerto descer face a uma medicao anterior.
 
     .venv\Scripts\python scripts/avaliar_interprete.py --verificar
     .venv\Scripts\python scripts/avaliar_interprete.py --lingua en --mostrar-erros
     .venv\Scripts\python scripts/avaliar_interprete.py --verificar --evidencia
+    .venv\Scripts\python scripts/avaliar_interprete.py --lingua en --verificar --minimo-intencao 99.1
 
 `--modelo` mede outro modelo instalado no lugar do principal (o relatorio
 di-lo). `--evidencia` escreve o resumo em docs/forja/evidence/ (ignorada
@@ -58,6 +61,7 @@ from jarvis.config import (  # noqa: E402
 )
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 from jarvis.interprete import (  # noqa: E402
+    INTENCAO_CORTESIA,
     INTENCAO_RECUSADA,
     INTENCOES,
     INTENCOES_COM_PROMPT,
@@ -117,7 +121,7 @@ def ler_golden(caminho: Path, projetos: tuple[str, ...] = PROJETOS_DO_GOLDEN) ->
         raise GoldenError(f"golden set em falta: {caminho_para_mostrar(caminho)}")
     casos: list[Caso] = []
     ids: set[str] = set()
-    validas = set(INTENCOES) | {INTENCAO_RECUSADA}
+    validas = set(INTENCOES) | {INTENCAO_RECUSADA, INTENCAO_CORTESIA}
     for numero, linha in enumerate(caminho.read_text(encoding="utf-8").splitlines(), 1):
         if not linha.strip():
             continue
@@ -234,15 +238,24 @@ def avaliar(interprete: Interprete, lingua: str, casos: list[Caso]) -> Resumo:
     return resumo
 
 
-def falhas_da_verificacao(resumos: list[Resumo], minimo_de_casos: int = MINIMO_DE_CASOS) -> list[str]:
-    """Os motivos por que `--verificar` falha (vazio = passa)."""
+def falhas_da_verificacao(
+    resumos: list[Resumo],
+    minimo_de_casos: int = MINIMO_DE_CASOS,
+    meta_intencao: float = META_INTENCAO,
+) -> list[str]:
+    """Os motivos por que `--verificar` falha (vazio = passa).
+
+    `meta_intencao` e uma fracao (0.991 = 99,1%); nunca fica abaixo de
+    `META_INTENCAO`.
+    """
     falhas: list[str] = []
     latencias: list[float] = []
+    meta_intencao = max(meta_intencao, META_INTENCAO)
     for resumo in resumos:
         if resumo.total < minimo_de_casos:
             falhas.append(f"{resumo.lingua}: so {resumo.total} casos (minimo {minimo_de_casos})")
-        if resumo.intencao < META_INTENCAO:
-            falhas.append(f"{resumo.lingua}: intencao {resumo.intencao:.1%} < {META_INTENCAO:.0%}")
+        if resumo.intencao < meta_intencao:
+            falhas.append(f"{resumo.lingua}: intencao {resumo.intencao:.2%} < {meta_intencao:.2%}")
         if resumo.projeto < META_PROJETO:
             falhas.append(f"{resumo.lingua}: projeto {resumo.projeto:.1%} < {META_PROJETO:.0%}")
         if resumo.inventados:
@@ -351,6 +364,17 @@ def relatorio(
     return linhas
 
 
+def _percentagem(texto: str) -> float:
+    """Uma percentagem entre 0 e 100, devolvida como fracao."""
+    try:
+        valor = float(texto.replace(",", "."))
+    except ValueError as erro:
+        raise argparse.ArgumentTypeError(f"percentagem invalida: {texto!r}") from erro
+    if not 0.0 <= valor <= 100.0 or math.isnan(valor):
+        raise argparse.ArgumentTypeError(f"a percentagem tem de estar entre 0 e 100: {texto!r}")
+    return valor / 100.0
+
+
 def construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Mede o interprete (LLM local) contra o golden set.",
@@ -360,6 +384,13 @@ def construir_parser() -> argparse.ArgumentParser:
     parser.add_argument("--modelo", default=None, help="mede este modelo instalado em vez do principal")
     parser.add_argument("--verificar", action="store_true", help="sai com erro se falhar as metas")
     parser.add_argument("--mostrar-erros", action="store_true", help="lista os casos que falharam")
+    parser.add_argument(
+        "--minimo-intencao",
+        type=_percentagem,
+        default=None,
+        metavar="PERCENTAGEM",
+        help=f"acerto minimo da intencao em %% (por omissao {META_INTENCAO:.0%}), por exemplo 99.1",
+    )
     parser.add_argument("--evidencia", nargs="?", const="", default=None, help="escreve o resumo em .md")
     return parser
 
@@ -425,7 +456,8 @@ def principal(
         vram_do_modelo_mib=escolha.vram_do_modelo_mib,
         mostrar_erros=args.mostrar_erros or args.evidencia is not None,
     )
-    falhas = falhas_da_verificacao(resumos)
+    meta_intencao = META_INTENCAO if args.minimo_intencao is None else args.minimo_intencao
+    falhas = falhas_da_verificacao(resumos, meta_intencao=meta_intencao)
     print()
     print("\n".join(linhas))
     print()

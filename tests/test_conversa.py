@@ -28,7 +28,8 @@ from jarvis.conversa import JANELA_S, JanelaDeConversa, acaba_em_pergunta, e_par
 from jarvis.interprete import INTENCAO_RECUSADA
 from jarvis.ouvido import ESCUTA_CONVERSA, GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Ouvido
 from jarvis.resposta_falada import resumo_falado
-from tests.test_app import DITADO, CanalFalso, Montagem, RelogioFalso
+from jarvis.sessoes import Entrega
+from tests.test_app import DITADO, CanalFalso, Montagem, RelogioFalso, resposta_llm
 from tests.test_ouvido import SILENCIO, MotorFalso, TeclaFixa, VadFalso, chunk, chunks_em
 
 PERGUNTA = "Já corrigi o teste do login. Queres que corra a suite inteira?"
@@ -361,6 +362,86 @@ class TestEscutaDoOuvido(unittest.TestCase):
 
     def test_a_janela_em_conversa_no_modulo(self) -> None:
         self.assertIs(conversa.JanelaDeConversa, JanelaDeConversa)
+
+
+
+# --- Pergunta do Claude pelo caminho headless -------------------------------------------
+
+#: A resposta headless do log da aceitacao: pergunta primeiro, com um caminho, e acaba numa
+#: afirmacao ("I won't touch either file until you answer.").
+RESPOSTA_HEADLESS = (
+    "Which two test files do you mean? I only found one test file for the anomaly code, "
+    "`tests/test_anomaly.py`, so I can't tell which pair you're thinking of.\n\n"
+    "Please send me the two file names and tell me which one to keep. "
+    "I won't touch either file until you answer."
+)
+DITADO_EN = resposta_llm(
+    "ditar_prompt", "atlas", "Ask me which of the two test files I want to keep and wait for my answer."
+)
+
+
+class CanalHeadlessFalso(CanalFalso):
+    """O canal falso a responder pelo caminho headless (`claude -p`), como na aceitacao."""
+
+    def enviar(self, projeto: str, texto: str, ao_responder) -> bool:
+        self.recebidos.append((projeto, texto))
+        if self.resposta is not None:
+            ao_responder(projeto, Entrega(projeto=projeto, caminho="headless", texto=self.resposta))
+        return self.aberta
+
+
+def montagem_headless_em_ingles() -> Montagem:
+    m = Montagem([DITADO_EN], lingua="en", canal=CanalHeadlessFalso(resposta=RESPOSTA_HEADLESS))
+    m.jarvis.ouvido = OuvidoFalso()
+    m.ouvir("tell atlas to ask me which of the two test files I want to keep and wait for my answer")
+    m.avancar(1)
+    m.ouvir("yes")
+    m.avancar(1.5)
+    return m
+
+
+class TestPerguntaDoClaudeNoCaminhoHeadless(unittest.TestCase):
+    def test_a_pergunta_e_falada_sem_o_caminho_e_abre_a_janela(self) -> None:
+        m = montagem_headless_em_ingles()
+        self.assertEqual(len(m.canal.recebidos), 1)
+        falada = next(dito for dito in m.falados if dito.startswith("Claude says:"))
+        self.assertIn("Which two test files do you mean?", falada)
+        for proibido in ("tests/", "test_anomaly", ".py", "`"):
+            self.assertNotIn(proibido, falada)
+        self.assertTrue(m.jarvis.janela.aberta())
+        self.assertEqual(m.jarvis.janela.projeto, "atlas")
+        self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S])
+        self.assertIn("caminho=headless", m.log.texto())
+
+    def test_yeah_na_janela_e_recap_e_so_o_yes_envia(self) -> None:
+        m = montagem_headless_em_ingles()
+        pedidos_ao_llm = len(m.llm.pedidos)
+        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
+        self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "a resposta nao passa pelo LLM")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.falados[-1], "Reply to Claude in atlas: Yeah. Send it?")
+        self.assertEqual(len(m.canal.recebidos), 1, "nada enviado antes do yes")
+        m.avancar(1)
+        m.ouvir("yes")
+        self.assertEqual(len(m.canal.recebidos), 2)
+        self.assertEqual(m.canal.recebidos[-1], ("atlas", "Yeah."))
+
+    def test_sem_o_yes_nada_e_enviado(self) -> None:
+        m = montagem_headless_em_ingles()
+        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
+        m.avancar(1)
+        m.ouvir("abort")
+        self.assertEqual(len(m.canal.recebidos), 1)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_uma_resposta_sem_pergunta_nao_abre(self) -> None:
+        m = Montagem([DITADO_EN], lingua="en", canal=CanalHeadlessFalso(resposta="I kept the newer file."))
+        m.jarvis.ouvido = OuvidoFalso()
+        m.ouvir("tell atlas to keep the newer test file")
+        m.avancar(1)
+        m.ouvir("yes")
+        self.assertFalse(m.jarvis.janela.aberta())
+        self.assertEqual(m.jarvis.ouvido.abertas, [])
 
 
 if __name__ == "__main__":

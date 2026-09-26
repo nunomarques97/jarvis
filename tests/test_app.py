@@ -61,8 +61,8 @@ from jarvis.app import (
 )
 from jarvis.config import Config, ConfigInterprete, ConfigOuvido, Projeto
 from jarvis.interprete import Interprete, MotorIndisponivel
-from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_TECLA, Frase, TeclaDoFicheiro
-from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE
+from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Frase, TeclaDoFicheiro
+from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE, frase_de_recurso, prefixo_da_resposta
 from jarvis.sessoes import Entrega
 from jarvis.stt import MotorBase, MotorIndisponivel as SttIndisponivel
 from jarvis.voz import ResultadoFala
@@ -216,7 +216,9 @@ class Montagem:
             relogio=self.relogio,
         )
 
-    def ouvir(self, texto: str, *, gatilho: str = GATILHO_TECLA, fim: float | None = None) -> None:
+    def ouvir(
+        self, texto: str, *, gatilho: str = GATILHO_TECLA, fim: float | None = None, score: float | None = None
+    ) -> None:
         """Uma frase acabada de transcrever, entregue como o ouvido a entrega."""
         fim = self.relogio() if fim is None else fim
         self.jarvis.ao_ouvir(
@@ -230,7 +232,7 @@ class Montagem:
                 fim_da_escuta=fim,
                 texto_pronto=fim + 0.2,
                 latencia_stt_ms=200.0,
-                score_ativacao=0.9 if gatilho == GATILHO_ATIVACAO else None,
+                score_ativacao=score if score is not None else (0.9 if gatilho == GATILHO_ATIVACAO else None),
             )
         )
 
@@ -401,12 +403,11 @@ class TestConfirmacaoNoProcesso(unittest.TestCase):
         self.assertEqual(m.canal.recebidos, [])
         self.assertEqual(m.llm.pedidos, [])
 
-    def test_estado_sem_forja_recapitula_e_diz_que_nao_esta_disponivel(self) -> None:
+    def test_estado_sem_forja_corre_logo_e_diz_que_nao_esta_disponivel(self) -> None:
         m = Montagem([resposta_llm("estado", "atlas")])
         m.ouvir("como está o run do atlas")
-        self.assertTrue(m.jarvis.confirmacao.a_espera)
-        m.avancar()
-        m.ouvir("sim")
+        self.assertFalse(m.jarvis.confirmacao.a_espera, "ver o estado so le: sem recap")
+        self.assertEqual(len(m.falados), 1)
         self.assertIn("não estão disponíveis", m.falados[-1])
         self.assertIn("forja | indisponivel", m.log.texto())
 
@@ -599,6 +600,161 @@ class TestSilencioEDormir(unittest.TestCase):
         self.assertFalse(m.jarvis.estado.adormecido)
         self.assertEqual(m.falados[-1], "Estou acordado.")
 
+    def test_acordar_pela_palavra_de_ativacao_com_formas_curtas(self) -> None:
+        # O motor de voz transcreveu "hey jarvis, wake up" como "Up.".
+        for texto in ("Up.", "wake", "Wake up.", "awake", "acorda", "Hey Jarvis.", "Jarvis", "Uh, wake up."):
+            with self.subTest(texto=texto):
+                m = Montagem([DITADO], lingua="en")
+                m.ouvir("Go to sleep.")
+                self.assertTrue(m.jarvis.estado.adormecido)
+                m.ouvir(texto, gatilho=GATILHO_ATIVACAO, score=0.9)
+                self.assertFalse(m.jarvis.estado.adormecido)
+                self.assertEqual(m.falados[-1], "I'm awake.")
+                self.assertEqual(m.llm.pedidos, [])
+                self.assertEqual(m.canal.recebidos, [])
+
+    def test_score_abaixo_do_limiar_nao_acorda(self) -> None:
+        m = Montagem(lingua="en")
+        m.ouvir("Go to sleep.")
+        limiar = m.config.ouvido.limiar_ativacao
+        m.ouvir("Up.", gatilho=GATILHO_ATIVACAO, score=limiar - 0.05)
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self.assertEqual(m.falados, ["Going to sleep. Say wake up when you need me."])
+        m.ouvir("Up.", gatilho=GATILHO_ATIVACAO, score=limiar)
+        self.assertFalse(m.jarvis.estado.adormecido, "score igual ao limiar ja conta")
+
+    def test_up_com_a_tecla_nao_acorda(self) -> None:
+        m = Montagem(lingua="en")
+        m.ouvir("Go to sleep.")
+        m.ouvir("Up.", gatilho=GATILHO_TECLA)
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self.assertEqual(m.llm.pedidos, [])
+
+    def test_frase_com_mais_conteudo_nao_acorda(self) -> None:
+        m = Montagem([DITADO], lingua="en")
+        m.ouvir("Go to sleep.")
+        for texto in ("Up the volume.", "wake up and tell atlas to fix the login", "What's up?"):
+            m.ouvir(texto, gatilho=GATILHO_ATIVACAO, score=0.95)
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_a_lista_branca_continua_a_acordar(self) -> None:
+        for gatilho in (GATILHO_TECLA, GATILHO_ATIVACAO):
+            with self.subTest(gatilho=gatilho):
+                m = Montagem(lingua="en")
+                m.ouvir("Go to sleep.")
+                m.ouvir("wake up", gatilho=gatilho, score=0.1 if gatilho == GATILHO_ATIVACAO else None)
+                self.assertFalse(m.jarvis.estado.adormecido)
+                self.assertEqual(m.falados[-1], "I'm awake.")
+
+    def test_a_dormir_diz_uma_vez_como_acordar(self) -> None:
+        m = Montagem([DITADO, DITADO], lingua="en")
+        m.ouvir("Go to sleep.")
+        aviso = "I'm asleep. To wake me, say hey jarvis, wake up."
+        m.ouvir(
+            "Uh ask Jarvis to ask if the change log should mention the new option.",
+            gatilho=GATILHO_ATIVACAO,
+            score=0.9,
+        )
+        self.assertEqual(m.falados[-1], aviso)
+        m.ouvir("Tell atlas to fix the login test.", gatilho=GATILHO_ATIVACAO, score=0.9)
+        m.ouvir("Tell atlas to fix the login test.", gatilho=GATILHO_TECLA)
+        self.assertEqual(m.falados.count(aviso), 1, "so uma vez por sono")
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertTrue(m.jarvis.estado.adormecido)
+        # Acordar e voltar a dormir: o aviso pode ser dito outra vez.
+        m.ouvir("Up.", gatilho=GATILHO_ATIVACAO, score=0.9)
+        m.ouvir("Go to sleep.")
+        m.ouvir("Tell atlas to fix the login test.", gatilho=GATILHO_ATIVACAO, score=0.9)
+        self.assertEqual(m.falados.count(aviso), 2)
+        self.assertEqual(m.llm.pedidos, [])
+
+    def _ouvido_maos_livres(self, m: Montagem, motor: MotorBase):
+        """O ouvido real ligado pelo arranque, com detetor e VAD falsos."""
+        from jarvis.ouvido import FonteDeFicheiro
+
+        class Detetor:
+            def processar(self, pedaco: bytes) -> float:
+                return 0.9 if pedaco[0] == 0x7A else 0.1
+
+            def reiniciar(self) -> None:
+                pass
+
+        class Vad:
+            def e_fala(self, pedaco: bytes) -> bool:
+                return pedaco[0] != 0x00
+
+        return app.construir_ouvido(
+            m.jarvis, motor=motor, fonte=FonteDeFicheiro(b""), tecla=_TeclaSolta(), detetor=Detetor(), vad=Vad()
+        )
+
+    def _so_a_palavra_de_ativacao(self, ouvido) -> None:
+        """'hey jarvis' e depois silencio ate a escuta desistir."""
+        from jarvis.ouvido import BYTES_POR_CHUNK, DURACAO_DO_CHUNK_S, ESPERA_PELA_FALA_S
+
+        ouvido.processar(bytes([0x7A]) * BYTES_POR_CHUNK, False)
+        for _ in range(round(ESPERA_PELA_FALA_S / DURACAO_DO_CHUNK_S) + 1):
+            ouvido.processar(bytes([0x00]) * BYTES_POR_CHUNK, False)
+        ouvido.transcrever_pendentes()
+
+    def test_so_a_palavra_de_ativacao_pelo_ouvido_acorda(self) -> None:
+        m = Montagem([DITADO], lingua="en")
+        motor = mock.Mock(wraps=_MotorDeTexto("Tell atlas to fix the login test."))
+        ouvido = self._ouvido_maos_livres(m, motor)
+        m.ouvir("Go to sleep.")
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self._so_a_palavra_de_ativacao(ouvido)
+        self.assertFalse(m.jarvis.estado.adormecido)
+        self.assertEqual(m.falados[-1], "I'm awake.")
+        motor.transcrever.assert_not_called()
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_so_a_palavra_de_ativacao_acordado_nao_faz_nada(self) -> None:
+        m = Montagem([DITADO], lingua="en")
+        ouvido = self._ouvido_maos_livres(m, _MotorDeTexto())
+        self._so_a_palavra_de_ativacao(ouvido)
+        self.assertEqual(m.falados, [])
+        self.assertEqual(m.jarvis.frases, 0)
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertIn("o jarvis esta acordado: nada a fazer", m.log.texto())
+        # Texto vazio que chega ja acordado (acordou entretanto) tambem nao e interpretado.
+        m.ouvir("", gatilho=GATILHO_ATIVACAO, score=0.9)
+        self.assertEqual(m.falados, [])
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_so_a_palavra_de_ativacao_abaixo_do_limiar_nao_acorda(self) -> None:
+        m = Montagem(lingua="en")
+        m.ouvir("Go to sleep.")
+        limiar = m.config.ouvido.limiar_ativacao
+        m.jarvis.ao_ativar_sem_fala(
+            Frase(
+                texto="",
+                gatilho=GATILHO_ATIVACAO,
+                lingua="en",
+                motor="motor-falso",
+                duracao_audio_s=0.0,
+                inicio_da_escuta=0.0,
+                fim_da_escuta=0.0,
+                texto_pronto=0.0,
+                latencia_stt_ms=0.0,
+                score_ativacao=limiar - 0.05,
+            )
+        )
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self.assertEqual(m.llm.pedidos, [])
+
+    def test_aviso_de_sono_em_portugues(self) -> None:
+        m = Montagem([DITADO])
+        m.ouvir("dorme")
+        m.ouvir("no atlas corrige o teste do login", gatilho=GATILHO_ATIVACAO, score=0.9)
+        self.assertEqual(m.falados[-1], "Estou a dormir. Para me acordar, diz boas jarvis, acorda.")
+        self.assertEqual(m.llm.pedidos, [])
+
     def test_dormir_com_recap_pendente_cancela_sem_enviar(self) -> None:
         m = Montagem([DITADO])
         m.ouvir("no atlas corrige o teste do login")
@@ -701,7 +857,7 @@ class TestPerguntasGerais(unittest.TestCase):
                 self.esperar(m)
                 self.assertEqual(
                     m.falados,
-                    ["Let me check.", f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} It is 22 degrees and sunny in Porto today."],
+                    ["Let me check.", f"{prefixo_da_resposta('en')} It is 22 degrees and sunny in Porto today."],
                 )
                 self.assertNotIn("Tell me which project the conversation is for.", m.falados)
                 self.assertEqual(m.locais, [], "nunca as horas")
@@ -724,7 +880,7 @@ class TestPerguntasGerais(unittest.TestCase):
         m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], saida_json(tecnica))
         m.ouvir(FRASES_DO_TESTE_AO_VIVO[4][0])
         self.esperar(m)
-        self.assertEqual(m.falados, ["Let me check.", FRASE_RECURSO_SO_TECNICO])
+        self.assertEqual(m.falados, ["Let me check.", frase_de_recurso("so_tecnico", "en")])
         self.assertIn(repr(tecnica), m.log.texto())
 
     def test_falha_e_tempo_esgotado_dizem_so_uma_frase_curta(self) -> None:
@@ -805,7 +961,7 @@ class TestPerguntasGerais(unittest.TestCase):
         self.assertTrue(antiga.morto.is_set())
         self.assertEqual(len(self.arranque.processos), 2)
         self.assertEqual(
-            m.falados, ["Let me check.", "Let me check.", f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} It is 22 degrees in Porto."]
+            m.falados, ["Let me check.", "Let me check.", f"{prefixo_da_resposta('en')} It is 22 degrees in Porto."]
         )
 
     def test_resposta_que_chega_depois_do_cancelamento_nunca_e_dita(self) -> None:
@@ -865,6 +1021,121 @@ class _CanalDoProjetoFalso:
 
     def fechar(self) -> None:
         self.fechado = True
+
+
+class TestCortesiaEPedidosSemProjeto(unittest.TestCase):
+    """Cortesia solta, ditado que guarda tudo e pergunta de projeto sem projeto."""
+
+    CORTESIAS = ("Excellent.", "Yeah.", "great", "thanks", "thank you", "ok", "okay", "yes", "nice", "cool", "perfect")
+
+    def setUp(self) -> None:
+        temporaria = tempfile.TemporaryDirectory()
+        self.addCleanup(temporaria.cleanup)
+        self.pasta = Path(temporaria.name) / "jarvis-perguntas"
+
+    def montagem(self, respostas_llm=None, *, lingua: str = "en", **kw) -> Montagem:
+        self.arranque = ArranqueFalso(saida_json("Uma resposta que nunca devia ser pedida."))
+        perguntas = perguntas_de_teste(self.arranque, self.pasta, lingua=lingua)
+        m = Montagem(respostas_llm, lingua=lingua, perguntas=perguntas, **kw)
+        self.addCleanup(m.jarvis.fechar)
+        return m
+
+    def assert_nada_saiu(self, m: Montagem) -> None:
+        self.assertEqual(m.llm.pedidos, [], "nunca vai ao LLM")
+        self.assertEqual(m.canal.recebidos, [], "nunca vai ao canal")
+        self.assertEqual(self.arranque.processos, [], "nunca vai ao Claude das perguntas gerais")
+
+    def test_cortesia_solta_diz_okay_e_nao_sai_nada(self) -> None:
+        for frase in (*self.CORTESIAS, "obrigado", "fixe", "Uh yeah."):
+            for gatilho in (GATILHO_TECLA, GATILHO_ATIVACAO):
+                with self.subTest(frase=frase, gatilho=gatilho):
+                    m = self.montagem([resposta_llm("pergunta_geral", "", frase)])
+                    m.ouvir(frase, gatilho=gatilho)
+                    self.assertEqual(m.falados, ["Okay."])
+                    self.assertFalse(m.jarvis.confirmacao.a_espera, "sem recap")
+                    self.assert_nada_saiu(m)
+                    self.assertIn("desfecho: ignorado | so cortesia", m.log.texto())
+
+    def test_cortesia_solta_em_portugues(self) -> None:
+        for frase in ("obrigado", "fixe", "Excellent."):
+            with self.subTest(frase=frase):
+                m = self.montagem(lingua="pt")
+                m.ouvir(frase)
+                self.assertEqual(m.falados, ["Está bem."])
+                self.assert_nada_saiu(m)
+
+    def test_cortesia_nao_corta_a_pergunta_geral_a_caminho(self) -> None:
+        m = self.montagem([resposta_llm("pergunta_geral", "", "What is the weather in Porto?")])
+        self.arranque.comportamentos = [saida_json("It is sunny in Porto.")]
+        m.ouvir("what is the weather in porto")
+        m.ouvir("thanks")
+        self.assertTrue(m.jarvis.esperar_pergunta(5.0))
+        self.assertIn("Okay.", m.falados)
+        self.assertIn("sunny", m.falados[-1])
+        self.assertEqual(len(m.llm.pedidos), 1, "so a pergunta foi ao LLM")
+
+    def test_yes_dentro_de_um_recap_continua_a_enviar(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "atlas", "Fix the login test.")])
+        m.ouvir("tell atlas to fix the login test")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Fix the login test.")])
+        self.assertNotIn("Okay.", m.falados)
+
+    def test_yeah_dentro_da_janela_de_conversa_e_a_resposta_ao_claude(self) -> None:
+        m = self.montagem()
+        m.jarvis.janela.abrir("atlas")
+        m.avancar(1.5)
+        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "a resposta na janela vai a recap")
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertNotIn("Okay.", m.falados)
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(len(m.canal.recebidos), 1)
+        self.assertEqual(m.canal.recebidos[0][0], "atlas")
+        self.assertIn("Yeah", m.canal.recebidos[0][1])
+        self.assertEqual(m.llm.pedidos, [])
+
+    def test_ditado_longo_guarda_o_arranque_lento(self) -> None:
+        truncado = "Find out which step takes longest and tell me before changing anything."
+        m = self.montagem(
+            [resposta_llm("ditar_prompt", "crypto-radar", truncado)], nomes=(*NOMES, "crypto-radar")
+        )
+        m.ouvir(
+            "For crypto rather, the startup is slow. Find out which step takes longest "
+            "and tell me before changing anything."
+        )
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(
+            m.canal.recebidos,
+            [
+                (
+                    "crypto-radar",
+                    "The startup is slow. Find out which step takes longest and tell me before changing anything.",
+                )
+            ],
+        )
+
+    def test_tarefas_sem_projeto_perguntam_qual_projeto(self) -> None:
+        m = self.montagem([resposta_llm("pergunta_geral", "", "List the tasks that are left.")])
+        m.ouvir("Talk about to list the tasks that are left.")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertIn("Which project?", m.falados[-1])
+        self.assertEqual(self.arranque.processos, [], "nunca vai as perguntas gerais")
+        self.assertEqual(m.canal.recebidos, [])
+        m.avancar()
+        m.ouvir("atlas")
+        self.assertEqual(m.canal.recebidos, [], "nada sai antes do sim")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(len(m.canal.recebidos), 1)
+        self.assertEqual(m.canal.recebidos[0][0], "atlas")
+        self.assertIn("tasks that are left", m.canal.recebidos[0][1])
+        self.assertEqual(self.arranque.processos, [])
 
 
 class TestCanalDasSessoes(unittest.TestCase):
@@ -945,6 +1216,106 @@ class _TeclaSolta:
         return False
 
 
+class _Parar(Exception):
+    """Para `main` logo depois das primeiras linhas do log (sem config, modelos nem microfone)."""
+
+
+class TestUmaSoInstancia(unittest.TestCase):
+    """`main` com o microfone tira a tranca; processos e PIDs falsos, nada carregado."""
+
+    def setUp(self) -> None:
+        pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(pasta.cleanup)
+        self.pasta = Path(pasta.name)
+        self.lock = self.pasta / "jarvis.lock"
+        self.vivos: dict[int, int | None] = {}
+        for alvo in (
+            mock.patch.object(app, "PASTA_LOGS", self.pasta),
+            mock.patch.object(app, "forcar_consola_utf8", lambda: None),
+            mock.patch("jarvis.instancia.estado_do_processo", self._estado),
+            mock.patch.object(app, "carregar_config", lambda _caminho: config_de_teste("en")),
+        ):
+            alvo.start()
+            self.addCleanup(alvo.stop)
+
+    def _estado(self, pid: int) -> tuple[bool, int | None]:
+        if pid == app.os.getpid():
+            return True, 77
+        return (True, self.vivos[pid]) if pid in self.vivos else (False, None)
+
+    def test_outro_jarvis_vivo_recusa_antes_de_carregar_seja_o_que_for(self) -> None:
+        self.lock.write_text("4242\n11\n", encoding="ascii")
+        self.vivos[4242] = 11
+        saida = StringIO()
+        with (
+            mock.patch.object(app, "_arrancar_e_correr") as arrancar,
+            mock.patch.object(app, "LogDaSessao") as log,
+            mock.patch.object(app, "construir_ouvido") as ouvido,
+            mock.patch("sys.stdout", saida),
+        ):
+            codigo = app.main([])
+        self.assertNotEqual(codigo, 0)
+        self.assertEqual(codigo, app.CODIGO_OUTRA_INSTANCIA)
+        arrancar.assert_not_called()
+        log.assert_not_called()
+        ouvido.assert_not_called()
+        texto = saida.getvalue()
+        self.assertIn("Another jarvis is already running", texto)
+        self.assertIn("4242", texto)
+        self.assertIn("Close it first", texto)
+        self.assertEqual(self.lock.read_text(encoding="ascii"), "4242\n11\n", "a tranca do outro fica")
+
+    def test_arranca_com_a_tranca_e_liberta_no_fim(self) -> None:
+        vista: list[str] = []
+
+        def arrancar(*_args, **_kwargs):
+            vista.append(self.lock.read_text(encoding="ascii"))
+            return 0
+
+        with mock.patch.object(app, "_arrancar_e_correr", arrancar):
+            self.assertEqual(app.main([]), 0)
+        self.assertEqual(vista, [f"{app.os.getpid()}\n77\n"])
+        self.assertFalse(self.lock.exists())
+
+    def test_liberta_com_ctrl_c_e_com_erros(self) -> None:
+        for excecao in (KeyboardInterrupt(), RuntimeError("falha a meio")):
+            with self.subTest(excecao=repr(excecao)):
+                with mock.patch.object(app, "_arrancar_e_correr", side_effect=excecao):
+                    with self.assertRaises(type(excecao)):
+                        app.main([])
+                self.assertFalse(self.lock.exists())
+
+    def test_tranca_de_um_jarvis_morto_e_substituida_e_fica_no_log(self) -> None:
+        self.lock.write_text("4242\n11\n", encoding="ascii")
+        log = LogFalso()
+        with (
+            mock.patch.object(app, "LogDaSessao", lambda: log),
+            mock.patch.object(app, "carregar_config_tolerante", side_effect=_Parar),
+        ):
+            with self.assertRaises(_Parar):
+                app.main([])
+        self.assertIn(f"jarvis a arrancar | pid {app.os.getpid()} | log em", log.linhas[0])
+        self.assertIn("tranca da instancia: a anterior (pid 4242)", log.linhas[1])
+        self.assertIn("substituida", log.linhas[1])
+        self.assertFalse(self.lock.exists(), "libertada tambem quando o arranque falha")
+
+    def test_wav_e_autoteste_nao_tiram_a_tranca(self) -> None:
+        self.lock.write_text("4242\n11\n", encoding="ascii")
+        self.vivos[4242] = 11  # outro jarvis com o microfone esta aberto
+        with mock.patch.object(app, "_arrancar_e_correr", return_value=0) as arrancar:
+            self.assertEqual(app.main(["--wav", "a.wav"]), 0)
+        arrancar.assert_called_once()
+        with mock.patch.object(app, "_autoteste", return_value=0) as autoteste:
+            self.assertEqual(app.main(["--autoteste"]), 0)
+        autoteste.assert_called_once()
+        self.assertEqual(self.lock.read_text(encoding="ascii"), "4242\n11\n")
+
+    def test_wav_nao_cria_tranca(self) -> None:
+        with mock.patch.object(app, "_arrancar_e_correr", return_value=0):
+            app.main(["--wav", "a.wav"])
+        self.assertFalse(self.lock.exists())
+
+
 class TestArranque(unittest.TestCase):
     def test_aquece_as_pecas_ao_mesmo_tempo(self) -> None:
         barreira = threading.Barrier(3, timeout=5.0)
@@ -989,9 +1360,21 @@ class TestArranque(unittest.TestCase):
         self.assertEqual(codigo, 0)
         texto = m.log.texto()
         self.assertIn("JARVIS PRONTO em", texto)
-        self.assertIn('"sim" envia, "nao, muda X para Y" corrige, "cancela" cancela', texto)
+        self.assertIn('"sim" envia, "aborta" cancela ("cancela" tambem), "nao, muda X para Y"', texto)
         self.assertIn("a resposta ao recap diz-se com a tecla de falar, dentro de 30 s", texto, "ficheiros: sem VAD")
         self.assertEqual(m.falados, ["São 15 horas e 30 minutos."])
+
+    def test_cabecalho_em_ingles_diz_abort_e_aceita_cancel(self) -> None:
+        m = Montagem(lingua="en")
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = Path(pasta) / "horas.wav"
+            from jarvis.audio_util import escrever_wav_pcm16
+
+            escrever_wav_pcm16(caminho, b" " * 16000, 16000, 1)
+            ouvido = construir_ouvido(m.jarvis, motor=_MotorDeTexto(), wavs=[caminho])
+            app.correr(m.jarvis, ouvido, com_voz=False, medir=lambda: None)
+        texto = m.log.texto()
+        self.assertIn('"yes" envia, "abort" cancela ("cancel" tambem), "no, change X to Y" ou "add ..." corrigem', texto)
 
     def test_sem_modelo_da_palavra_de_ativacao_fica_so_a_tecla(self) -> None:
         m = Montagem()

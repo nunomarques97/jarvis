@@ -134,6 +134,7 @@ ESTADO_PENDENTE = "PENDENTE — passo do Sponsor"
 ESTADO_CUMPRIDA = "CUMPRIDA"
 ESTADO_NAO_CUMPRIDA = "NÃO CUMPRIDA"
 ESTADO_INCOMPLETA = "INCOMPLETA"
+ESTADO_INVALIDA = "INVÁLIDA"
 
 ORIGEM_SPONSOR = "sponsor"
 ORIGEM_AUTOTESTE = "autoteste"
@@ -374,11 +375,25 @@ _INTENCAO = re.compile(r"intencao=(\S+) projeto=(\S+)")
 _SINAL = re.compile(r"^primeiro sinal de vida: (-?\d+) ms")
 _FALA = re.compile(r"^inicio da resposta falada: (-?\d+) ms")
 _DESFECHO = re.compile(r"^desfecho: (\S+) \| ?(.*)$")
+_TOTAL = re.compile(r"^TOTAL \|\s*(-?\d+) ms desde o inicio da escuta")
 _ENTREGUE = re.compile(r"^canal \| prompt confirmado entregue ao canal do (\S+): ")
 _PERGUNTA = re.compile(r"^conversa \| o (\S+) fez uma pergunta")
+_RESPOSTA = re.compile(r"^canal \| resposta do (\S+) \(caminho=")
 _CONFIGURACAO = re.compile(r"^configuracao: .*\blingua=(\w+)")
+_ARRANQUE = re.compile(r"^jarvis a arrancar(?: \| pid (\d+))?")
+_TERMINADO = re.compile(r"^jarvis terminado(?: \| pid (\d+))?\s*$")
 _PRONTO = "JARVIS PRONTO em"
 _OUVIDO = re.compile(r"^\s+ouvido: (.*)$")
+
+#: Etapas 3 sem `intencao=` que dizem na mesma o que a frase pediu.
+_INTENCAO_PELO_DETALHE = (
+    ("seguida de um acordar curto", "acordar"),
+    ("so cortesia", "cortesia"),
+)
+
+#: Um jarvis com o microfone escreveu frases depois de outro jarvis com o
+#: microfone arrancar: os dois ouviram (e responderam a) as mesmas frases.
+TIPO_SEGUNDA_INSTANCIA = "segunda_instancia"
 
 
 @dataclass
@@ -397,6 +412,13 @@ class FraseDoLog:
     primeira_fala_ms: float | None = None
     desfecho: str | None = None
     motivo: str = ""
+    #: Quando a escuta desta frase comecou (linha TOTAL); a primeira linha so
+    #: se escreve depois de a fala acabar, as vezes muito depois (fila).
+    inicio_da_escuta: datetime.datetime | None = None
+
+    @property
+    def escuta(self) -> datetime.datetime:
+        return self.inicio_da_escuta or self.instante
 
     @property
     def primeira_da_tarefa(self) -> bool:
@@ -415,55 +437,139 @@ class EventoDoLog:
     tipo: str
     projeto: str
     fonte: str
+    #: So na segunda instancia: (pid do jarvis antigo, pid do novo); None sem pid no log.
+    pids: tuple = ()
 
 
-def ler_log(linhas: Iterable[str]) -> tuple[list[FraseDoLog], list[EventoDoLog]]:
-    """As frases e os eventos (prompt entregue, pergunta do Claude) de um log do jarvis.
+@dataclass
+class ProcessoDoLog:
+    """Um processo do jarvis no log, do arranque ao 'jarvis terminado' (ou ao fim do log)."""
 
-    Cada `JARVIS PRONTO` abre um segmento novo (a numeracao das frases
-    recomeca em cada processo); a linha `ouvido:` a seguir diz se o segmento
-    ouviu o microfone ou ficheiros WAV.
+    segmento: int
+    pid: int | None = None
+    inicio: datetime.datetime | None = None
+    pronto: bool = False
+    fonte: str = FONTE_DESCONHECIDA
+    lingua: str | None = None
+    fim: datetime.datetime | None = None
+    maximo: int = 0
+    abertas: set = field(default_factory=set)
+    vistas: set = field(default_factory=set)
+
+
+class _LeitorDoLog:
+    """Le um ficheiro de log onde podem escrever varios jarvis ao mesmo tempo.
+
+    Cada processo numera as suas frases a partir de 1, e as linhas de dois
+    processos podem vir intercaladas (um jarvis com --wav a medir enquanto o
+    do microfone ouve, ou um jarvis antigo esquecido). A linha `frase #N` vai
+    para o processo vivo mais novo que tem a frase N aberta ou que a espera a
+    seguir; so depois para um processo mais antigo.
     """
-    frases: dict[tuple[int, int], FraseDoLog] = {}
-    eventos: list[EventoDoLog] = []
-    segmento = 0
-    fonte = FONTE_DESCONHECIDA
-    lingua_configurada: str | None = None
-    lingua_do_segmento: str | None = None
-    for crua in linhas:
-        linha = crua.rstrip("\r\n")
-        if _PRONTO in linha:
-            segmento += 1
-            fonte = FONTE_DESCONHECIDA
-            lingua_do_segmento = lingua_configurada
-            continue
-        casamento = _OUVIDO.match(linha)
-        if casamento and not _LINHA.match(linha):
-            fonte = FONTE_FICHEIRO if "ficheiro" in casamento.group(1).lower() else FONTE_MICROFONE
-            continue
-        casamento = _LINHA.match(linha)
-        if not casamento:
-            continue
-        try:
-            instante = ler_instante(casamento.group(1) + "000")
-        except ValueError:
-            continue
-        texto = casamento.group(2)
+
+    def __init__(self, primeiro_segmento: int = 1) -> None:
+        self.processos: list[ProcessoDoLog] = []
+        self.frases: dict[tuple[int, int], FraseDoLog] = {}
+        self._eventos: list[tuple[datetime.datetime, str, str, ProcessoDoLog]] = []
+        self._proximo_segmento = primeiro_segmento
+        self._cabecalho: ProcessoDoLog | None = None
+        self._ultimo_instante: datetime.datetime | None = None
+
+    def _novo(self, pid: int | None = None, inicio: datetime.datetime | None = None) -> ProcessoDoLog:
+        processo = ProcessoDoLog(self._proximo_segmento, pid, inicio)
+        self._proximo_segmento += 1
+        self.processos.append(processo)
+        return processo
+
+    def _vivos(self) -> list[ProcessoDoLog]:
+        """Os processos sem 'jarvis terminado', do mais novo para o mais antigo."""
+        return [p for p in reversed(self.processos) if p.fim is None]
+
+    def _a_arrancar(self) -> ProcessoDoLog | None:
+        return next((p for p in self._vivos() if not p.pronto), None)
+
+    def _dono_da_frase(self, numero: int) -> ProcessoDoLog:
+        vivos = self._vivos()
+        for processo in vivos:
+            if numero in processo.abertas or numero == processo.maximo + 1:
+                return processo
+        for processo in vivos:
+            if numero in processo.vistas:
+                return processo
+        return vivos[0] if vivos else self._novo()
+
+    def _dono_do_evento(self) -> ProcessoDoLog:
+        vivos = self._vivos()
+        microfone = next((p for p in vivos if p.fonte == FONTE_MICROFONE), None)
+        return microfone or (vivos[0] if vivos else self._novo())
+
+    def _terminar(self, pid: int | None, instante: datetime.datetime) -> None:
+        vivos = self._vivos()
+        processo = next((p for p in vivos if pid is not None and p.pid == pid), None)
+        if processo is None and vivos:
+            # Sem pid na linha: o mais novo (com um so jarvis de cada vez, o unico).
+            processo = vivos[0]
+        if processo is not None:
+            processo.fim = instante
+
+    def ler(self, linhas: Iterable[str]) -> None:
+        for crua in linhas:
+            linha = crua.rstrip("\r\n")
+            if _PRONTO in linha:
+                processo = self._a_arrancar() or self._novo(inicio=self._ultimo_instante)
+                processo.pronto = True
+                self._cabecalho = processo
+                continue
+            casamento = _OUVIDO.match(linha)
+            if casamento and not _LINHA.match(linha):
+                if self._cabecalho is not None:
+                    ficheiro = "ficheiro" in casamento.group(1).lower()
+                    self._cabecalho.fonte = FONTE_FICHEIRO if ficheiro else FONTE_MICROFONE
+                    self._cabecalho = None
+                continue
+            casamento = _LINHA.match(linha)
+            if not casamento:
+                continue
+            try:
+                instante = ler_instante(casamento.group(1) + "000")
+            except ValueError:
+                continue
+            self._ultimo_instante = instante
+            texto = casamento.group(2)
+            self._ler_linha(instante, texto)
+
+    def _ler_linha(self, instante: datetime.datetime, texto: str) -> None:
+        arranque = _ARRANQUE.match(texto)
+        if arranque:
+            self._novo(int(arranque.group(1)) if arranque.group(1) else None, instante)
+            return
+        terminado = _TERMINADO.match(texto)
+        if terminado:
+            self._terminar(int(terminado.group(1)) if terminado.group(1) else None, instante)
+            return
         configuracao = _CONFIGURACAO.match(texto)
         if configuracao:
-            lingua_configurada = configuracao.group(1)
-            continue
-        for padrao, tipo in ((_ENTREGUE, "entregue"), (_PERGUNTA, "pergunta")):
+            vivos = self._vivos()
+            processo = self._a_arrancar() or (vivos[0] if vivos else self._novo(inicio=instante))
+            processo.lingua = configuracao.group(1)
+            return
+        for padrao, tipo in ((_ENTREGUE, "entregue"), (_PERGUNTA, "pergunta"), (_RESPOSTA, "resposta")):
             evento = padrao.match(texto)
             if evento:
-                eventos.append(EventoDoLog(instante, tipo, evento.group(1), fonte))
+                self._eventos.append((instante, tipo, evento.group(1), self._dono_do_evento()))
+                return
         casamento = _FRASE.match(texto)
         if not casamento:
-            continue
-        chave = (segmento, int(casamento.group(1)))
-        frase = frases.get(chave)
+            return
+        numero = int(casamento.group(1))
+        processo = self._dono_da_frase(numero)
+        chave = (processo.segmento, numero)
+        frase = self.frases.get(chave)
         if frase is None:
-            frase = frases[chave] = FraseDoLog(segmento, chave[1], instante, fonte, lingua_do_segmento)
+            frase = self.frases[chave] = FraseDoLog(processo.segmento, numero, instante, processo.fonte)
+            processo.vistas.add(numero)
+            processo.abertas.add(numero)
+            processo.maximo = max(processo.maximo, numero)
         resto = casamento.group(2)
         etapa = _ETAPA_3.match(resto)
         if etapa:
@@ -480,7 +586,9 @@ def ler_log(linhas: Iterable[str]) -> tuple[list[FraseDoLog], list[EventoDoLog]]
                 frase.projeto = None if intencao.group(2) == "-" else intencao.group(2)
             elif " sair " in f" {detalhe} ":
                 frase.intencao = "sair_da_conversa"
-            continue
+            else:
+                frase.intencao = next((i for chave_, i in _INTENCAO_PELO_DETALHE if chave_ in detalhe), None)
+            return
         for padrao, atributo in ((_SINAL, "sinal_de_vida_ms"), (_FALA, "primeira_fala_ms")):
             medida = padrao.match(resto)
             if medida and getattr(frase, atributo) is None:
@@ -488,7 +596,72 @@ def ler_log(linhas: Iterable[str]) -> tuple[list[FraseDoLog], list[EventoDoLog]]
         desfecho = _DESFECHO.match(resto)
         if desfecho:
             frase.desfecho, frase.motivo = desfecho.group(1), desfecho.group(2)
-    return sorted(frases.values(), key=lambda f: (f.instante, f.segmento, f.numero)), eventos
+        total = _TOTAL.match(resto)
+        if total:
+            frase.inicio_da_escuta = instante - datetime.timedelta(milliseconds=float(total.group(1)))
+            processo.abertas.discard(numero)
+
+    def resultado(self) -> tuple[list[FraseDoLog], list[EventoDoLog]]:
+        """Frases e eventos com a fonte e a lingua do processo que os escreveu."""
+        por_segmento = {p.segmento: p for p in self.processos}
+        frases = list(self.frases.values())
+        for frase in frases:
+            processo = por_segmento[frase.segmento]
+            frase.fonte, frase.lingua = processo.fonte, processo.lingua
+        eventos = [EventoDoLog(instante, tipo, projeto, p.fonte) for instante, tipo, projeto, p in self._eventos]
+        return frases, eventos
+
+
+def segundas_instancias(processos: Sequence[ProcessoDoLog], frases: Sequence[FraseDoLog]) -> list[EventoDoLog]:
+    """Frases de um jarvis com o microfone escritas depois de outro jarvis com o microfone arrancar.
+
+    Um jarvis antigo que deixou de escrever (fechado, ou caido sem 'jarvis
+    terminado') nao conta: so frases escritas enquanto o novo estava vivo.
+    """
+    por_segmento = {p.segmento: p for p in processos}
+    eventos: list[EventoDoLog] = []
+    for frase in frases:
+        antigo = por_segmento.get(frase.segmento)
+        if antigo is None or antigo.fonte != FONTE_MICROFONE or antigo.inicio is None:
+            continue
+        for novo in processos:
+            if novo is antigo or novo.fonte != FONTE_MICROFONE or novo.inicio is None:
+                continue
+            if antigo.inicio < novo.inicio <= frase.instante and (novo.fim is None or frase.instante <= novo.fim):
+                eventos.append(
+                    EventoDoLog(frase.instante, TIPO_SEGUNDA_INSTANCIA, "", FONTE_MICROFONE, (antigo.pid, novo.pid))
+                )
+                break
+    return eventos
+
+
+def _ler_varios(conteudos: Iterable[Iterable[str]]) -> tuple[list[FraseDoLog], list[EventoDoLog]]:
+    frases: list[FraseDoLog] = []
+    eventos: list[EventoDoLog] = []
+    processos: list[ProcessoDoLog] = []
+    for linhas in conteudos:
+        leitor = _LeitorDoLog(primeiro_segmento=len(processos) + 1)
+        leitor.ler(linhas)
+        novas, novos = leitor.resultado()
+        frases.extend(novas)
+        eventos.extend(novos)
+        processos.extend(leitor.processos)
+    # Entre ficheiros tambem: um jarvis esquecido de ontem escreve no log de ontem.
+    eventos.extend(segundas_instancias(processos, frases))
+    frases.sort(key=lambda f: (f.instante, f.segmento, f.numero))
+    eventos.sort(key=lambda e: e.instante)
+    return frases, eventos
+
+
+def ler_log(linhas: Iterable[str]) -> tuple[list[FraseDoLog], list[EventoDoLog]]:
+    """As frases e os eventos de um log do jarvis.
+
+    Eventos: prompt entregue, resposta do Claude, pergunta do Claude e a
+    segunda instancia (dois jarvis com o microfone ao mesmo tempo). Cada
+    processo e um segmento; a linha `ouvido:` do cabecalho diz se ouviu o
+    microfone ou ficheiros WAV.
+    """
+    return _ler_varios([linhas])
 
 
 def logs_da_sessao(sessao: Sessao, pasta: Path = PASTA_LOGS) -> list[Path]:
@@ -510,14 +683,11 @@ def logs_da_sessao(sessao: Sessao, pasta: Path = PASTA_LOGS) -> list[Path]:
 
 
 def ler_logs(caminhos: Sequence[Path]) -> tuple[list[FraseDoLog], list[EventoDoLog]]:
-    frases: list[FraseDoLog] = []
-    eventos: list[EventoDoLog] = []
+    conteudos = []
     for caminho in caminhos:
         with Path(caminho).open(encoding="utf-8", errors="replace") as ficheiro:
-            novas, novos = ler_log(ficheiro)
-        frases.extend(novas)
-        eventos.extend(novos)
-    return frases, eventos
+            conteudos.append(ficheiro.read().splitlines())
+    return _ler_varios(conteudos)
 
 
 def jarvis_a_correr(linhas: Iterable[str]) -> bool:
@@ -574,8 +744,96 @@ class Avaliacao:
     linguas: tuple = ()
 
 
-def _no_intervalo(instante: datetime.datetime, registo: RegistoDaTarefa) -> bool:
-    return ler_instante(registo.inicio) <= instante <= ler_instante(registo.fim)
+#: A escuta pode comecar pouco antes do Enter de inicio (o Sponsor ja fala enquanto carrega).
+ANTECIPACAO = datetime.timedelta(seconds=8)
+#: Depois do Enter final ainda chegam respostas ao recap, a conversa e a resposta
+#: lida do Claude; contam para a tarefa ate a seguinte comecar, no maximo isto.
+GRACA_FINAL = datetime.timedelta(seconds=300)
+
+
+@dataclass
+class _Janela:
+    registo: RegistoDaTarefa
+    abre: datetime.datetime
+    inicio: datetime.datetime
+    fim: datetime.datetime
+    fecha: datetime.datetime
+
+
+def _janelas(registos: Sequence[RegistoDaTarefa]) -> list[_Janela]:
+    """As janelas das tarefas feitas, por ordem, sem se sobreporem.
+
+    Uma frase nova conta para a tarefa se a escuta comecou entre `abre` e o
+    Enter final (`fim`); o que vem na sequencia dela conta ate `fecha`, o
+    Enter de inicio da tarefa seguinte.
+    """
+    feitas = sorted(
+        (r for r in registos if r.estado == FEITA and r.inicio and r.fim), key=lambda r: ler_instante(r.inicio)
+    )
+    janelas: list[_Janela] = []
+    fim_anterior: datetime.datetime | None = None
+    for registo in feitas:
+        inicio, fim = ler_instante(registo.inicio), ler_instante(registo.fim)
+        abre = inicio - ANTECIPACAO
+        if fim_anterior is not None:
+            abre = min(max(abre, fim_anterior), inicio)
+        janelas.append(_Janela(registo, abre, inicio, fim, fim + GRACA_FINAL))
+        fim_anterior = fim
+    for janela, seguinte in zip(janelas, janelas[1:]):
+        janela.fecha = max(min(janela.fecha, seguinte.inicio), janela.fim)
+    return janelas
+
+
+def atribuir(
+    registos: Sequence[RegistoDaTarefa], frases: Sequence[FraseDoLog], eventos: Sequence[EventoDoLog]
+) -> dict[str, tuple[list[FraseDoLog], list[EventoDoLog]]]:
+    """As frases e os eventos de cada tarefa feita.
+
+    Uma frase nova (nem resposta ao recap nem na conversa) vai para a tarefa
+    em cuja janela a escuta comecou. As respostas ao recap e na conversa vao
+    com a ultima frase nova do mesmo processo, mesmo depois do Enter final,
+    mas nunca depois de a tarefa seguinte comecar. Os eventos (prompt
+    entregue, resposta ou pergunta do Claude) vao para a tarefa aberta nesse
+    instante, ate a seguinte comecar.
+    """
+    janelas = _janelas(registos)
+    por_tarefa: dict[str, tuple[list[FraseDoLog], list[EventoDoLog]]] = {j.registo.id: ([], []) for j in janelas}
+
+    def janela_da_frase_nova(instante: datetime.datetime) -> _Janela | None:
+        return next((j for j in janelas if j.abre <= instante <= j.fim), None)
+
+    ultima_nova: dict[int, _Janela | None] = {}
+    for frase in sorted(frases, key=lambda f: (f.segmento, f.numero)):
+        if frase.primeira_da_tarefa:
+            janela = janela_da_frase_nova(frase.escuta)
+            if janela is not None or frase.segmento not in ultima_nova:
+                ultima_nova[frase.segmento] = janela
+            # Uma frase nova entre o Enter final e a tarefa seguinte ("excellent")
+            # nao conta, nem corta o que vem na sequencia da tarefa (a conversa).
+        elif frase.segmento in ultima_nova:
+            janela = ultima_nova[frase.segmento]
+            if janela is not None and not frase.escuta < janela.fecha:
+                janela = None  # ja e tempo da tarefa seguinte: nao conta para nenhuma
+        else:
+            # Sem a frase nova no log (comecou antes do log lido): so pela hora.
+            janela = janela_da_frase_nova(frase.escuta)
+        if janela is not None:
+            por_tarefa[janela.registo.id][0].append(frase)
+    for evento in eventos:
+        janela = next((j for j in janelas if j.abre <= evento.instante < j.fecha), None)
+        if janela is not None:
+            por_tarefa[janela.registo.id][1].append(evento)
+    for frases_da_tarefa, _ in por_tarefa.values():
+        frases_da_tarefa.sort(key=lambda f: (f.escuta, f.segmento, f.numero))
+    return por_tarefa
+
+
+def frases_do_microfone_na_janela(frases: Sequence[FraseDoLog], inicio: str, fim: str) -> int:
+    """Quantas frases do microfone ouviu o jarvis entre dois Enter (com a antecipacao)."""
+    abre, fecha = ler_instante(inicio), ler_instante(fim)
+    return sum(
+        1 for f in frases if f.fonte == FONTE_MICROFONE and (abre - ANTECIPACAO <= f.escuta <= fecha or abre <= f.instante <= fecha)
+    )
 
 
 def _projeto_relativo(tarefa: Tarefa, obtido: str | None, projetos: dict[str, str]) -> tuple[bool, str]:
@@ -643,10 +901,10 @@ def avaliar_tarefa(
     eventos: Sequence[EventoDoLog],
     projetos: dict[str, str],
 ) -> ResultadoDaTarefa:
-    na_janela = [f for f in frases if _no_intervalo(f.instante, registo)]
-    validas = [f for f in na_janela if f.fonte == FONTE_MICROFONE]
-    eventos_validos = [e for e in eventos if e.fonte == FONTE_MICROFONE and _no_intervalo(e.instante, registo)]
-    resultado = ResultadoDaTarefa(tarefa, registo, validas, eventos_validos, excluidas=len(na_janela) - len(validas))
+    """Mede uma tarefa com as frases e os eventos que lhe foram atribuidos (`atribuir`)."""
+    validas = [f for f in frases if f.fonte == FONTE_MICROFONE]
+    eventos_validos = [e for e in eventos if e.fonte == FONTE_MICROFONE and e.tipo != TIPO_SEGUNDA_INSTANCIA]
+    resultado = ResultadoDaTarefa(tarefa, registo, validas, eventos_validos, excluidas=len(frases) - len(validas))
     indice = next((i for i, f in enumerate(validas) if f.primeira_da_tarefa), None)
     primeira = validas[indice] if indice is not None else None
     if primeira is not None:
@@ -661,6 +919,23 @@ def avaliar_tarefa(
     resultado.fluxo_no_log = not resultado.falta_no_log
     resultado.passou = resultado.fluxo_no_log and registo.fez_o_pedido is True
     return resultado
+
+
+def _segunda_instancia(sessao: Sessao, eventos: Sequence[EventoDoLog]) -> str:
+    """Porque a sessao nao vale, quando dois jarvis ouviram o microfone ao mesmo tempo ('' = so um)."""
+    janelas = _janelas(sessao.tarefas)
+    if not janelas:
+        return ""
+    abre, fecha = janelas[0].abre, janelas[-1].fecha
+    duplicados = [e for e in eventos if e.tipo == TIPO_SEGUNDA_INSTANCIA and abre <= e.instante <= fecha]
+    if not duplicados:
+        return ""
+    pares = sorted({e.pids for e in duplicados if e.pids and all(pid is not None for pid in e.pids)})
+    pids = "".join(f" (PID {antigo} ainda a ouvir depois de o PID {novo} arrancar)" for antigo, novo in pares)
+    return (
+        f"dois jarvis com o microfone ao mesmo tempo{pids}: {len(duplicados)} frase(s) do jarvis mais antigo "
+        "escritas durante a sessão; os dois ouviram e responderam às mesmas frases"
+    )
 
 
 def _fracao(par: tuple[int, int]) -> float:
@@ -683,13 +958,23 @@ def avaliar_sessao(
             total=len(tarefas),
             pendencias=[f"a última sessão não é do Sponsor (origem '{sessao.origem}'); não conta"],
         )
+    duas = _segunda_instancia(sessao, eventos)
+    if duas:
+        return Avaliacao(
+            ESTADO_INVALIDA,
+            sessao,
+            total=len(tarefas),
+            pendencias=[duas, "fechar todas as janelas do jarvis, abrir só um e repetir a sessão"],
+        )
     avaliacao = Avaliacao(ESTADO_NAO_CUMPRIDA, sessao, total=len(tarefas))
+    atribuidas = atribuir(sessao.tarefas, frases, eventos)
     for tarefa in tarefas:
         registo = sessao.registo(tarefa.id)
-        if registo is None or registo.estado != FEITA or not registo.inicio or not registo.fim:
+        if registo is None or registo.id not in atribuidas:
             avaliacao.saltadas.append((tarefa.id, registo.motivo if registo else "por fazer"))
             continue
-        avaliacao.resultados.append(avaliar_tarefa(tarefa, registo, frases, eventos, sessao.projetos))
+        da_tarefa, eventos_da_tarefa = atribuidas[registo.id]
+        avaliacao.resultados.append(avaliar_tarefa(tarefa, registo, da_tarefa, eventos_da_tarefa, sessao.projetos))
 
     resultados = avaliacao.resultados
     excluidas = sum(r.excluidas for r in resultados)
@@ -810,12 +1095,16 @@ def texto_da_evidencia(avaliacao: Avaliacao, quando: datetime.datetime | None = 
             "Voz sintética e ficheiros WAV não contam.",
             "",
         ]
-    if avaliacao.pendencias and avaliacao.estado != ESTADO_PENDENTE:
+    if avaliacao.estado == ESTADO_INVALIDA:
+        linhas += ["## INVÁLIDA — a sessão não conta", "", *[f"- {p}" for p in avaliacao.pendencias], ""]
+        linhas += ["Nenhuma meta é avaliada nem declarada cumprida numa sessão inválida.", ""]
+    elif avaliacao.pendencias and avaliacao.estado != ESTADO_PENDENTE:
         linhas += ["## Pendente", "", *[f"- {p}" for p in avaliacao.pendencias], ""]
     linhas += ["## Linha de base (antes da reescrita)", ""]
     linhas += ["| medida | linha de base | agora (voz real) | meta |", "|---|---|---|---|"]
-    tem_numeros = avaliacao.estado != ESTADO_PENDENTE or bool(avaliacao.resultados)
-    agora = (lambda texto: texto) if tem_numeros else (lambda _texto: "pendente")
+    tem_numeros = avaliacao.estado not in (ESTADO_PENDENTE, ESTADO_INVALIDA) or bool(avaliacao.resultados)
+    sem_numeros = "inválida" if avaliacao.estado == ESTADO_INVALIDA else "pendente"
+    agora = (lambda texto: texto) if tem_numeros else (lambda _texto: sem_numeros)
     horas_p50 = f"p50 {_segundos(ponta.percentil(avaliacao.horas_ms, 50))}" if avaliacao.horas_ms else "sem amostras"
     linhas += [
         f"| intenção (e projeto) à primeira | {LINHA_DE_BASE['intencao']} | {agora(_percentagem(avaliacao.acerto))} "
@@ -825,7 +1114,7 @@ def texto_da_evidencia(avaliacao: Avaliacao, quando: datetime.datetime | None = 
         f"| p50 <= {_segundos(ponta.LIMITE_HORAS_P50_MS)} |",
         "",
     ]
-    if avaliacao.estado == ESTADO_PENDENTE and not avaliacao.resultados:
+    if avaliacao.estado in (ESTADO_PENDENTE, ESTADO_INVALIDA) and not avaliacao.resultados:
         return "\n".join(linhas)
 
     assert sessao is not None
@@ -1097,11 +1386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     def frases_na_janela(inicio: str, fim: str) -> int:
         frases, _ = ler_log(_log_de_hoje())
-        return sum(
-            1
-            for f in frases
-            if f.fonte == FONTE_MICROFONE and ler_instante(inicio) <= f.instante <= ler_instante(fim)
-        )
+        return frases_do_microfone_na_janela(frases, inicio, fim)
 
     print(f"Sessao de aceitacao | guiao: {len(tarefas)} tarefas | lingua dos exemplos: {sessao.lingua}")
     print(f"Registo da sessao: {caminho_para_mostrar(caminho)} (pasta ignorada pelo Git)")
@@ -1121,9 +1406,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 class EscritorDeLogFalso:
     """Escreve um log com o formato do jarvis, com relogio de parede controlado."""
 
-    def __init__(self, inicio: datetime.datetime) -> None:
+    def __init__(self, inicio: datetime.datetime, linhas: list[str] | None = None) -> None:
         self.agora = inicio
-        self.linhas: list[str] = []
+        #: Dois escritores com a mesma lista: dois jarvis a escrever no mesmo ficheiro.
+        self.linhas: list[str] = [] if linhas is None else linhas
         self._numero = 0
 
     def avancar(self, segundos: float) -> None:
@@ -1132,9 +1418,9 @@ class EscritorDeLogFalso:
     def linha(self, texto: str) -> None:
         self.linhas.append(f"{agora_iso(self.agora)} {texto}")
 
-    def arranque(self, *, lingua: str = "en", microfone: bool = True) -> None:
+    def arranque(self, *, lingua: str = "en", microfone: bool = True, pid: int | None = None) -> None:
         self._numero = 0
-        self.linha("jarvis a arrancar | log em logs/jarvis-teste.log")
+        self.linha("jarvis a arrancar" + (f" | pid {pid}" if pid is not None else "") + " | log em logs/jarvis-teste.log")
         self.linha(f"configuracao: 2 projeto(s) | lingua={lingua} | motor=motor-falso (cpu) | voz=ligada | forja=configurada")
         self.linhas += [
             "",
@@ -1155,13 +1441,18 @@ class EscritorDeLogFalso:
         na_conversa: bool = False,
         sinal_ms: float = 300.0,
         fala_ms: float | None = 900.0,
+        escuta_ms: float = 1500.0,
+        detalhe: str | None = None,
     ) -> None:
+        """Uma frase inteira, escrita agora; a escuta comecou `escuta_ms` antes."""
         self._numero += 1
         n = self._numero
         self.linha(formatar_etapa(n, 1, 1000.0, "tecla de falar | audio 1.00 s"))
         self.linha(formatar_etapa(n, 2, 200.0, "motor=motor-falso inferencia=200 ms | texto: 'frase ficticia'"))
         self.linha(f"frase #{n} | primeiro sinal de vida: {sinal_ms:.0f} ms desde o fim da fala (linha A PENSAR)")
-        if resposta_ao_recap:
+        if detalhe is not None:
+            pass  # uma etapa 3 sem interpretacao (acordar, cortesia)
+        elif resposta_ao_recap:
             detalhe = "resposta ao recap pendente"
         else:
             detalhe = Jarvis._detalhe_da_interpretacao(
@@ -1173,13 +1464,22 @@ class EscritorDeLogFalso:
         if fala_ms is not None:
             self.linha(f"frase #{n} | inicio da resposta falada: {fala_ms:.0f} ms desde o fim da fala")
         self.linha(f"frase #{n} | desfecho: {desfecho} | {motivo}")
-        self.linha(f"frase #{n} | TOTAL |    1500 ms desde o inicio da escuta | 500 ms desde o fim da fala | desfecho: {desfecho}")
+        self.linha(
+            f"frase #{n} | TOTAL | {escuta_ms:7.0f} ms desde o inicio da escuta | 500 ms desde o fim da fala "
+            f"| desfecho: {desfecho}"
+        )
 
     def entregue(self, projeto: str) -> None:
         self.linha(f"canal | prompt confirmado entregue ao canal do {projeto}: 'pedido ficticio'")
 
     def pergunta(self, projeto: str) -> None:
         self.linha(f"conversa | o {projeto} fez uma pergunta: janela de 8 s a ouvir sem palavra de ativacao")
+
+    def resposta(self, projeto: str) -> None:
+        self.linha(f"canal | resposta do {projeto} (caminho=headless): 'resposta ficticia'")
+
+    def terminado(self) -> None:
+        self.linha("jarvis terminado")
 
 
 def escrever_tarefa_falsa(
@@ -1296,13 +1596,32 @@ def _autoteste() -> int:
         (ESTADO_NAO_CUMPRIDA, 2),
     )
 
-    # 5. Pedido inventado marcado pelo Sponsor: falha a meta de zero.
+    # 5. Um jarvis antigo com o microfone continua a escrever frases durante a sessao: INVALIDA.
+    antigo = EscritorDeLogFalso(inicio - datetime.timedelta(seconds=60))
+    antigo.arranque(pid=3131)
+    antigo.frase("horas")
+    sessao_dupla, linhas_novas = sessao_falsa(tarefas, PROJETOS_FICTICIOS, inicio)
+    linhas_novas[0] = linhas_novas[0].replace("jarvis a arrancar", "jarvis a arrancar | pid 4242", 1)
+    meio = len(linhas_novas) // 2
+    antigo.agora = datetime.datetime.fromisoformat(linhas_novas[meio][:23])
+    antigo.frase("horas")
+    dupla = avaliar_sessao(
+        sessao_dupla, tarefas, *ler_log(antigo.linhas[:-7] + linhas_novas[:meio] + antigo.linhas[-7:] + linhas_novas[meio:])
+    )
+    texto = texto_da_evidencia(dupla)
+    verificar(
+        "dois jarvis com o microfone: INVALIDA, sem metas",
+        (dupla.estado, "PID 3131" in texto, "## Metas" in texto),
+        (ESTADO_INVALIDA, True, False),
+    )
+
+    # 6. Pedido inventado marcado pelo Sponsor: falha a meta de zero.
     sessao.tarefas[1].inventou = True
     inventou = avaliar_sessao(sessao, tarefas, frases, eventos)
     verificar("um pedido inventado: NAO CUMPRIDA", (inventou.estado, inventou.inventados[0]), (ESTADO_NAO_CUMPRIDA, 1))
     sessao.tarefas[1].inventou = False
 
-    # 6. A sessao guiada guarda janelas e respostas, e o q guarda e sai.
+    # 7. A sessao guiada guarda janelas e respostas, e o q guarda e sai.
     with tempfile.TemporaryDirectory() as pasta:
         caminho = Path(pasta) / "sessao-teste.json"
         nova = Sessao(lingua="en", projetos=dict(PROJETOS_FICTICIOS))

@@ -182,8 +182,9 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
     def _resultados(self):
         self.log.fechar()
         frases, eventos = ac.ler_logs([self.log.caminho])
+        atribuidas = ac.atribuir(self.sessao.tarefas, frases, eventos)
         return {
-            registo.id: ac.avaliar_tarefa(POR_ID[registo.id], registo, frases, eventos, self.projetos)
+            registo.id: ac.avaliar_tarefa(POR_ID[registo.id], registo, *atribuidas[registo.id], self.projetos)
             for registo in self.sessao.tarefas
         }, frases
 
@@ -226,8 +227,8 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
 
     def test_frase_fora_da_janela_nao_conta(self) -> None:
         self._passar(2)
-        self.m.ouvir("what time is it")  # antes de a tarefa comecar
-        self._passar(3)
+        self.m.ouvir("what time is it")  # bem antes de a tarefa comecar
+        self._passar(30)
         self._tarefa("a-01", ["tell atlas to add a test for the config loader", "yes"])
         resultados, _ = self._resultados()
         self.assertEqual(resultados["a-01"].intencao_obtida, "ditar_prompt")
@@ -378,6 +379,275 @@ class TestMetas(unittest.TestCase):
         avaliacao = _avaliar(self.sessao, self.linhas)
         self.assertEqual(avaliacao.estado, ac.ESTADO_INCOMPLETA)
         self.assertIn("--continuar", avaliacao.pendencias[0])
+
+
+# --- A sessao de hoje: frases fora das janelas estritas e dois jarvis --------------
+
+
+ACORDAR = "palavra de ativacao seguida de um acordar curto (nada interpretado)"
+
+
+class _SessaoDeHoje:
+    """Um log como o da sessao de aceitacao que contou mal, com frases ficticias.
+
+    O jarvis do microfone (PID 4242) arranca com um jarvis antigo esquecido
+    (PID 3131) ainda aberto, ou caido, e um jarvis com --wav a medir a meio.
+    O Sponsor comeca a falar antes do Enter de inicio, carrega no Enter final
+    antes de responder ao recap, e a resposta do Claude, a pergunta e a
+    resposta na conversa so chegam depois do Enter final.
+    """
+
+    PID_NOVO, PID_ANTIGO, PID_WAV = 4242, 3131, 5151
+
+    def __init__(self, antigo: str | None = None, *, com_pids: bool = True) -> None:
+        self.linhas: list[str] = []
+        self.novo = ac.EscritorDeLogFalso(INICIO, self.linhas)
+        self.antigo = ac.EscritorDeLogFalso(INICIO, self.linhas)
+        self.wav = ac.EscritorDeLogFalso(INICIO, self.linhas)
+        self.modo_antigo = antigo
+        self.com_pids = com_pids
+        self.sessao = ac.Sessao(lingua="en", projetos=dict(PROJETOS))
+        #: id da tarefa -> numeros das frases do jarvis novo que ela causou.
+        self.esperado: dict[str, list[int]] = {}
+        self.eventos_esperados: dict[str, list[str]] = {}
+        self._numero = 0
+
+    def _pid(self, pid: int) -> int | None:
+        return pid if self.com_pids else None
+
+    def ir(self, segundos: float) -> None:
+        for escritor in (self.novo, self.antigo, self.wav):
+            escritor.agora = INICIO + datetime.timedelta(seconds=segundos)
+
+    def comeca(self, id_: str, segundos: float) -> None:
+        """O Enter de inicio; nao mexe no relogio do log (a frase pode ja ter sido escrita)."""
+        inicio = INICIO + datetime.timedelta(seconds=segundos)
+        registo = ac.RegistoDaTarefa(id_, ac.FEITA, inicio=agora_iso(inicio), fez_o_pedido=True)
+        registo.inventou = False if POR_ID[id_].pergunta_inventados else None
+        self.sessao.tarefas.append(registo)
+        self.esperado[id_], self.eventos_esperados[id_] = [], []
+
+    def acaba(self, segundos: float) -> None:
+        self.ir(segundos)
+        self.sessao.tarefas[-1].fim = agora_iso(self.novo.agora)
+
+    def frase(self, tarefa: str, segundos: float, *args, antigo_ouve: bool = False, **kwargs) -> None:
+        self.ir(segundos)
+        self.novo.frase(*args, **kwargs)
+        self._numero += 1
+        self.esperado[tarefa].append(self._numero)
+        if antigo_ouve and self.modo_antigo == "vivo":
+            self.antigo.frase(*args, **kwargs)  # o antigo tambem ouviu e respondeu
+
+    def evento(self, tarefa: str, segundos: float, tipo: str, projeto: str) -> None:
+        self.ir(segundos)
+        getattr(self.novo, tipo)(projeto)
+        self.eventos_esperados[tarefa].append(tipo)
+
+    def montar(self) -> "_SessaoDeHoje":
+        um, dois = PROJETOS["<projeto-1>"], PROJETOS["<projeto-2>"]
+        pendente = {"desfecho": "pendente", "motivo": "a espera de confirmacao"}
+        sim = {"resposta_ao_recap": True, "desfecho": "executado", "motivo": "confirmado"}
+        if self.modo_antigo:
+            # O jarvis antigo, aberto de manha e esquecido: ja tinha ouvido tres frases.
+            self.ir(5)
+            self.antigo.arranque(pid=self._pid(self.PID_ANTIGO))
+            for segundos in (8, 11, 14):
+                self.ir(segundos)
+                self.antigo.frase("horas")
+        self.ir(20)
+        self.novo.arranque(pid=self._pid(self.PID_NOVO))
+
+        # l-01: o Sponsor falou e o jarvis respondeu antes de ele carregar no Enter de inicio.
+        self.comeca("l-01", 60)
+        self.frase("l-01", 59, "horas", escuta_ms=2500.0, antigo_ouve=True)
+        self.acaba(65)
+        # a-01: Enter final antes do "yes"; entregue e resposta do Claude depois.
+        self.comeca("a-01", 80)
+        self.frase("a-01", 85, "ditar_prompt", um, escuta_ms=2500.0, antigo_ouve=True, **pendente)
+        self.acaba(88)
+        self.frase("a-01", 91, None, escuta_ms=1000.0, **sim)
+        self.evento("a-01", 91.5, "entregue", um)
+        self.evento("a-01", 110, "resposta", um)
+        # a-06: o "abort" chega depois do Enter final.
+        self.comeca("a-06", 130)
+        self.frase("a-06", 135, "ditar_prompt", dois, **pendente)
+        self.acaba(137)
+        self.frase("a-06", 140, None, resposta_ao_recap=True, desfecho="cancelado", motivo="cancelado pelo utilizador")
+        # d-01: a resposta do Claude (uma pergunta) e a conversa chegam depois do Enter final.
+        self.comeca("d-01", 160)
+        self.frase("d-01", 165, "ditar_prompt", um, antigo_ouve=True, **pendente)
+        self.frase("d-01", 169, None, **sim)
+        self.evento("d-01", 169.5, "entregue", um)
+        self.acaba(172)
+        self.evento("d-01", 200, "resposta", um)
+        self.evento("d-01", 200.5, "pergunta", um)
+        self.frase("d-01", 205, "conversa", um, na_conversa=True, **pendente)
+        self.frase("d-01", 209, None, **sim)
+        self.evento("d-01", 209.5, "entregue", um)
+        # l-04: um jarvis com --wav mede a meio da tarefa; as frases dele nao contam.
+        self.comeca("l-04", 240)
+        self.ir(241)
+        self.wav.arranque(microfone=False, pid=self._pid(self.PID_WAV))
+        self.ir(242)
+        self.wav.frase("horas")
+        self.wav.terminado()
+        self.frase("l-04", 243, "dormir")
+        self.acaba(245)
+        # l-05: acordar pela palavra de ativacao seguida de "Up."
+        self.comeca("l-05", 260)
+        self.frase("l-05", 263, None, detalhe=ACORDAR)
+        self.acaba(266)
+        # a-04: correcao e "yes" depois do Enter final; a tarefa seguinte comeca logo.
+        self.comeca("a-04", 290)
+        self.frase("a-04", 294, "ditar_prompt", dois, **pendente)
+        self.frase("a-04", 298, None, resposta_ao_recap=True, **pendente)
+        self.acaba(300)
+        self.frase("a-04", 303, None, escuta_ms=1000.0, **sim)
+        self.evento("a-04", 303.5, "entregue", dois)
+        # l-03: comecou a falar 1,5 s antes do Enter, ja depois do Enter final de a-04.
+        self.comeca("l-03", 306)
+        self.frase("l-03", 307, "horas", escuta_ms=2500.0)
+        self.acaba(310)
+        return self
+
+
+class TestSessaoDeHoje(unittest.TestCase):
+    def _atribuidas(self, montagem: _SessaoDeHoje):
+        frases, eventos = ac.ler_log(montagem.linhas)
+        return ac.atribuir(montagem.sessao.tarefas, frases, eventos), frases, eventos
+
+    def test_cada_frase_conta_para_a_tarefa_que_a_causou(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        atribuidas, frases, _ = self._atribuidas(montagem)
+        microfone = {f.numero for f in frases if f.fonte == ac.FONTE_MICROFONE}
+        self.assertEqual(microfone, set(range(1, 16)))
+        obtido = {
+            id_: [f.numero for f in da_tarefa if f.fonte == ac.FONTE_MICROFONE]
+            for id_, (da_tarefa, _) in atribuidas.items()
+        }
+        self.assertEqual(obtido, montagem.esperado)
+        eventos = {id_: [e.tipo for e in eventos_] for id_, (_, eventos_) in atribuidas.items()}
+        self.assertEqual(eventos, montagem.eventos_esperados)
+        # A frase do --wav cai na janela de l-04 mas fica de fora.
+        self.assertEqual([f.fonte for f in atribuidas["l-04"][0]], [ac.FONTE_FICHEIRO, ac.FONTE_MICROFONE])
+
+    def test_nenhuma_tarefa_feita_fica_sem_frases_e_os_fluxos_correm(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        avaliacao = ac.avaliar_sessao(montagem.sessao, TAREFAS, *ac.ler_log(montagem.linhas))
+        self.assertNotEqual(avaliacao.estado, ac.ESTADO_INVALIDA)
+        resultados = {r.tarefa.id: r for r in avaliacao.resultados}
+        self.assertEqual(set(resultados), set(montagem.esperado))
+        for id_, resultado in resultados.items():
+            self.assertNotEqual(resultado.falta_no_log, "nenhuma frase do microfone nesta janela", id_)
+            self.assertEqual(resultado.falta_no_log, "", id_)
+            self.assertTrue(resultado.acertou, (id_, resultado.intencao_obtida, resultado.projeto_obtido))
+            self.assertTrue(resultado.passou, id_)
+        self.assertTrue(resultados["a-01"].aceite_sem_correcao)
+        self.assertFalse(resultados["a-04"].aceite_sem_correcao)
+        self.assertEqual(resultados["l-04"].excluidas, 1)
+
+    def test_frases_da_tarefa_seguinte_nunca_contam_para_a_anterior(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        atribuidas, _, _ = self._atribuidas(montagem)
+        # A frase de l-03 comecou antes do Enter de l-03 e depois do Enter final de a-04.
+        self.assertEqual([f.numero for f in atribuidas["l-03"][0]], [15])
+        self.assertNotIn(15, [f.numero for f in atribuidas["a-04"][0]])
+
+    def test_resposta_ao_recap_depois_de_a_tarefa_seguinte_comecar_nao_conta(self) -> None:
+        log = ac.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        sessao = ac.Sessao(lingua="en", projetos=dict(PROJETOS))
+        log.avancar(10)
+        a01 = ac.RegistoDaTarefa("a-01", ac.FEITA, inicio=agora_iso(log.agora))
+        log.avancar(3)
+        log.frase("ditar_prompt", PROJETOS["<projeto-1>"], desfecho="pendente", motivo="a espera de confirmacao")
+        log.avancar(2)
+        a01.fim = agora_iso(log.agora)
+        log.avancar(5)
+        l01 = ac.RegistoDaTarefa("l-01", ac.FEITA, inicio=agora_iso(log.agora))
+        log.avancar(4)
+        log.frase(None, resposta_ao_recap=True, desfecho="executado", motivo="confirmado", escuta_ms=1000.0)
+        log.avancar(2)
+        l01.fim = agora_iso(log.agora)
+        sessao.tarefas += [a01, l01]
+        atribuidas = ac.atribuir(sessao.tarefas, *ac.ler_log(log.linhas))
+        self.assertEqual([f.numero for f in atribuidas["a-01"][0]], [1])
+        self.assertEqual(atribuidas["l-01"][0], [])
+
+    def test_o_acordar_pela_palavra_de_ativacao_e_lido(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        atribuidas, _, _ = self._atribuidas(montagem)
+        self.assertEqual([f.intencao for f in atribuidas["l-05"][0]], ["acordar"])
+
+    def test_o_aviso_da_sessao_guiada_ve_a_frase_comecada_antes_do_enter(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        frases, _ = ac.ler_log(montagem.linhas)
+        l01 = montagem.sessao.registo("l-01")
+        self.assertEqual(ac.frases_do_microfone_na_janela(frases, l01.inicio, l01.fim), 1)
+
+
+class TestSegundaInstancia(unittest.TestCase):
+    def test_dois_jarvis_com_o_microfone_tornam_a_sessao_invalida(self) -> None:
+        montagem = _SessaoDeHoje("vivo").montar()
+        frases, eventos = ac.ler_log(montagem.linhas)
+        duplicados = [e for e in eventos if e.tipo == ac.TIPO_SEGUNDA_INSTANCIA]
+        self.assertEqual(len(duplicados), 3)
+        self.assertEqual({e.pids for e in duplicados}, {(3131, 4242)})
+        # As frases do jarvis novo continuam com a numeracao dele, sem mistura.
+        novas = sorted(f.numero for f in frases if f.segmento == 2)
+        self.assertEqual(novas, list(range(1, 16)))
+        avaliacao = ac.avaliar_sessao(montagem.sessao, TAREFAS, frases, eventos)
+        self.assertEqual(avaliacao.estado, ac.ESTADO_INVALIDA)
+        texto = ac.texto_da_evidencia(avaliacao)
+        self.assertIn("**Estado: INVÁLIDA**", texto)
+        self.assertIn("dois jarvis com o microfone ao mesmo tempo", texto)
+        self.assertIn("PID 3131", texto)
+        self.assertIn("PID 4242", texto)
+        self.assertNotIn("## Metas", texto, "numa sessao invalida nenhuma meta e declarada cumprida")
+        self.assertNotIn("| sim |", texto)
+        self.assertNotIn(ac.ESTADO_CUMPRIDA + "**", texto)
+        for nome in PROJETOS.values():
+            self.assertNotIn(nome, texto)
+        self.assertNotIn("ficticia", texto)
+
+    def test_sem_pid_no_log_tambem_e_invalida(self) -> None:
+        montagem = _SessaoDeHoje("vivo", com_pids=False).montar()
+        avaliacao = ac.avaliar_sessao(montagem.sessao, TAREFAS, *ac.ler_log(montagem.linhas))
+        self.assertEqual(avaliacao.estado, ac.ESTADO_INVALIDA)
+        self.assertIn("dois jarvis com o microfone ao mesmo tempo:", avaliacao.pendencias[0])
+        self.assertNotIn("PID", avaliacao.pendencias[0])
+
+    def test_um_jarvis_antigo_que_deixou_de_escrever_nao_invalida(self) -> None:
+        for com_pids in (True, False):
+            with self.subTest(com_pids=com_pids):
+                montagem = _SessaoDeHoje("caido", com_pids=com_pids).montar()
+                frases, eventos = ac.ler_log(montagem.linhas)
+                self.assertFalse([e for e in eventos if e.tipo == ac.TIPO_SEGUNDA_INSTANCIA])
+                avaliacao = ac.avaliar_sessao(montagem.sessao, TAREFAS, frases, eventos)
+                self.assertNotEqual(avaliacao.estado, ac.ESTADO_INVALIDA)
+                atribuidas = ac.atribuir(montagem.sessao.tarefas, frases, eventos)
+                obtido = {
+                    id_: [f.numero for f in da_tarefa if f.fonte == ac.FONTE_MICROFONE and f.segmento == 2]
+                    for id_, (da_tarefa, _) in atribuidas.items()
+                }
+                self.assertEqual(obtido, montagem.esperado)
+
+    def test_um_jarvis_com_wav_ao_mesmo_tempo_nao_invalida(self) -> None:
+        montagem = _SessaoDeHoje().montar()
+        _, eventos = ac.ler_log(montagem.linhas)
+        self.assertFalse([e for e in eventos if e.tipo == ac.TIPO_SEGUNDA_INSTANCIA])
+
+    def test_jarvis_terminado_antes_do_novo_arrancar_nao_invalida(self) -> None:
+        log = ac.EscritorDeLogFalso(INICIO)
+        log.arranque(pid=3131)
+        log.frase("horas")
+        log.terminado()
+        log.avancar(10)
+        log.arranque(pid=4242)
+        log.frase("horas")
+        _, eventos = ac.ler_log(log.linhas)
+        self.assertFalse([e for e in eventos if e.tipo == ac.TIPO_SEGUNDA_INSTANCIA])
 
 
 # --- PENDENTE: nada e simulado ----------------------------------------------------

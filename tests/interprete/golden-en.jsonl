@@ -107,3 +107,8 @@
 {"id": "en-107", "texto": "what time does the benfica game start tonight", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["benfica"], "proibidos": ["commit"], "nota": "time of an event, not the clock"}
 {"id": "en-108", "texto": "what is the price of bitcoin today", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "asset price"}
 {"id": "en-109", "texto": "how much are tesla shares worth", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "asset price"}
+{"id": "en-110", "texto": "For kanban light, the startup is slow. Find out which step takes longest and tell me before changing anything.", "intencao": "ditar_prompt", "projeto": "kanban-lite", "obrigatorios": ["startup", "slow", "longest", "before"], "proibidos": ["commit", "test", "fix"], "nota": "long dictation: the rewrite must keep every sentence"}
+{"id": "en-111", "texto": "Excellent.", "intencao": "cortesia", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "courtesy only: never sent"}
+{"id": "en-112", "texto": "Yeah.", "intencao": "cortesia", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "courtesy only: never sent"}
+{"id": "en-113", "texto": "hey jarvis, thank you", "intencao": "cortesia", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "courtesy only: never sent"}
+{"id": "en-114", "texto": "Talk about to list the tasks that are left.", "intencao": "ditar_prompt", "projeto": "?", "obrigatorios": ["tasks", "left"], "proibidos": ["commit"], "nota": "project work without a project: asks which project"}

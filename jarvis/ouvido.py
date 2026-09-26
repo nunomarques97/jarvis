@@ -235,6 +235,8 @@ class _FraseCaptada:
     inicio: float
     fim: float
     score: float | None
+    #: A palavra de ativacao seguida de silencio: sem audio para transcrever.
+    so_ativacao: bool = False
 
 
 # --- Pecas trocaveis: fonte, tecla, detetor, VAD -----------------------------
@@ -590,6 +592,7 @@ class Ouvido:
         tocar: Callable[[str], None] = tocar_bip,
         relogio: Callable[[], float] = time.perf_counter,
         nome_da_tecla: str = "tecla de falar",
+        ao_ativar_sem_fala: Callable[[Frase], None] | None = None,
     ) -> None:
         if tecla is None and detetor is None:
             raise ValueError("o ouvido precisa de pelo menos um gatilho (tecla ou palavra de ativacao)")
@@ -598,6 +601,9 @@ class Ouvido:
         self.fonte = fonte
         self.motor = motor
         self.ao_ouvir = ao_ouvir
+        #: Recebe a palavra de ativacao seguida de silencio como uma Frase de
+        #: texto vazio (com o score). Sem ele, essa ativacao e descartada.
+        self.ao_ativar_sem_fala = ao_ativar_sem_fala
         self.tecla = tecla
         self.detetor = detetor
         self.vad = vad
@@ -761,6 +767,13 @@ class Ouvido:
         except queue.Full:
             self._descartar(f"{FRASES_EM_ESPERA} frases ainda a espera de transcricao")
 
+    def _enfileirar_so_ativacao(self, fim: float) -> None:
+        captada = _FraseCaptada(b"", GATILHO_ATIVACAO, self._inicio, fim, self._score, so_ativacao=True)
+        try:
+            self._fila.put_nowait(captada)
+        except queue.Full:
+            self._descartar(f"{FRASES_EM_ESPERA} frases ainda a espera de transcricao")
+
     def processar(self, chunk: bytes, premida: bool) -> None:
         """Um chunk de audio e o estado da tecla amostrado logo depois de o ler."""
         agora = self.relogio()
@@ -879,7 +892,10 @@ class Ouvido:
                     self._descartar(f"{nome} sem resposta")
                 else:
                     self._sinal("fim", f"sem fala {ESPERA_PELA_FALA_S:.0f} s depois da ativacao", agora)
-                    self._descartar("palavra de ativacao seguida de silencio")
+                    if self.ao_ativar_sem_fala is None:
+                        self._descartar("palavra de ativacao seguida de silencio")
+                    else:
+                        self._enfileirar_so_ativacao(agora)
                 self._voltar_ao_repouso()
             return
         self._buffer.append(chunk)
@@ -925,7 +941,34 @@ class Ouvido:
             palavra_retirada=retirada,
         )
 
+    def _entregar_so_ativacao(self, captada: _FraseCaptada) -> None:
+        """A palavra de ativacao sem fala depois: nada a transcrever, so o score."""
+        self.escrever(
+            f"ouvido | palavra de ativacao seguida de silencio (score {captada.score or 0:.2f}) "
+            "| entregue como ativacao sem fala, nada transcrito"
+        )
+        frase = Frase(
+            texto="",
+            gatilho=GATILHO_ATIVACAO,
+            lingua=self.lingua,
+            motor=self.motor.nome,
+            duracao_audio_s=0.0,
+            inicio_da_escuta=captada.inicio,
+            fim_da_escuta=captada.fim,
+            texto_pronto=self.relogio(),
+            latencia_stt_ms=0.0,
+            score_ativacao=captada.score,
+        )
+        try:
+            self.ao_ativar_sem_fala(frase)
+        except Exception as erro:  # noqa: BLE001 - o callback nunca derruba o ouvido
+            self.escrever(f"ouvido | o tratamento da ativacao sem fala falhou: {erro!r}")
+
     def _entregar(self, captada: _FraseCaptada) -> None:
+        if captada.so_ativacao:
+            if self.ao_ativar_sem_fala is not None:
+                self._entregar_so_ativacao(captada)
+            return
         self._a_transcrever = True
         try:
             frase = self._transcrever(captada)
