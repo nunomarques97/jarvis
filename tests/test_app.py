@@ -96,10 +96,10 @@ class LogFalso:
             return "\n".join(self.linhas)
 
 
-def config_de_teste(lingua: str = "pt", **ajustes) -> Config:
+def config_de_teste(lingua: str = "pt", *, nomes: tuple[str, ...] = NOMES, **ajustes) -> Config:
     return Config(
         microfone="Microfone Ficticio de Teste",
-        projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in NOMES),
+        projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in nomes),
         ouvido=ConfigOuvido(lingua=lingua),
         interprete=ConfigInterprete(**ajustes),
     )
@@ -165,10 +165,11 @@ class Montagem:
         canal: CanalFalso | None | bool = True,
         relogio=None,
         primeiro_audio_depois_s: float = 0.1,
+        nomes: tuple[str, ...] = NOMES,
         **ajustes,
     ) -> None:
         self.log = LogFalso()
-        self.config = config_de_teste(lingua, **ajustes)
+        self.config = config_de_teste(lingua, nomes=nomes, **ajustes)
         self.llm = LlmFalso(respostas_llm)
         self.interprete = Interprete(self.config, cliente=self.llm)
         self.canal = CanalFalso() if canal is True else (canal or None)
@@ -437,6 +438,85 @@ class TestConfirmacaoNoProcesso(unittest.TestCase):
         m.ouvir("yes")
         self.assertEqual(m.canal.recebidos, [("atlas", "Fix the login test.")])
         self.assertEqual(m.falados[-1], "Sent to atlas.")
+
+
+# --- Nomes mal ouvidos e correcao sem pedido ------------------------------------------
+
+#: Um projeto ficticio com uma palavra financeira no nome.
+NOMES_COM_CRIPTO = (*NOMES, "crypto-radar")
+
+
+class TestEnsaioComNomeMalOuvido(unittest.TestCase):
+    def test_nome_mal_ouvido_nao_e_recusado_e_vai_para_o_projeto(self) -> None:
+        m = Montagem(
+            [resposta_llm("ditar_prompt", "", "Add tests to the configuration module.")],
+            lingua="en",
+            nomes=NOMES_COM_CRIPTO,
+        )
+        m.ouvir("hey jarvis, tell CryptoRather to add test to the configuration module.", gatilho=GATILHO_ATIVACAO)
+        self.assertEqual(len(m.llm.pedidos), 1)
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.jarvis.confirmacao.recap.pedido.projeto, "crypto-radar")
+        self.assertNotIn("financeiro", m.log.texto())
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("crypto-radar", "Add tests to the configuration module.")])
+
+    def test_pedido_financeiro_com_o_nome_mal_ouvido_continua_recusado(self) -> None:
+        m = Montagem(lingua="en", nomes=NOMES_COM_CRIPTO)
+        m.ouvir("hey jarvis, tell CryptoRather to sell my crypto", gatilho=GATILHO_ATIVACAO)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_correcao_logo_depois_de_um_pedido_recusado_nao_abre_recap(self) -> None:
+        m = Montagem(lingua="en", nomes=NOMES_COM_CRIPTO)
+        m.ouvir("hey jarvis, tell crypto-radar to buy bitcoin", gatilho=GATILHO_ATIVACAO)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        m.avancar(3)
+        m.ouvir("hey jarvis, no, change test to call the documentation", gatilho=GATILHO_ATIVACAO)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertIsNone(m.jarvis.confirmacao.recap)
+        self.assertIsNone(m.jarvis.confirmacao.prazo_restante())
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.falados[-1], "There is no pending request to correct.")
+        self.assertIn("desfecho: sem_pedido", m.log.texto())
+        # O prazo de um recap nunca chega a correr.
+        m.avancar(m.jarvis.confirmacao.limite_s + 1)
+        m.jarvis.verificar_tempo()
+        self.assertEqual(m.falados[-1], "There is no pending request to correct.")
+
+    def test_correcao_sem_pedido_em_portugues(self) -> None:
+        m = Montagem()
+        m.ouvir("não, muda testes para documentação")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(m.falados, ["Não há nenhum pedido à espera para corrigir."])
+
+    def test_ditados_que_nao_sao_correcoes_continuam_a_abrir_recap(self) -> None:
+        for texto, prompt in (
+            ("in atlas change the title to welcome", "Change the title to welcome."),
+            ("change the login title to welcome in atlas", "Change the login title to welcome."),
+            ("in atlas add tests to the configuration module", "Add tests to the configuration module."),
+        ):
+            with self.subTest(texto=texto):
+                m = Montagem([resposta_llm("ditar_prompt", "atlas", prompt)], lingua="en")
+                m.ouvir(texto)
+                self.assertEqual(len(m.llm.pedidos), 1)
+                self.assertTrue(m.jarvis.confirmacao.a_espera)
+                self.assertEqual(m.jarvis.confirmacao.recap.pedido.prompt, prompt)
+
+    def test_com_pedido_pendente_a_correcao_segue_o_fluxo_de_correcao(self) -> None:
+        m = Montagem(
+            [DITADO, resposta_llm("ditar_prompt", "atlas", "Corrige a documentação do login.")]
+        )
+        m.ouvir("no atlas corrige o teste do login")
+        m.avancar()
+        m.ouvir("não, muda teste para documentação")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.jarvis.confirmacao.recap.pedido.prompt, "Corrige a documentação do login.")
+        self.assertNotIn("Não há nenhum pedido à espera para corrigir.", m.falados)
 
 
 # --- Silencio, dormir e voz desligada ----------------------------------------------

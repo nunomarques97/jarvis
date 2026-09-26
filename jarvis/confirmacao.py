@@ -52,6 +52,8 @@ from jarvis.interprete import (
     INTENCOES_COM_PROMPT,
     Interpretacao,
     Interprete,
+    _PADRAO_TROCA,
+    _so_o_projeto,
     limpar_texto,
     projetos_em_alternativa,
     projetos_mencionados,
@@ -166,6 +168,33 @@ def classificar_resposta(texto: str | None) -> tuple[TipoDeResposta, str]:
     return "outro", ""
 
 
+def e_correcao(texto: str | None, nomes: tuple[str, ...] | list[str]) -> bool:
+    """A frase e claramente uma correcao a um pedido. Deterministico, sem LLM.
+
+    Conta uma negacao seguida de uma troca ("nao, muda X para Y", "no, change
+    X to Y"), ou uma troca sozinha ("change X to Y") quando X ou Y e so um
+    nome de projeto, ou quando a frase nao diz nenhum projeto. Uma troca que
+    diz o projeto noutro sitio ("change the title to welcome in atlas") e um
+    ditado, e um acrescento ("add ...") nunca e uma correcao sem pedido.
+    """
+    palavras = _palavras(texto or "")
+    negada = False
+    while palavras and palavras[0] in _NEGACOES:
+        negada = True
+        palavras = palavras[1:]
+    if not palavras or palavras[0] not in _VERBOS_DE_TROCA:
+        return False
+    frase = " ".join(palavras)
+    troca = _PADRAO_TROCA.match(frase)
+    if troca is None:
+        return False
+    if negada:
+        return True
+    if _so_o_projeto(troca.group("de"), nomes) or _so_o_projeto(troca.group("para"), nomes):
+        return True
+    return not projetos_mencionados(frase, nomes)
+
+
 # --- Recap --------------------------------------------------------------------
 
 
@@ -248,6 +277,7 @@ _FRASES = {
         "de_novo": "Diz sim para enviar, muda, acrescenta ou cancela.",
         "correcao_falhou": "Não consegui aplicar essa correção; o pedido fica igual. {pergunta}",
         "falhou": "Não consegui fazer isso.",
+        "nada_para_corrigir": "Não há nenhum pedido à espera para corrigir.",
         "ecra_percebi": "Percebi: {intencao}{projeto}",
         "ecra_enviar": "Texto a enviar:",
         "ecra_ajuda": 'Responde "sim" para enviar, "não, muda X para Y", "acrescenta ..." ou "cancela".',
@@ -265,6 +295,7 @@ _FRASES = {
         "de_novo": "Say yes to send, change, add or cancel.",
         "correcao_falhou": "I couldn't apply that change; the request stays the same. {pergunta}",
         "falhou": "I couldn't do that.",
+        "nada_para_corrigir": "There is no pending request to correct.",
         "ecra_percebi": "Understood: {intencao}{projeto}",
         "ecra_enviar": "Text to send:",
         "ecra_ajuda": 'Answer "yes" to send, "no, change X to Y", "add ..." or "cancel".',
@@ -511,6 +542,17 @@ class Confirmacao:
             projeto = self._projeto_dito(texto)
             return self._propor(replace(pendente, projeto=projeto, pergunta=None))
         return self._aplicar_correcao(pendente, recap, edicao, tipo)
+
+    def e_correcao_sem_pedido(self, texto: str | None) -> bool:
+        """A frase e claramente uma correcao e nao ha nenhum pedido a espera."""
+        nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)
+        return not self.a_espera and e_correcao(texto, nomes)
+
+    def correcao_sem_pedido(self) -> Desfecho:
+        """Diz que nao ha nenhum pedido a corrigir. Nunca chama o interprete nem abre um recap."""
+        self._mostrar("confirmacao | correcao sem nenhum pedido a espera; nada foi enviado")
+        self._falar(self._texto("nada_para_corrigir"))
+        return Desfecho("sem_pedido", "correcao sem nenhum pedido por confirmar")
 
     def _projeto_dito(self, texto: str | None) -> str | None:
         nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)

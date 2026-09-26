@@ -61,6 +61,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
@@ -217,7 +218,7 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
     r"|compr(?:a|as|o|ar|ares|arem|ei|ou|e|es|em|amos|ava|avam|ando|ado|ados|ada|adas|aria|arias)"
     r"|vend(?:e|es|o|er|eres|erem|i|eu|a|as|am|emos|ia|iam|endo|ido|idos|ida|idas|eria|erias)"
     r"|ordens?\s+de\s+(?:compra|venda)"
-    r"|corretoras?|brokers?|brokerage"
+    r"|corretoras?|brokers?|brokerage|binance|coinbase"
     r"|bolsas?(?!\s+de\s+estudos?)"
     r"|(?:minhas|nossas|tuas)\s+acoes|acoes\s+(?:da|na|de)\s+bolsa"
     r"|invest(?:e|es|em|ir|i|iu|imos|imento|imentos|idor|idores|a|as|am)"
@@ -250,41 +251,188 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
 )
 
 
-def _janelas_do_projeto(palavras: list[str], nome: str) -> list[tuple[int, int]]:
-    """(inicio, fim) de cada troco de `palavras` que e o nome deste projeto.
+# --- Nomes de projeto ditos, tambem mal ouvidos --------------------------------
 
-    Um troco bate quando tem as mesmas palavras do nome (com um erro de
-    escrita tolerado dentro de palavras longas, como no router) ou quando,
-    juntas sem espacos, sao exatamente o nome sem separadores ("loja online"
-    e "lojaonline" para "loja-online"). Nunca "o mais parecido".
+#: O reconhecimento de voz deforma os nomes de projeto de forma previsivel:
+#: junta ou parte palavras ("CryptoRather", "Crypto Rather"), troca sons
+#: parecidos ("rather" por "radar", "light" por "lite") e cola silabas a volta
+#: ("Encrypt or Rather"). Um troco da frase conta como o nome quando a chave
+#: fonetica dele e quase a do nome. So para nomes com pelo menos este numero
+#: de letras: num nome curto ("atlas") qualquer frase curta ficava parecida
+#: ("at last"), e esses so batem pelas palavras.
+COMPRIMENTO_MINIMO_PARA_APROXIMAR = 8
+
+#: Semelhanca minima (SequenceMatcher) entre a chave fonetica do troco e a
+#: do nome. Abaixo disto ficam as palavras soltas ("crypto" para
+#: "crypto-radar") e frases so parecidas ("create a radar", "crypto rate").
+LIMIAR_DA_APROXIMACAO = 0.88
+
+#: Um troco aproximado pode ter no maximo estas palavras a mais do que o nome.
+PALAVRAS_A_MAIS_NA_APROXIMACAO = 2
+
+_GRAFIAS_DO_MESMO_SOM = (
+    ("sch", "sk"), ("ph", "f"), ("th", "d"), ("gh", ""), ("ch", "x"), ("sh", "x"),
+    ("lh", "li"), ("nh", "ni"), ("ck", "k"), ("qu", "k"), ("q", "k"), ("x", "ks"),
+)
+_CONSOANTES_DO_MESMO_SOM = str.maketrans(
+    {"c": "k", "h": None, "z": "s", "w": "u", "v": "b", "t": "d", "g": "k", "p": "b", "j": "x"}
+)
+
+
+def _chave_fonetica(texto: str) -> str:
+    """Uma chave que junta grafias e sons que o reconhecimento de voz troca.
+
+    Sem espacos nem hifens; consoantes surdas e sonoras juntas (t/d, p/b,
+    k/g); vogais em tres grupos (a, e/i/y, o/u), com a vogal antes de um "r"
+    final de silaba tratada como a vogal neutra ("rather" ~ "radar"); letras
+    repetidas contam uma vez. Deterministica e sem modelo.
+    """
+    chave = re.sub(r"[^a-z]", "", _normalizar(texto))
+    chave = re.sub(r"([^aeiouy])\1+", r"\1", chave)
+    for grafia, som in _GRAFIAS_DO_MESMO_SOM:
+        chave = chave.replace(grafia, som)
+    chave = re.sub(r"c(?=[eiy])", "s", chave).translate(_CONSOANTES_DO_MESMO_SOM)
+    chave = re.sub(r"[aeiouy]+(?=r(?![aeiouy]))", "a", chave)
+    chave = re.sub(r"[eiy]", "i", chave)
+    chave = re.sub(r"[ou]", "u", chave)
+    chave = re.sub(r"[aiu]{2,}", lambda vogais: vogais.group(0)[0], chave)
+    return re.sub(r"(.)\1+", r"\1", chave)
+
+
+def _semelhanca(obtido: str, esperado: str) -> float:
+    """Semelhanca (0 a 1) entre as chaves foneticas de dois textos."""
+    chave_obtida, chave_esperada = _chave_fonetica(obtido), _chave_fonetica(esperado)
+    if not chave_obtida or not chave_esperada:
+        return 0.0
+    return SequenceMatcher(None, chave_obtida, chave_esperada).ratio()
+
+
+def _sem_as_palavras_financeiras_do_nome(troco: list[str], alvo: list[str]) -> tuple[str, str]:
+    """(troco, nome) sem as palavras financeiras que fazem parte do proprio nome.
+
+    Tira do troco cada palavra que soa como uma palavra financeira do nome
+    ("cripto" por "crypto"), ou o inicio colado que soa como ela
+    ("CryptoRather" fica "rather"). O resto do troco tem de continuar sem
+    termos financeiros para o troco poder ser o nome.
+    """
+    financeiras = [palavra for palavra in alvo if PADRAO_PEDIDO_FINANCEIRO.search(palavra)]
+    resto_do_nome = " ".join(palavra for palavra in alvo if palavra not in financeiras)
+    resto: list[str] = []
+    for palavra in troco:
+        for financeira in financeiras:
+            chave = _chave_fonetica(financeira)
+            if _chave_fonetica(palavra) == chave:
+                palavra = ""
+                break
+            prefixo = next(
+                (
+                    tamanho
+                    for tamanho in range(len(financeira) + 1, len(financeira) - 2, -1)
+                    if 0 < tamanho < len(palavra) and _chave_fonetica(palavra[:tamanho]) == chave
+                ),
+                None,
+            )
+            if prefixo is not None:
+                palavra = palavra[prefixo:]
+                break
+        if palavra:
+            resto.append(palavra)
+    return " ".join(resto), resto_do_nome
+
+
+def _troco_e_o_nome(troco: list[str], alvo: list[str]) -> bool:
+    """O troco pode ser o nome sem esconder um pedido financeiro.
+
+    Quando o troco tem um termo financeiro, so pode ser o nome se esse termo
+    for o do proprio nome, e o resto do troco se parecer com o resto do nome:
+    "CryptoRather" e "crypto-radar", "crypto trader" e "crypto rate" nao sao.
+    Na duvida o troco nao e o nome e a frase segue para a regra financeira.
+    """
+    if not PADRAO_PEDIDO_FINANCEIRO.search(" ".join(troco)):
+        return True
+    resto, resto_do_nome = _sem_as_palavras_financeiras_do_nome(troco, alvo)
+    if PADRAO_PEDIDO_FINANCEIRO.search(resto):
+        return False
+    if not resto_do_nome or not resto:
+        return resto == resto_do_nome
+    return _semelhanca(resto, resto_do_nome) >= LIMIAR_DA_APROXIMACAO
+
+
+def _candidatos_do_nome(palavras: list[str], nome: str) -> list[tuple[float, int, int]]:
+    """(semelhanca, inicio, fim) de cada troco de `palavras` que pode ser o nome.
+
+    Bate com semelhanca 1 o troco com as mesmas palavras do nome (com um erro
+    de escrita tolerado dentro de palavras longas, como no router) ou que,
+    junto sem espacos, e exatamente o nome sem separadores ("loja online" e
+    "lojaonline" para "loja-online"). Num nome longo bate tambem, pela chave
+    fonetica, um troco que soa quase como ele ("Kanban Light" para
+    "kanban-lite").
     """
     alvo = _normalizar(nome).split()
     if not alvo:
         return []
     compacto = "".join(alvo)
     n = len(alvo)
-    janelas: list[tuple[int, int]] = []
+    aproximar = len(compacto) >= COMPRIMENTO_MINIMO_PARA_APROXIMAR
+    candidatos: list[tuple[float, int, int]] = []
     for inicio in range(len(palavras)):
         if inicio + n <= len(palavras) and all(
             _palavra_bate(obtida, esperada)
             for obtida, esperada in zip(palavras[inicio : inicio + n], alvo)
         ):
-            janelas.append((inicio, inicio + n))
+            candidatos.append((1.0, inicio, inicio + n))
             continue
-        for tamanho in range(1, n + 2):
-            fim = inicio + tamanho
-            if fim > len(palavras):
-                break
-            if "".join(palavras[inicio:fim]) == compacto:
-                janelas.append((inicio, fim))
-                break
-    return janelas
+        exato = next(
+            (
+                inicio + tamanho
+                for tamanho in range(1, n + 2)
+                if inicio + tamanho <= len(palavras) and "".join(palavras[inicio : inicio + tamanho]) == compacto
+            ),
+            None,
+        )
+        if exato is not None:
+            candidatos.append((1.0, inicio, exato))
+            continue
+        if not aproximar:
+            continue
+        for fim in range(inicio + 1, min(len(palavras), inicio + n + PALAVRAS_A_MAIS_NA_APROXIMACAO) + 1):
+            troco = palavras[inicio:fim]
+            semelhanca = _semelhanca(" ".join(troco), nome)
+            if semelhanca >= LIMIAR_DA_APROXIMACAO and _troco_e_o_nome(troco, alvo):
+                candidatos.append((semelhanca, inicio, fim))
+    return candidatos
+
+
+def _mencoes(palavras: list[str], nomes: tuple[str, ...] | list[str]) -> list[tuple[int, int, str]]:
+    """(inicio, fim, nome) de cada nome de projeto dito, sem trocos sobrepostos.
+
+    Entre trocos que se sobrepoem fica o mais parecido com um nome (e, a
+    igualdade, o mais curto), para que uma palavra vizinha nunca seja tomada
+    como parte do nome.
+    """
+    candidatos = sorted(
+        (-semelhanca, fim - inicio, inicio, fim, nome)
+        for nome in nomes
+        for semelhanca, inicio, fim in _candidatos_do_nome(palavras, nome)
+    )
+    ocupadas: set[int] = set()
+    mencoes: list[tuple[int, int, str]] = []
+    for _, _, inicio, fim, nome in candidatos:
+        if ocupadas.isdisjoint(range(inicio, fim)):
+            ocupadas.update(range(inicio, fim))
+            mencoes.append((inicio, fim, nome))
+    return sorted(mencoes)
+
+
+def _janelas_do_projeto(palavras: list[str], nome: str) -> list[tuple[int, int]]:
+    """(inicio, fim) de cada troco de `palavras` que e o nome deste projeto."""
+    return [(inicio, fim) for inicio, fim, _ in _mencoes(palavras, (nome,))]
 
 
 def projetos_mencionados(texto: str, nomes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     """Os nomes de projeto que o texto diz, pela ordem da configuracao."""
-    palavras = _normalizar(texto).split()
-    return tuple(nome for nome in nomes if _janelas_do_projeto(palavras, nome))
+    ditos = {nome for _, _, nome in _mencoes(_normalizar(texto).split(), nomes)}
+    return tuple(nome for nome in nomes if nome in ditos)
 
 
 #: Palavras que podem ligar dois nomes de projeto numa alternativa ou numa
@@ -304,9 +452,7 @@ def projetos_em_alternativa(texto: str, nomes: tuple[str, ...] | list[str]) -> t
     fizemos no orbita") nao contam: ai o alvo e o do pedido.
     """
     palavras = _normalizar(texto).split()
-    mencoes = sorted(
-        (inicio, fim, nome) for nome in nomes for inicio, fim in _janelas_do_projeto(palavras, nome)
-    )
+    mencoes = _mencoes(palavras, nomes)
     juntos: list[str] = []
     for (_, fim, nome), (inicio, _, seguinte) in zip(mencoes, mencoes[1:]):
         entre = palavras[fim:inicio]
@@ -321,13 +467,16 @@ def projetos_em_alternativa(texto: str, nomes: tuple[str, ...] | list[str]) -> t
 
 
 def _sem_nomes_de_projeto(texto: str, nomes: tuple[str, ...] | list[str]) -> str:
-    """O texto normalizado com cada nome de projeto trocado por 'projeto'."""
+    """O texto normalizado com cada nome de projeto trocado por 'projeto'.
+
+    So o troco que e o nome (tambem mal ouvido) e trocado; o resto da frase
+    fica igual para a regra financeira.
+    """
     palavras = _normalizar(texto).split()
     marcadas = [False] * len(palavras)
-    for nome in nomes:
-        for inicio, fim in _janelas_do_projeto(palavras, nome):
-            for indice in range(inicio, fim):
-                marcadas[indice] = True
+    for inicio, fim, _ in _mencoes(palavras, nomes):
+        for indice in range(inicio, fim):
+            marcadas[indice] = True
     saida: list[str] = []
     for palavra, marcada in zip(palavras, marcadas):
         if not marcada:

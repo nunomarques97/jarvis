@@ -34,6 +34,7 @@ from jarvis.confirmacao import (
     Confirmacao,
     Pedido,
     classificar_resposta,
+    e_correcao,
     compor_recap,
     contar_frases,
 )
@@ -426,6 +427,81 @@ class TestCorrigirEAcrescentar(Base):
             aplicar_correcao_literal("abrir_editor", "atlas", "", "não, muda o atlas para o kanban lite", "corrigir", NOMES),
             ("kanban-lite", ""),
         )
+
+
+# --- Correcao sem nenhum pedido a espera ----------------------------------------
+
+
+CORRECOES = (
+    "hey jarvis, no, change test to call the documentation",
+    "no, change tests to documentation",
+    "no change the title to welcome in atlas",
+    "change test to call the documentation",
+    "change atlas to orbita",
+    "change the title to atlas",
+    "não, muda testes para documentação",
+    "nao, muda o atlas para o orbita",
+    "muda testes para documentação",
+    "troca o atlas por orbita",
+)
+
+NAO_CORRECOES = (
+    "in atlas change the title to welcome",
+    "change the login title to welcome in atlas",
+    "no atlas muda o título para bem-vindo",
+    "muda o título para bem-vindo no atlas",
+    "add tests to the configuration module",
+    "add that it is urgent",
+    "acrescenta que é urgente",
+    "no atlas acrescenta testes ao módulo de configuração",
+    "change the title",
+    "no",
+    "não",
+    "corrige os testes do login",
+    "",
+    None,
+)
+
+
+class TestCorrecaoSemPedido(Base):
+    def test_frases_claramente_de_correcao(self) -> None:
+        for texto in CORRECOES:
+            with self.subTest(texto=texto):
+                self.assertTrue(e_correcao(texto, NOMES))
+
+    def test_ditados_e_acrescentos_nao_sao_correcoes(self) -> None:
+        for texto in NAO_CORRECOES:
+            with self.subTest(texto=texto):
+                self.assertFalse(e_correcao(texto, NOMES))
+
+    def test_projeto_mal_ouvido_conta_como_projeto_dito(self) -> None:
+        nomes = (*NOMES, "crypto-radar")
+        self.assertFalse(e_correcao("change the title to welcome in CryptoRather", nomes))
+        self.assertTrue(e_correcao("change atlas to Crypto Rather", nomes))
+
+    def test_sem_pedido_diz_que_nao_ha_nada_para_corrigir(self) -> None:
+        for lingua, fala in (
+            ("pt", "Não há nenhum pedido à espera para corrigir."),
+            ("en", "There is no pending request to correct."),
+        ):
+            with self.subTest(lingua=lingua):
+                confirmacao = self.montar(lingua=lingua)
+                self.assertTrue(confirmacao.e_correcao_sem_pedido("no, change test to call the documentation"))
+                desfecho = confirmacao.correcao_sem_pedido()
+                self.assertEqual(desfecho.estado, "sem_pedido")
+                self.assertEqual(self.falas, [fala])
+                self.assertFalse(confirmacao.a_espera)
+                self.assertIsNone(confirmacao.prazo_restante())
+                self.assertEqual(self.llm.pedidos, [])
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_com_pedido_pendente_a_correcao_segue_o_fluxo_normal(self) -> None:
+        confirmacao = self.montar([_llm("ditar_prompt", "atlas", "Corrige a documentação do login.")])
+        confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Corrige os testes do login."))
+        self.assertFalse(confirmacao.e_correcao_sem_pedido("não, muda testes para documentação"))
+        desfecho = confirmacao.responder("não, muda testes para documentação")
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(desfecho.recap.pedido.prompt, "Corrige a documentação do login.")
 
 
 # --- Cancelar e prazo -------------------------------------------------------

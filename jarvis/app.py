@@ -850,6 +850,10 @@ class Jarvis:
             desfecho = self.confirmacao.responder(frase.texto, dito_em=frase.inicio_da_escuta)
         elif rapida is None and self.janela.aceita(frase.inicio_da_escuta):
             desfecho = self._responder_na_conversa(frase, registo, medida)
+        elif rapida is None and self.confirmacao.e_correcao_sem_pedido(frase.texto):
+            # "nao, muda X para Y" sem nada a espera nao vira um ditado novo.
+            registo.marcar(3, "correcao sem nenhum pedido pendente (nada interpretado)")
+            desfecho = self.confirmacao.correcao_sem_pedido()
         else:
             self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
             if self.confirmacao.a_espera and rapida == "dormir":

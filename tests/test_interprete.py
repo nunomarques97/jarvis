@@ -406,6 +406,154 @@ class TestRegraFinanceira(unittest.TestCase):
         self.assertIsNotNone(pedido_financeiro("abre o vs code no bolsa-radar", ()))
 
 
+# --- Nomes de projeto mal ouvidos --------------------------------------------------------
+
+#: Um projeto ficticio com uma palavra financeira no nome, como o reconhecimento
+#: de voz o deforma.
+NOMES_COM_CRIPTO = (*NOMES, "crypto-radar")
+
+MAL_OUVIDOS = {
+    "tell CryptoRather to add test to the configuration module.": "crypto-radar",
+    "tell Crypto Rather to add tests to the configuration module": "crypto-radar",
+    "Encrypt or Rather add tests to the configuration module": "crypto-radar",
+    "in crypto radar add tests": "crypto-radar",
+    "in CRYPTO-RADAR add tests": "crypto-radar",
+    "in cryptoradar add tests": "crypto-radar",
+    "in Kanban Light fix the menu": "kanban-lite",
+    "no canban lite corrige o menu": "kanban-lite",
+    "in KanbanLight fix the menu": "kanban-lite",
+}
+
+FINANCEIRAS_COM_PROJETO = (
+    "buy bitcoin",
+    "sell my crypto",
+    "move my crypto to a new wallet",
+    "tell crypto-radar to buy bitcoin",
+    "tell CryptoRather to sell my crypto",
+    "tell Crypto Rather to buy bitcoin",
+    "in crypto radar move my crypto to a new wallet",
+    "in atlas sell my crypto",
+    "in Kanban Light buy bitcoin",
+    "place an order on binance",
+    "tell CryptoRather to place an order on binance",
+    "tell crypto trader to add tests",
+    "tell crypto wallet to add tests",
+)
+
+SEM_PROJETO = (
+    "add tests to the configuration module",
+    "at last",
+    "change the radar chart",
+    "the documentation",
+    "open the editor",
+    "nimble",
+    "crypto",
+    "bitcoin",
+    "crypto wallet",
+    "crypto trader",
+    "create a radar",
+    "a radar",
+    "the kanban board is light",
+    "abre o editor",
+    "corre os testes todos",
+    "muda o título para bem-vindo",
+    "acrescenta que é urgente",
+)
+
+
+def _interprete_com_cripto(respostas=None, lingua: str = "en") -> tuple[Interprete, ClienteFalso]:
+    cliente = ClienteFalso(respostas)
+    config = Config(
+        microfone="Microfone Ficticio",
+        projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in NOMES_COM_CRIPTO),
+        ouvido=ConfigOuvido(lingua=lingua),
+        interprete=ConfigInterprete(),
+    )
+    return Interprete(config, cliente=cliente), cliente
+
+
+class TestNomesMalOuvidos(unittest.TestCase):
+    def test_variantes_mal_ouvidas_sao_o_projeto(self) -> None:
+        for texto, projeto in MAL_OUVIDOS.items():
+            with self.subTest(texto=texto):
+                self.assertEqual(projetos_mencionados(texto, NOMES_COM_CRIPTO), (projeto,))
+
+    def test_variantes_mal_ouvidas_nao_sao_financeiras(self) -> None:
+        for texto in MAL_OUVIDOS:
+            with self.subTest(texto=texto):
+                self.assertIsNone(pedido_financeiro(texto, NOMES_COM_CRIPTO))
+
+    def test_so_o_troco_do_nome_e_mascarado(self) -> None:
+        self.assertEqual(
+            interprete_mod._sem_nomes_de_projeto("tell CryptoRather to sell my crypto", NOMES_COM_CRIPTO),
+            "tell projeto to sell my crypto",
+        )
+        self.assertEqual(
+            interprete_mod._sem_nomes_de_projeto("Encrypt or Rather add tests", NOMES_COM_CRIPTO),
+            "projeto add tests",
+        )
+
+    def test_pedidos_financeiros_com_ou_sem_projeto_continuam_recusados(self) -> None:
+        for texto in (*FINANCEIRAS_COM_PROJETO, *FINANCEIRAS):
+            with self.subTest(texto=texto):
+                self.assertIsNotNone(pedido_financeiro(texto, NOMES_COM_CRIPTO))
+                interprete, cliente = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", "Add tests.")])
+                resultado = interprete.interpretar(texto)
+                self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_palavra_financeira_sozinha_nunca_e_o_projeto(self) -> None:
+        for texto in ("crypto", "bitcoin", "crypto wallet", "crypto trader", "crypto rate", "my crypto"):
+            with self.subTest(texto=texto):
+                self.assertEqual(projetos_mencionados(texto, NOMES_COM_CRIPTO), ())
+
+    def test_palavras_comuns_nao_sao_projetos(self) -> None:
+        for texto in SEM_PROJETO:
+            with self.subTest(texto=texto):
+                self.assertEqual(projetos_mencionados(texto, NOMES_COM_CRIPTO), ())
+
+    def test_frase_do_ensaio_nao_e_recusada_e_leva_o_projeto(self) -> None:
+        texto = "hey jarvis, tell CryptoRather to add test to the configuration module."
+        # O LLM nao resolve o projeto: vale o projeto dito na frase.
+        interprete, cliente = _interprete_com_cripto([_llm("ditar_prompt", "", "Add tests to the configuration module.")])
+        resultado = interprete.interpretar(texto)
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
+        self.assertEqual(resultado.prompt, "Add tests to the configuration module.")
+        self.assertIsNone(resultado.pergunta)
+
+    def test_prompt_reescrito_com_o_nome_mal_ouvido_passa_a_regra_depois_do_llm(self) -> None:
+        for prompt in (
+            "Tell CryptoRather to add tests to the configuration module.",
+            "In crypto-radar, add tests to the configuration module.",
+        ):
+            with self.subTest(prompt=prompt):
+                interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", prompt)])
+                resultado = interprete.interpretar("tell CryptoRather to add test to the configuration module.")
+                self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
+                self.assertEqual(resultado.prompt, prompt)
+
+    def test_prompt_reescrito_financeiro_com_o_nome_mal_ouvido_e_recusado(self) -> None:
+        interprete, cliente = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Tell CryptoRather to buy bitcoin.")]
+        )
+        resultado = interprete.interpretar("tell CryptoRather to handle the thing we talked about")
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+        self.assertIn("depois do LLM", resultado.motivo)
+
+    def test_nomes_curtos_so_batem_pelas_palavras(self) -> None:
+        self.assertEqual(projetos_mencionados("at last the menu works", NOMES_COM_CRIPTO), ())
+        self.assertEqual(projetos_mencionados("in nimble fix the menu", NOMES_COM_CRIPTO), ())
+        self.assertEqual(projetos_mencionados("in atlas fix the menu", NOMES_COM_CRIPTO), ("atlas",))
+
+    def test_dois_projetos_mal_ouvidos_em_alternativa(self) -> None:
+        self.assertEqual(
+            projetos_em_alternativa("in CryptoRather or Kanban Light update node", NOMES_COM_CRIPTO),
+            ("kanban-lite", "crypto-radar"),
+        )
+
+
 # --- LLM indisponivel, lento ou invalido --------------------------------------------
 
 
