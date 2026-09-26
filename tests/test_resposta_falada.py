@@ -1003,3 +1003,62 @@ class TestPerguntaDoClaudeOuveSe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSeccaoDeFontesNuncaSeFala(unittest.TestCase):
+    """Uma resposta com a lista de fontes no fim: a voz para antes do titulo das fontes."""
+
+    RESPOSTA = "Benfica won 2-1 against Porto.\n\n{titulo}\n- [BBC Sport](https://bbc.co.uk/sport)\n- ESPN match report"
+
+    def test_titulos_em_ingles_e_portugues_e_variantes_markdown(self) -> None:
+        for titulo in (
+            "Sources:",
+            "Source:",
+            "References:",
+            "Links:",
+            "Fontes:",
+            "Fonte:",
+            "Referências:",
+            "Referencias:",
+            "## Sources",
+            "### Fontes",
+            "**Sources:**",
+            "**Sources**:",
+            "**References**",
+            "*Fontes:*",
+            "__Sources__",
+            "- Sources:",
+            "Sources",
+            "SOURCES:",
+            "Sources: BBC Sport, ESPN",
+        ):
+            with self.subTest(titulo=titulo):
+                resposta = self.RESPOSTA.format(titulo=titulo)
+                falado = resumo_falado(resposta, lingua="en")
+                self.assertEqual(falado, f"{prefixo_da_resposta('en')} Benfica won 2-1 against Porto.")
+                self.assertNotIn("ource", falado)
+                self.assertNotIn("ESPN", falado)
+                self.assertNotIn("BBC", falado)
+
+    def test_titulo_colado_ao_paragrafo_sem_linha_em_branco(self) -> None:
+        resposta = "O Benfica ganhou 2-1.\n**Fontes:**\n1. [Record](https://record.pt/x)\n2. A Bola"
+        self.assertEqual(resumo_falado(resposta), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} O Benfica ganhou 2-1.")
+
+    def test_palavra_sources_na_prosa_nao_corta(self) -> None:
+        for resposta in (
+            "Sources say the match ended 2-1.",
+            "According to several sources, the match ended 2-1.",
+            "As fontes dizem que o jogo acabou 2-1.",
+            "The links between the two clubs are old.",
+        ):
+            with self.subTest(resposta=resposta):
+                self.assertEqual(texto_falavel(resposta), resposta)
+
+    def test_resposta_so_com_fontes_cai_na_frase_de_recurso(self) -> None:
+        for resposta, lingua in (
+            ("Sources:\n- [BBC](https://bbc.co.uk)\n- ESPN", "en"),
+            ("## Fontes\n- Record\n- A Bola", "pt"),
+        ):
+            with self.subTest(resposta=resposta):
+                self.assertEqual(resumo_falado(resposta, lingua=lingua), frase_de_recurso("so_tecnico", lingua))
+

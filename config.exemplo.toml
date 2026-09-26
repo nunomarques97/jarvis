@@ -121,3 +121,23 @@ lexico = false
 seguimento_s = 8.0
 sons = true
 volume = 0.15
+
+# Opcional: a memoria das perguntas gerais. Sem esta tabela valem estes mesmos
+# valores, que tambem sao os tetos: aqui so se podem baixar, para cada pergunta
+# ter um tamanho maximo garantido (e um gasto de quota maximo).
+# trocas: quantas perguntas e respostas recentes vao com a pergunta seguinte,
+#   para "and who scored?" ter contexto (1 a 10). So em memoria, nunca em disco;
+#   "new conversation" / "nova conversa" esquece-as logo.
+# expira_min: minutos sem perguntas gerais ate a conversa ser esquecida (1 a 30).
+# factos: quantos factos o caderno guarda (1 a 50). O caderno fica em
+#   memoria/factos.json, fora do Git, e vai com cada pergunta geral ao Claude.
+# caracteres: tamanho maximo de todos os factos juntos (200 a 4000).
+# frases_interprete: quantas frases recentes, e o que o jarvis fez com elas, o
+#   interprete local recebe para perceber "send that to jarvis too" ou "same
+#   for crypto-radar" (3 a 5). Nunca escolhem o projeto: esse tem de ser dito.
+[memoria]
+trocas = 10
+expira_min = 30
+factos = 50
+caracteres = 4000
+frases_interprete = 5

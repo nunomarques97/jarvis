@@ -54,6 +54,13 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     sons = true                   # som curto quando essa escuta abre e outro quando fecha
     volume = 0.15                 # volume desses sons (maior do que 0, no maximo 1)
 
+    [memoria]                     # opcional; sem ela valem os valores por omissao
+    trocas = 10                   # perguntas e respostas lembradas nas perguntas gerais (1 a 10)
+    expira_min = 30               # minutos sem perguntas gerais ate esquecer a conversa (1 a 30)
+    factos = 50                   # factos no caderno (1 a 50)
+    caracteres = 4000             # caracteres de todos os factos juntos (200 a 4000)
+    frases_interprete = 5         # frases recentes que o interprete local recebe (3 a 5)
+
 `carregar_config()` le com `tomllib` (biblioteca padrao do Python 3.11+, sem
 dependencia nova), valida a estrutura E os caminhos no disco (um caminho
 de configuracao e entrada externa e verifica-se na leitura, nao se aceita em
@@ -193,6 +200,17 @@ SEGUIMENTO_MAXIMO_S = 30.0
 #: baixo por omissao, para marcar sem assustar.
 VOLUME_DOS_SONS_PADRAO = 0.15
 
+#: Memoria das perguntas gerais: tetos fixos. A configuracao pode baixar estes
+#: valores, nunca subi-los, para o contexto de cada pergunta ter um teto garantido.
+TROCAS_MAXIMAS = 10
+EXPIRA_MAXIMO_MIN = 30.0
+FACTOS_MAXIMOS = 50
+CARACTERES_DOS_FACTOS_MAXIMOS = 4000
+CARACTERES_DOS_FACTOS_MINIMOS = 200
+#: Frases recentes que o interprete local recebe como contexto.
+FRASES_DO_INTERPRETE_MINIMAS = 3
+FRASES_DO_INTERPRETE_MAXIMAS = 5
+
 
 class ConfigError(Exception):
     """Configuracao em falta, mal formada, ou com um caminho que nao existe."""
@@ -301,6 +319,25 @@ class ConfigEscuta:
 
 
 @dataclass(frozen=True)
+class ConfigMemoria:
+    """Limites da memoria das perguntas gerais (ver `jarvis.memoria`).
+
+    `trocas` e quantas perguntas e respostas recentes vao como contexto;
+    `expira_min` e quanto tempo sem perguntas gerais ate as esquecer;
+    `factos` e `caracteres` limitam o caderno de factos. Todos tem um teto
+    fixo que a configuracao so pode baixar. `frases_interprete` e quantas
+    frases recentes (e o que o jarvis fez com elas) o interprete local
+    recebe, para perceber "send that to jarvis too" (3 a 5).
+    """
+
+    trocas: int = TROCAS_MAXIMAS
+    expira_min: float = EXPIRA_MAXIMO_MIN
+    factos: int = FACTOS_MAXIMOS
+    caracteres: int = CARACTERES_DOS_FACTOS_MAXIMOS
+    frases_interprete: int = FRASES_DO_INTERPRETE_MAXIMAS
+
+
+@dataclass(frozen=True)
 class Projeto:
     """Um projeto conhecido: o nome que o utilizador diz e o caminho no disco."""
 
@@ -322,6 +359,7 @@ class Config:
     voz: ConfigVoz = ConfigVoz()
     adaptacao: ConfigAdaptacao = ConfigAdaptacao()
     escuta: ConfigEscuta = ConfigEscuta()
+    memoria: ConfigMemoria = ConfigMemoria()
 
     def encontrar_projeto(self, nome: str) -> Projeto | None:
         """Devolve o Projeto com este nome exato (case-insensitive), ou None."""
@@ -720,6 +758,45 @@ def _validar_escuta(bruto: dict, caminho: Path) -> ConfigEscuta:
     return ConfigEscuta(**valores)
 
 
+def _validar_memoria(bruto: dict, caminho: Path) -> ConfigMemoria:
+    """A tabela [memoria], opcional: limites que so podem baixar dos tetos fixos."""
+    if "memoria" not in bruto:
+        return ConfigMemoria()
+    tabela = bruto["memoria"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [memoria] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    limites: dict[str, tuple[float, float, bool]] = {
+        # chave: (minimo, maximo, so inteiros)
+        "trocas": (1, TROCAS_MAXIMAS, True),
+        "expira_min": (1, EXPIRA_MAXIMO_MIN, False),
+        "factos": (1, FACTOS_MAXIMOS, True),
+        "caracteres": (CARACTERES_DOS_FACTOS_MINIMOS, CARACTERES_DOS_FACTOS_MAXIMOS, True),
+        "frases_interprete": (FRASES_DO_INTERPRETE_MINIMAS, FRASES_DO_INTERPRETE_MAXIMAS, True),
+    }
+    desconhecidas = sorted(set(tabela) - set(limites))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [memoria] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(limites)})."
+        )
+    omissao = ConfigMemoria()
+    valores: dict[str, object] = {}
+    for chave, (minimo, maximo, inteiro) in limites.items():
+        if chave not in tabela:
+            continue
+        valor = tabela[chave]
+        tipos = (int,) if inteiro else (int, float)
+        if isinstance(valor, bool) or not isinstance(valor, tipos) or not minimo <= valor <= maximo:
+            tipo = "um numero inteiro" if inteiro else "um numero"
+            raise ConfigError(
+                f"'{caminho}': [memoria].{chave} = {valor!r} nao e valido; tem de ser {tipo} "
+                f"entre {minimo:g} e {maximo:g} (por omissao {getattr(omissao, chave):g}; "
+                "o teto nao se pode subir)."
+            )
+        valores[chave] = valor if inteiro else float(valor)
+    return ConfigMemoria(**valores)
+
+
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
     """Resolve e valida o caminho de um projeto no disco.
 
@@ -805,6 +882,7 @@ def carregar_config(
         voz=_validar_voz(bruto, caminho),
         adaptacao=_validar_adaptacao(bruto, caminho),
         escuta=_validar_escuta(bruto, caminho),
+        memoria=_validar_memoria(bruto, caminho),
     )
 
 

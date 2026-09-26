@@ -32,6 +32,9 @@ captures/
 # config.exemplo.toml is the committed example with placeholder values.
 /config.toml
 
+# Long-term memory: the fact notebook about the user (memoria/factos.json).
+/memoria/
+
 # Runtime state: local IPC port and per-start secret, generated MCP configs
 # and Claude Code debug logs of the sessions opened by jarvis.
 /.jarvis/

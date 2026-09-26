@@ -59,14 +59,15 @@ from jarvis.app import (
     construir_parser,
     formatar_etapa,
 )
-from jarvis.config import Config, ConfigEscuta, ConfigInterprete, ConfigOuvido, Projeto
-from jarvis.interprete import Interprete, MotorIndisponivel, Vram
+from jarvis.config import Config, ConfigEscuta, ConfigInterprete, ConfigOuvido, ConfigPerguntas, Projeto
+from jarvis.interprete import CARACTERES_DO_CONTEXTO, INTENCAO_RECUSADA, Interprete, MotorIndisponivel, Vram
+from jarvis.memoria import CadernoDeFactos, HistoricoDePerguntas
 from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Frase, TeclaDoFicheiro
 from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE, frase_de_recurso, prefixo_da_resposta
 from jarvis.sessoes import Entrega
 from jarvis.stt import MotorBase, MotorIndisponivel as SttIndisponivel
 from jarvis.voz import ResultadoFala
-from tests.test_pergunta_geral import ArranqueFalso, perguntas_de_teste, saida_json
+from tests.test_pergunta_geral import HOJE, ArranqueFalso, perguntas_de_teste, saida_json
 
 RAIZ = Path(__file__).resolve().parent.parent
 NOMES = ("atlas", "orbita")
@@ -175,6 +176,8 @@ class Montagem:
         nomes: tuple[str, ...] = NOMES,
         perguntas=None,
         sons=None,
+        historico=None,
+        caderno=None,
         **ajustes,
     ) -> None:
         self.log = LogFalso()
@@ -219,6 +222,8 @@ class Montagem:
             executar_local=executar_local,
             relogio=self.relogio,
             sons=sons,
+            historico=historico,
+            caderno=caderno,
         )
 
     def ouvir(
@@ -1769,3 +1774,593 @@ class TestUmMomento(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Correcoes do teste ao vivo: conversa social, fontes e ativacao mal ouvida ---------
+
+
+class TestCorrecoesDoTesteAoVivo(unittest.TestCase):
+    def setUp(self) -> None:
+        temporaria = tempfile.TemporaryDirectory()
+        self.addCleanup(temporaria.cleanup)
+        self.pasta = Path(temporaria.name) / "jarvis-perguntas"
+
+    def montagem(self, respostas_llm=None, *comportamentos, lingua: str = "en", **kw) -> Montagem:
+        self.arranque = ArranqueFalso(*comportamentos)
+        perguntas = perguntas_de_teste(self.arranque, self.pasta, lingua=lingua)
+        m = Montagem(respostas_llm, lingua=lingua, perguntas=perguntas, **kw)
+        self.addCleanup(m.jarvis.fechar)
+        return m
+
+    def assert_nada_saiu(self, m: Montagem) -> None:
+        self.assertEqual(m.llm.pedidos, [], "nunca vai ao LLM")
+        self.assertEqual(m.canal.recebidos, [], "nunca vai ao canal")
+        self.assertEqual(self.arranque.processos, [], "nunca vai ao Claude das perguntas gerais")
+        self.assertFalse(m.jarvis.confirmacao.a_espera, "sem recap")
+
+    def test_conversa_social_do_teste_ao_vivo_responde_localmente(self) -> None:
+        m = self.montagem(
+            [resposta_llm("pergunta_geral", "", "How are you today?")], saida_json("Nunca devia ser pedida.")
+        )
+        m.ouvir("Oh yes? And uh how add you today?")
+        self.assertEqual(m.falados, [app._TEXTOS["en"]["social_como_estas"]])
+        self.assert_nada_saiu(m)
+        self.assertIn("conversa social", m.log.texto())
+
+    def test_cada_tipo_tem_a_sua_frase_em_ingles_e_em_portugues(self) -> None:
+        casos = {
+            "en": {
+                "how are you doing today": "social_como_estas",
+                "what's up": "social_o_que_ha",
+                "who are you": "social_quem_es",
+                "are you there": "social_estas_ai",
+                "hello": "social_cumprimento",
+            },
+            "pt": {
+                "tudo bem": "social_como_estas",
+                "como estás": "social_como_estas",
+                "quem és tu": "social_quem_es",
+                "estás aí": "social_estas_ai",
+                "bom dia": "social_cumprimento",
+            },
+        }
+        for lingua, frases in casos.items():
+            for frase, chave in frases.items():
+                with self.subTest(lingua=lingua, frase=frase):
+                    m = self.montagem(lingua=lingua)
+                    m.ouvir(frase)
+                    self.assertEqual(m.falados, [app._TEXTOS[lingua][chave]])
+                    self.assert_nada_saiu(m)
+
+    def test_frases_sociais_sao_curtas(self) -> None:
+        for lingua in ("pt", "en"):
+            for chave, texto in app._TEXTOS[lingua].items():
+                if chave.startswith("social_"):
+                    with self.subTest(lingua=lingua, chave=chave):
+                        self.assertLessEqual(len(texto), 80)
+                        self.assertEqual(texto.count("."), 1, "uma frase so")
+
+    def test_pergunta_a_serio_continua_a_ir_ao_claude(self) -> None:
+        m = self.montagem(
+            [resposta_llm("pergunta_geral", "", "How do you make pancakes?")], saida_json("Mix flour, eggs and milk.")
+        )
+        m.ouvir("how do you make pancakes")
+        self.assertTrue(m.jarvis.esperar_pergunta(5.0))
+        self.assertEqual(len(self.arranque.processos), 1)
+        self.assertIn("Mix flour", m.falados[-1])
+
+    def test_fontes_da_pergunta_geral_ficam_no_log_e_fora_da_voz(self) -> None:
+        resposta = (
+            "Benfica beat Porto 2-1 last night.\n\nSources:\n- [BBC Sport](https://bbc.co.uk/sport/x)\n- ESPN report"
+        )
+        m = self.montagem(
+            [resposta_llm("pergunta_geral", "", "What was the result of Benfica against Porto?")], saida_json(resposta)
+        )
+        m.ouvir("what was the result of benfica against porto")
+        self.assertTrue(m.jarvis.esperar_pergunta(5.0))
+        self.assertEqual(m.falados[-1], f"{prefixo_da_resposta('en')} Benfica beat Porto 2-1 last night.")
+        self.assertNotIn("Sources", " ".join(m.falados))
+        self.assertIn(repr(resposta), m.log.texto())
+
+    def test_frase_ao_vivo_do_sotaque_chega_limpa_ao_projeto(self) -> None:
+        for resposta in ("Add tests for the login flow.", "AJar is tell Crypto Radar to what tests for the login flow."):
+            with self.subTest(resposta=resposta):
+                m = self.montagem(
+                    [resposta_llm("ditar_prompt", "crypto-radar", resposta)], nomes=(*NOMES, "crypto-radar")
+                )
+                m.ouvir("AJar is tell Crypto Radar to what tests for the login flow.")
+                self.assertTrue(m.jarvis.confirmacao.a_espera, "um ditado passa sempre pelo recap")
+                m.avancar()
+                m.ouvir("yes")
+                self.assertEqual(m.canal.recebidos, [("crypto-radar", "Add tests for the login flow.")])
+
+
+# --- Memoria: conversa recente e caderno de factos -------------------------------
+
+
+def _pergunta(numero: int) -> tuple[str, str]:
+    """(frase dita, resposta do LLM) de uma pergunta geral numerada."""
+    return f"what is the capital of country {numero}", resposta_llm(
+        "pergunta_geral", "", f"What is the capital of country {numero}?"
+    )
+
+
+class TestMemoriaDasPerguntas(unittest.TestCase):
+    """Historico curto e caderno de factos, com um `claude -p` falso e sem LLM real."""
+
+    def setUp(self) -> None:
+        temporaria = tempfile.TemporaryDirectory()
+        self.addCleanup(temporaria.cleanup)
+        self.base = Path(temporaria.name)
+        self.pasta = self.base / "jarvis-perguntas"
+        self.caminho = self.base / "memoria" / "factos.json"
+        self.relogio_da_memoria = RelogioFalso()
+
+    def montagem(self, respostas_llm=None, *comportamentos, lingua: str = "en", caderno=True, **kw) -> Montagem:
+        self.arranque = ArranqueFalso(*comportamentos)
+        perguntas = perguntas_de_teste(self.arranque, self.pasta, lingua=lingua)
+        self.log_do_caderno: list[str] = []
+        self.caderno = (
+            CadernoDeFactos(self.caminho, nomes_de_projeto=NOMES, registar=self.log_do_caderno.append)
+            if caderno
+            else None
+        )
+        historico = HistoricoDePerguntas(relogio=self.relogio_da_memoria)
+        m = Montagem(respostas_llm, lingua=lingua, perguntas=perguntas, historico=historico, caderno=self.caderno, **kw)
+        self.addCleanup(m.jarvis.fechar)
+        return m
+
+    def esperar(self, m: Montagem) -> None:
+        self.assertTrue(m.jarvis.esperar_pergunta(5.0), "a thread da pergunta nao acabou")
+
+    def perguntar(self, m: Montagem, frase: str) -> str:
+        """Faz a pergunta, espera pela resposta e devolve o stdin enviado ao claude falso."""
+        antes = len(self.arranque.processos)
+        m.ouvir(frase)
+        self.esperar(m)
+        self.assertEqual(len(self.arranque.processos), antes + 1)
+        return self.arranque.ultimo.entrada
+
+    def factos_no_ficheiro(self) -> list[str]:
+        if not self.caminho.exists():
+            return []
+        return json.loads(self.caminho.read_text(encoding="utf-8"))["factos"]
+
+    # -- historico
+
+    def test_a_pergunta_de_seguimento_leva_a_troca_anterior_por_stdin(self) -> None:
+        m = self.montagem(
+            [
+                resposta_llm("pergunta_geral", "", "Who won the Benfica game yesterday?"),
+                resposta_llm("pergunta_geral", "", "And who scored?"),
+            ],
+            saida_json("Benfica won two to one."),
+            saida_json("Pavlidis scored both goals."),
+        )
+        primeira = self.perguntar(m, "who won the benfica game yesterday")
+        self.assertNotIn("BEGIN_HISTORY", primeira)
+        segunda = self.perguntar(m, "and who scored")
+        self.assertIn('Q1: "Who won the Benfica game yesterday?"', segunda)
+        # A resposta guardada e a que foi dita, sem o prefixo de origem.
+        self.assertIn('A1: "Benfica won two to one."', segunda)
+        self.assertNotIn(prefixo_da_resposta("en"), segunda.split("BEGIN_HISTORY")[-1])
+        self.assertEqual(self.arranque.ultimo.argv, self.arranque.processos[0].argv, "argv igual")
+        self.assertIn("memoria: 1 troca(s)", m.log.texto())
+
+    def test_no_maximo_10_trocas_vao_na_pergunta(self) -> None:
+        frases = [_pergunta(numero) for numero in range(1, 14)]
+        m = self.montagem(
+            [llm for _frase, llm in frases], *(saida_json(f"Capital {numero}.") for numero in range(1, 14))
+        )
+        for frase, _llm in frases[:12]:
+            self.perguntar(m, frase)
+        entrada = self.perguntar(m, frases[12][0])
+        self.assertIn('Q1: "What is the capital of country 3?"', entrada)
+        self.assertIn('A10: "Capital 12."', entrada)
+        self.assertNotIn("Q11:", entrada)
+        self.assertNotIn("country 2?", entrada)
+        self.assertEqual(len(m.jarvis.historico.trocas()), 10)
+
+    def test_ao_fim_de_30_minutos_sem_perguntas_a_conversa_e_esquecida(self) -> None:
+        frases = [_pergunta(1), _pergunta(2), _pergunta(3)]
+        m = self.montagem([llm for _f, llm in frases], saida_json("Answer."))
+        self.perguntar(m, frases[0][0])
+        self.relogio_da_memoria.avancar(29 * 60)
+        self.assertIn("BEGIN_HISTORY", self.perguntar(m, frases[1][0]))
+        self.relogio_da_memoria.avancar(30 * 60)
+        self.assertNotIn("BEGIN_HISTORY", self.perguntar(m, frases[2][0]))
+
+    def test_new_conversation_esquece_logo_sem_llm_nem_claude(self) -> None:
+        frases = [_pergunta(1), _pergunta(2)]
+        m = self.montagem([frases[0][1], frases[1][1]], saida_json("Answer."))
+        self.perguntar(m, frases[0][0])
+        for dito in ("New conversation.", "hey jarvis, forget this conversation"):
+            with self.subTest(dito=dito):
+                pedidos_ao_llm = len(m.llm.pedidos)
+                m.falados.clear()
+                m.ouvir(dito)
+                self.assertEqual(m.falados, ["Okay, new conversation."])
+                self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "nunca vai ao LLM")
+                self.assertEqual(m.jarvis.historico.trocas(), ())
+        self.assertEqual(len(self.arranque.processos), 1)
+        entrada = self.perguntar(m, frases[1][0])
+        self.assertEqual(entrada, pergunta_geral.texto_do_pedido("What is the capital of country 2?", ConfigPerguntas(), "en", HOJE))
+
+    def test_nova_conversa_em_portugues(self) -> None:
+        m = self.montagem(lingua="pt")
+        m.jarvis.historico.acrescentar("pergunta", "resposta")
+        m.ouvir("Esquece esta conversa.")
+        self.assertEqual(m.falados, ["Está bem, começamos uma conversa nova."])
+        self.assertEqual(m.jarvis.historico.trocas(), ())
+
+    def test_respostas_falhadas_recusadas_canceladas_ou_tecnicas_nunca_entram(self) -> None:
+        frases = [_pergunta(numero) for numero in range(1, 6)]
+        m = self.montagem(
+            [llm for _f, llm in frases],
+            "isto nao e JSON",
+            saida_json(is_error=True),
+            saida_json("```bash\nrm -rf /\n```"),
+            "bloqueia",
+            saida_json("Answer."),
+        )
+        for frase, _llm in frases[:3]:
+            self.perguntar(m, frase)
+        self.assertEqual(m.jarvis.historico.trocas(), ())
+        # Cancelada a meio por um cala-te.
+        self.arranque.a_correr.clear()
+        m.ouvir(frases[3][0])
+        self.assertTrue(self.arranque.a_correr.wait(5.0))
+        m.ouvir("cala-te")
+        self.esperar(m)
+        self.assertEqual(self.arranque.ultimo.comportamento, "bloqueia")
+        self.assertTrue(self.arranque.ultimo.morto.is_set())
+        self.assertEqual(m.jarvis.historico.trocas(), ())
+        # Recusada (financeira) nem chega ao claude.
+        m.ouvir("what is the price of bitcoin today")
+        self.assertEqual(m.jarvis.historico.trocas(), ())
+        m.ouvir("wake up")
+        self.assertNotIn("BEGIN_HISTORY", self.perguntar(m, frases[4][0]))
+
+    def test_resposta_descartada_nao_entra(self) -> None:
+        m = self.montagem()
+        consulta = m.jarvis.perguntas.nova("what football games are on today")
+        m.jarvis._consulta = consulta
+        consulta.correr = lambda: pergunta_geral.ResultadoDaPergunta("respondida", "Benfica plays tonight.")
+        m.jarvis._cancelar_pergunta("pedido novo")
+        m.jarvis._consultar(consulta)
+        self.assertEqual(m.jarvis.historico.trocas(), ())
+
+    # -- caderno: guardar
+
+    def test_remember_faz_recap_e_so_grava_depois_do_sim(self) -> None:
+        m = self.montagem()
+        m.ouvir("Remember that my favourite team is Benfica.")
+        self.assertEqual(m.falados, ["Remember: My favourite team is Benfica. Save it?"])
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(self.factos_no_ficheiro(), [], "nada gravado antes do sim")
+        self.assertEqual(m.llm.pedidos, [], "nunca vai ao LLM")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(self.factos_no_ficheiro(), ["My favourite team is Benfica."])
+        self.assertEqual(m.falados[-1], "Saved, I'll remember that.")
+        self.assertEqual(self.arranque.processos, [])
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_lembra_te_em_portugues(self) -> None:
+        m = self.montagem(lingua="pt")
+        m.ouvir("Lembra-te que a minha filha se chama Ana.")
+        self.assertEqual(m.falados, ["Lembrar: A minha filha se chama Ana. Guardo?"])
+        m.avancar()
+        m.ouvir("sim")
+        self.assertEqual(self.factos_no_ficheiro(), ["A minha filha se chama Ana."])
+        self.assertEqual(m.falados[-1], "Guardado, vou lembrar-me disso.")
+
+    def test_abort_nao_ou_prazo_nao_gravam_nada(self) -> None:
+        for resposta in ("abort", "no", None):
+            with self.subTest(resposta=resposta):
+                m = self.montagem()
+                m.ouvir("remember that I live in Braga")
+                self.assertTrue(m.jarvis.confirmacao.a_espera)
+                if resposta is None:
+                    m.avancar(31)
+                    m.jarvis.verificar_tempo()
+                    self.assertEqual(m.falados[-1], "No answer, so I cancelled. My memory is unchanged.")
+                else:
+                    m.avancar()
+                    m.ouvir(resposta)
+                    self.assertEqual(m.falados[-1], "Cancelled, my memory is unchanged.")
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+                self.assertEqual(self.factos_no_ficheiro(), [])
+
+    def test_correcao_a_um_facto_nao_vai_ao_llm_e_nao_grava(self) -> None:
+        m = self.montagem()
+        m.ouvir("remember that I live in Braga")
+        m.avancar()
+        m.ouvir("no, change Braga to Porto")
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(self.factos_no_ficheiro(), [])
+
+    def test_caderno_cheio_avisa_e_nao_faz_recap(self) -> None:
+        m = self.montagem()
+        for numero in range(50):
+            self.caderno.acrescentar(f"fact number {numero} is fine")
+        m.ouvir("remember that I live in Braga")
+        self.assertEqual(m.falados, ["My notebook is full. Ask me to forget something first."])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(len(self.factos_no_ficheiro()), 50)
+        self.assertNotIn("I live in Braga.", self.factos_no_ficheiro())
+
+    def test_segredos_sao_recusados_antes_do_recap_e_nunca_escritos(self) -> None:
+        for frase in (
+            "remember that my password is hunter2",
+            "remember that the door code is 4321",
+            "remember that my API key is sk-123",
+            "lembra-te que a minha palavra-passe é gato",
+        ):
+            with self.subTest(frase=frase):
+                m = self.montagem()
+                m.ouvir(frase)
+                self.assertEqual(m.falados, ["I don't keep passwords, codes or other secrets. Nothing was saved."])
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+                self.assertFalse(self.caminho.exists())
+
+    def test_dados_financeiros_sao_recusados_antes_do_recap(self) -> None:
+        for frase in ("remember that my IBAN is PT50 1234", "remember that my salary is paid on the 25th"):
+            with self.subTest(frase=frase):
+                m = self.montagem()
+                m.ouvir(frase)
+                self.assertEqual(m.falados, ["I don't keep money or bank details. Nothing was saved."])
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+                self.assertFalse(self.caminho.exists())
+
+    def test_compra_e_venda_continuam_recusadas_pela_regra_financeira(self) -> None:
+        m = self.montagem()
+        m.ouvir("remember that I want to buy bitcoin tomorrow")
+        self.assertEqual(m.falados, ["I don't do that by voice: money and trading requests are off limits."])
+        self.assertEqual(m.jarvis.medidas[-1].intencao, "recusado")
+        self.assertEqual(m.jarvis.medidas[-1].desfecho, "recusado")
+        self.assertFalse(self.caminho.exists())
+
+    def test_sem_facto_ou_ja_guardado(self) -> None:
+        m = self.montagem()
+        m.ouvir("remember that")
+        self.assertEqual(m.falados, ["Say remember that, and then what you want me to keep."])
+        self.caderno.acrescentar("I live in Braga")
+        m.ouvir("remember that I live in Braga")
+        self.assertEqual(m.falados[-1], "I already remember that.")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_sem_caderno_diz_que_nao_esta_disponivel(self) -> None:
+        m = self.montagem(caderno=False)
+        m.ouvir("remember that I live in Braga")
+        self.assertEqual(m.falados, ["My memory notebook is not available. Nothing was saved."])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_erro_ao_escrever_diz_que_nada_mudou(self) -> None:
+        m = self.montagem()
+        m.ouvir("remember that I live in Braga")
+        m.avancar()
+        with mock.patch("jarvis.memoria.os.replace", side_effect=PermissionError("negado")):
+            m.ouvir("yes")
+        self.assertEqual(m.falados[-1], "I couldn't write to my notebook. Nothing changed.")
+        self.assertEqual(self.factos_no_ficheiro(), [])
+
+    # -- caderno: apagar e listar
+
+    def test_forget_apaga_o_facto_mais_parecido_so_depois_do_sim(self) -> None:
+        m = self.montagem()
+        self.caderno.acrescentar("I live in Braga")
+        self.caderno.acrescentar("My favourite team is Benfica")
+        m.ouvir("forget that my favourite team is Benfica")
+        self.assertEqual(m.falados, ["Forget: My favourite team is Benfica. Delete it?"])
+        self.assertEqual(len(self.factos_no_ficheiro()), 2)
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(self.factos_no_ficheiro(), ["I live in Braga."])
+        self.assertEqual(m.falados[-1], "Forgotten.")
+
+    def test_forget_sem_nada_parecido_nao_apaga(self) -> None:
+        m = self.montagem()
+        self.caderno.acrescentar("I live in Braga")
+        m.ouvir("forget that my cat is black")
+        self.assertEqual(m.falados, ["I don't remember anything like that. Nothing was deleted."])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(self.factos_no_ficheiro(), ["I live in Braga."])
+
+    def test_forget_cancelado_nao_apaga(self) -> None:
+        m = self.montagem()
+        self.caderno.acrescentar("I live in Braga")
+        m.ouvir("forget that I live in Braga")
+        m.avancar()
+        m.ouvir("abort")
+        self.assertEqual(self.factos_no_ficheiro(), ["I live in Braga."])
+
+    def test_what_do_you_remember_le_localmente(self) -> None:
+        m = self.montagem()
+        m.ouvir("What do you remember about me?")
+        self.assertEqual(m.falados, ["I don't remember anything about you yet."])
+        self.caderno.acrescentar("I live in Braga")
+        m.ouvir("What do you remember about me?")
+        self.assertEqual(m.falados[-1], "I remember one thing about you: I live in Braga.")
+        self.caderno.acrescentar("My favourite team is Benfica")
+        m.ouvir("what do you remember about me")
+        self.assertEqual(m.falados[-1], "I remember 2 things about you. The list is on screen.")
+        self.assertIn("ecra | 1. I live in Braga.", m.log.texto())
+        self.assertIn("ecra | 2. My favourite team is Benfica.", m.log.texto())
+        self.assertEqual(m.llm.pedidos, [])
+        self.assertEqual(self.arranque.processos, [], "nunca vai ao Claude")
+
+    def test_o_que_te_lembras_de_mim_em_portugues(self) -> None:
+        m = self.montagem(lingua="pt")
+        self.caderno.acrescentar("Moro em Braga")
+        self.caderno.acrescentar("Gosto de chá")
+        m.ouvir("O que te lembras de mim?")
+        self.assertEqual(m.falados, ["Lembro-me de 2 coisas sobre ti. A lista está no ecrã."])
+
+    # -- caderno nas perguntas gerais
+
+    def test_os_factos_vao_com_cada_pergunta_geral(self) -> None:
+        m = self.montagem([_pergunta(1)[1]], saida_json("Answer."))
+        self.caderno.acrescentar("I live in Braga")
+        entrada = self.perguntar(m, _pergunta(1)[0])
+        self.assertIn('- "I live in Braga."', entrada)
+        self.assertNotIn("Braga", " ".join(self.arranque.ultimo.argv))
+
+
+# --- Frases recentes como contexto do interprete local ----------------------------
+
+NOMES_DA_REFERENCIA = ("atlas", "crypto-radar", "jarvis")
+ADD_TESTS = "Add tests for the login flow."
+DITADO_EN = resposta_llm("ditar_prompt", "atlas", "Fix the footer.")
+
+
+def _contexto_enviado(pedido: list[dict]) -> str | None:
+    """A mensagem de contexto de um pedido ao LLM (a penultima), se existe."""
+    penultima = pedido[-2] if len(pedido) >= 2 else {}
+    conteudo = penultima.get("content", "")
+    return conteudo if penultima.get("role") == "user" and conteudo.startswith("Context, not a transcript") else None
+
+
+class TestContextoDoInterpreteNaApp(unittest.TestCase):
+    def montagem(self, respostas, **kw) -> Montagem:
+        m = Montagem(respostas, lingua="en", nomes=NOMES_DA_REFERENCIA, **kw)
+        self.addCleanup(m.jarvis.fechar)
+        return m
+
+    def test_a_primeira_frase_vai_sem_contexto_e_a_seguinte_com_ela(self) -> None:
+        m = self.montagem(
+            [
+                resposta_llm("ditar_prompt", "crypto-radar", ADD_TESTS),
+                resposta_llm("ditar_prompt", "jarvis", ADD_TESTS),
+            ]
+        )
+        m.ouvir("tell crypto-radar to add tests for the login flow")
+        self.assertIsNone(_contexto_enviado(m.llm.pedidos[0]))
+        self.assertEqual(m.llm.pedidos[0][-1]["content"], "tell crypto-radar to add tests for the login flow")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("crypto-radar", ADD_TESTS)])
+        m.avancar()
+        m.ouvir("send that to jarvis too")
+        contexto = _contexto_enviado(m.llm.pedidos[1])
+        self.assertIsNotNone(contexto)
+        self.assertIn('said "tell crypto-radar to add tests for the login flow"', contexto)
+        self.assertIn(f'project crypto-radar, prompt "{ADD_TESTS}", done', contexto)
+        self.assertEqual(m.llm.pedidos[1][-1]["content"], "send that to jarvis too")
+        # O pedido referido, no projeto dito, e ainda com recap e sim.
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [("crypto-radar", ADD_TESTS)])
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("crypto-radar", ADD_TESTS), ("jarvis", ADD_TESTS)])
+
+    def test_o_desfecho_do_recap_atualiza_a_frase(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "atlas", "Fix the header."), DITADO_EN])
+        m.ouvir("in atlas fix the header")
+        self.assertEqual(m.jarvis.frases_recentes.frases()[-1].feito, "waiting for yes")
+        m.avancar()
+        m.ouvir("no")
+        self.assertEqual(m.jarvis.frases_recentes.frases()[-1].feito, "cancelled")
+        m.avancar()
+        m.ouvir("same for jarvis")
+        self.assertIn('prompt "Fix the header.", cancelled', _contexto_enviado(m.llm.pedidos[1]))
+
+    def test_o_prazo_do_recap_tambem_atualiza(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "atlas", "Fix the header.")])
+        m.ouvir("in atlas fix the header")
+        m.avancar(m.jarvis.confirmacao.limite_s + 1)
+        m.jarvis.verificar_tempo()
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.jarvis.frases_recentes.frases()[-1].feito, "no answer, not sent")
+
+    def test_teto_de_frases_no_contexto(self) -> None:
+        respostas = [resposta_llm("ditar_prompt", "atlas", f"Fix bug {n}.") for n in range(1, 10)]
+        m = self.montagem(respostas)
+        for n in range(1, 9):
+            m.ouvir(f"in atlas fix bug {n}")
+            m.avancar()
+            m.ouvir("no")
+            m.avancar()
+        m.ouvir("same for jarvis")
+        contexto = _contexto_enviado(m.llm.pedidos[-1])
+        self.assertEqual(contexto.count("\n- said"), 5)
+        self.assertNotIn("fix bug 3\"", contexto)
+        self.assertIn("fix bug 4\"", contexto)
+        self.assertIn("fix bug 8\"", contexto)
+        self.assertLessEqual(len(contexto), CARACTERES_DO_CONTEXTO)
+
+    def test_cortesia_social_e_memoria_nao_entram_e_a_recusa_entra_sem_texto(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "jarvis", "Fix the header.")])
+        for frase in ("thanks", "how are you", "what do you remember about me", "buy 100 euros of bitcoin"):
+            m.ouvir(frase)
+            m.avancar()
+        frases = m.jarvis.frases_recentes.frases()
+        self.assertEqual([(f.intencao, f.frase, f.prompt) for f in frases], [(INTENCAO_RECUSADA, "", "")])
+        m.ouvir("same for jarvis")
+        contexto = _contexto_enviado(m.llm.pedidos[-1])
+        self.assertIn("said (not kept) -> recusado", contexto)
+        self.assertNotIn("bitcoin", contexto)
+
+    def test_nova_conversa_esquece_as_frases_recentes(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "atlas", "Fix the header."), DITADO_EN])
+        m.ouvir("in atlas fix the header")
+        m.avancar()
+        m.ouvir("no")
+        m.avancar()
+        m.ouvir("new conversation")
+        self.assertEqual(m.jarvis.frases_recentes.frases(), ())
+        m.avancar()
+        m.ouvir("in atlas fix the footer")
+        self.assertIsNone(_contexto_enviado(m.llm.pedidos[-1]))
+
+    def test_factos_com_uma_palavra_em_comum_vao_no_contexto(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            caderno = CadernoDeFactos(Path(pasta) / "factos.json", nomes_de_projeto=NOMES_DA_REFERENCIA)
+            caderno.acrescentar("My favourite team is Benfica")
+            caderno.acrescentar("I live in Braga")
+            m = self.montagem(
+                [
+                    resposta_llm("pergunta_geral", "", "Did Benfica win?"),
+                    resposta_llm("pergunta_geral", "", "What is the capital of Peru?"),
+                ],
+                caderno=caderno,
+            )
+            m.ouvir("same question for benfica")
+            contexto = _contexto_enviado(m.llm.pedidos[0])
+            self.assertIn('- "My favourite team is Benfica."', contexto)
+            self.assertNotIn("Braga", contexto)
+            m.jarvis.frases_recentes.limpar()
+            m.avancar()
+            m.ouvir("same question for peru")
+            self.assertIsNone(_contexto_enviado(m.llm.pedidos[1]), "sem frases e sem factos parecidos")
+
+    def test_frase_sem_referencia_vai_sem_contexto(self) -> None:
+        m = self.montagem([resposta_llm("ditar_prompt", "atlas", "Fix the header."), DITADO_EN])
+        m.ouvir("in atlas fix the header")
+        m.avancar()
+        m.ouvir("no")
+        m.avancar()
+        m.ouvir("in atlas fix the footer")
+        self.assertEqual(len(m.jarvis.frases_recentes.frases()), 2)
+        self.assertIsNone(_contexto_enviado(m.llm.pedidos[1]))
+
+    def test_o_contexto_nunca_da_o_projeto(self) -> None:
+        m = self.montagem(
+            [
+                resposta_llm("ditar_prompt", "crypto-radar", ADD_TESTS),
+                resposta_llm("ditar_prompt", "crypto-radar", ADD_TESTS),
+            ]
+        )
+        m.ouvir("tell crypto-radar to add tests for the login flow")
+        m.avancar()
+        m.ouvir("no")
+        m.avancar()
+        m.ouvir("do the same again")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        recap = m.jarvis.confirmacao.recap
+        self.assertIsNone(recap.pedido.projeto)
+        self.assertTrue(recap.falta_projeto)
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [])

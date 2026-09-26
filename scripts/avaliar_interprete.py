@@ -28,6 +28,14 @@ deixar o acerto descer face a uma medicao anterior.
     .venv\Scripts\python scripts/avaliar_interprete.py --verificar --evidencia
     .venv\Scripts\python scripts/avaliar_interprete.py --lingua en --verificar --minimo-intencao 99.1
 
+`--comparar-contexto` corre cada caso sem contexto e com um contexto
+ficticio fixo de 5 frases recentes (`CONTEXTO_FICTICIO`), alternados, e sai
+com erro (1) se com contexto a intencao ou o projeto de alguma lingua ficar
+abaixo do sem contexto, ou se o p50 do LLM com contexto passar o sem contexto
+em mais de 20%. Com `--evidencia` escreve as duas corridas num so ficheiro.
+
+    .venv\Scripts\python scripts/avaliar_interprete.py --comparar-contexto --evidencia
+
 `--modelo` mede outro modelo instalado no lugar do principal (o relatorio
 di-lo). `--evidencia` escreve o resumo em docs/forja/evidence/ (ignorada
 pelo Git); so leva as frases ficticias do golden e numeros.
@@ -61,14 +69,18 @@ from jarvis.config import (  # noqa: E402
 )
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 from jarvis.interprete import (  # noqa: E402
+    CARACTERES_DO_CONTEXTO,
     INTENCAO_CORTESIA,
     INTENCAO_RECUSADA,
     INTENCOES,
     INTENCOES_COM_PROMPT,
+    ContextoDoInterprete,
+    FraseRecente,
     Interpretacao,
     Interprete,
     medir_vram,
     nome_canonico,
+    texto_do_contexto,
 )
 from jarvis.router import _normalizar  # noqa: E402
 
@@ -238,6 +250,146 @@ def avaliar(interprete: Interprete, lingua: str, casos: list[Caso]) -> Resumo:
     return resumo
 
 
+#: Contexto ficticio e fixo da comparacao: cinco frases anteriores com os
+#: projetos do golden, na lingua da avaliacao. Nenhuma frase e real.
+CONTEXTO_FICTICIO: dict[str, ContextoDoInterprete] = {
+    "en": ContextoDoInterprete(
+        (
+            FraseRecente("in atlas fix the login bug on the settings page", "ditar_prompt", "atlas",
+                         "Fix the login bug on the settings page.", "done"),
+            FraseRecente("what's the weather in porto tomorrow", "pergunta_geral", None,
+                         "What's the weather in Porto tomorrow?", "done"),
+            FraseRecente("how is orbita doing", "estado", "orbita", "", "done"),
+            FraseRecente("tell nimbus to add tests for the upload form", "ditar_prompt", "nimbus",
+                         "Add tests for the upload form.", "cancelled"),
+            FraseRecente("what time is it", "horas", None, "", "done"),
+        )
+    ),
+    "pt": ContextoDoInterprete(
+        (
+            FraseRecente("no atlas corrige o erro de login na página de definições", "ditar_prompt", "atlas",
+                         "Corrige o erro de login na página de definições.", "done"),
+            FraseRecente("como vai estar o tempo no porto amanhã", "pergunta_geral", None,
+                         "Como vai estar o tempo no Porto amanhã?", "done"),
+            FraseRecente("como está a correr o orbita", "estado", "orbita", "", "done"),
+            FraseRecente("diz ao nimbus para acrescentar testes ao formulário de envio", "ditar_prompt", "nimbus",
+                         "Acrescenta testes ao formulário de envio.", "cancelled"),
+            FraseRecente("que horas são", "horas", None, "", "done"),
+        )
+    ),
+}
+
+#: A latencia p50 com contexto pode subir no maximo isto face a sem contexto.
+AUMENTO_MAXIMO_DO_P50 = 0.20
+
+
+def avaliar_com_e_sem_contexto(
+    interprete: Interprete, lingua: str, casos: list[Caso], contexto: ContextoDoInterprete
+) -> tuple[Resumo, Resumo]:
+    """(sem contexto, com contexto), caso a caso alternados.
+
+    Alternar mede o custo real do contexto: o prefixo guardado pelo Ollama
+    (instrucoes e exemplos) serve as duas chamadas, e o contexto tem de ser
+    lido de novo em cada pedido com ele, como na vida real, onde muda a
+    cada frase. Uma carga passageira na maquina pesa nas duas medicoes.
+    """
+    interprete.lingua = lingua
+    sem, com = Resumo(lingua), Resumo(lingua)
+    for caso in casos:
+        sem.vereditos.append(julgar(caso, interprete.interpretar(caso.texto)))
+        com.vereditos.append(julgar(caso, interprete.interpretar(caso.texto, contexto=contexto)))
+    return sem, com
+
+
+def falhas_da_comparacao(
+    sem: list[Resumo], com: list[Resumo], aumento_maximo: float = AUMENTO_MAXIMO_DO_P50
+) -> list[str]:
+    """Os motivos por que o contexto piora o interprete (vazio = nao piora).
+
+    Falha se, em alguma lingua, o acerto da intencao ou do projeto com
+    contexto fica abaixo do sem contexto, ou se o p50 da latencia do LLM com
+    contexto (todas as linguas) passa o sem contexto em mais de `aumento_maximo`.
+    """
+    falhas: list[str] = []
+    por_lingua = {resumo.lingua: resumo for resumo in sem}
+    if not sem or set(por_lingua) != {resumo.lingua for resumo in com}:
+        return ["as duas corridas nao tem as mesmas linguas"]
+    for resumo in com:
+        base = por_lingua[resumo.lingua]
+        if resumo.total != base.total:
+            falhas.append(f"{resumo.lingua}: {resumo.total} casos com contexto e {base.total} sem")
+        if resumo.intencao < base.intencao:
+            falhas.append(
+                f"{resumo.lingua}: intencao com contexto {resumo.intencao:.2%} < sem contexto {base.intencao:.2%}"
+            )
+        if resumo.projeto < base.projeto:
+            falhas.append(
+                f"{resumo.lingua}: projeto com contexto {resumo.projeto:.2%} < sem contexto {base.projeto:.2%}"
+            )
+    latencias_sem = [lat for resumo in sem for lat in resumo.latencias_llm]
+    latencias_com = [lat for resumo in com for lat in resumo.latencias_llm]
+    if not latencias_sem or not latencias_com:
+        falhas.append("nenhuma chamada ao LLM foi medida numa das corridas")
+    else:
+        p50_sem, p50_com = percentil(latencias_sem, 50), percentil(latencias_com, 50)
+        if p50_com > p50_sem * (1 + aumento_maximo):
+            falhas.append(
+                f"latencia p50 com contexto {p50_com:.2f} s > sem contexto {p50_sem:.2f} s + {aumento_maximo:.0%}"
+            )
+    return falhas
+
+
+def relatorio_da_comparacao(sem: list[Resumo], com: list[Resumo], contexto_en: str) -> list[str]:
+    """A tabela lado a lado e o texto do contexto enviado (ficticio)."""
+    linhas = [
+        "| lingua | casos | intencao sem | intencao com | projeto sem | projeto com | inventados sem | "
+        "inventados com | LLM p50 sem | LLM p50 com | LLM p95 sem | LLM p95 com |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    por_lingua = {resumo.lingua: resumo for resumo in sem}
+    for c in com:
+        s = por_lingua.get(c.lingua)
+        if s is None:
+            continue
+        linhas.append(
+            f"| {c.lingua} | {c.total} | {s.intencao:.1%} | {c.intencao:.1%} | {s.projeto:.1%} | {c.projeto:.1%} | "
+            f"{len(s.inventados)} | {len(c.inventados)} | {percentil(s.latencias_llm, 50):.2f} s | "
+            f"{percentil(c.latencias_llm, 50):.2f} s | {percentil(s.latencias_llm, 95):.2f} s | "
+            f"{percentil(c.latencias_llm, 95):.2f} s |"
+        )
+    todas_sem = [lat for r in sem for lat in r.latencias_llm]
+    todas_com = [lat for r in com for lat in r.latencias_llm]
+    # O interprete so manda o contexto quando a frase remete para tras.
+    enviados = [
+        (s.vereditos[i], v)
+        for s, c in zip(sem, com)
+        for i, v in enumerate(c.vereditos)
+        if "contexto recente enviado" in v.resultado.motivo and i < len(s.vereditos)
+    ]
+    linhas += [
+        "",
+        f"Latencia do LLM, todas as linguas: sem contexto p50 {percentil(todas_sem, 50):.2f} s "
+        f"({len(todas_sem)} chamadas); com contexto p50 {percentil(todas_com, 50):.2f} s "
+        f"({len(todas_com)} chamadas); aumento maximo permitido {AUMENTO_MAXIMO_DO_P50:.0%}.",
+        "",
+        f"Frases em que o contexto foi mesmo enviado ao LLM (so as que remetem para tras): {len(enviados)}"
+        + (
+            f" ({', '.join(v.caso.id for _s, v in enviados)}); latencia dessas frases sem contexto p50 "
+            f"{percentil([s.resultado.latencia_s for s, _v in enviados], 50):.2f} s, com contexto p50 "
+            f"{percentil([v.resultado.latencia_s for _s, v in enviados], 50):.2f} s."
+            if enviados
+            else "."
+        ),
+        "",
+        f"Contexto ficticio enviado em ingles ({len(contexto_en)} caracteres, teto {CARACTERES_DO_CONTEXTO}):",
+        "",
+        "```",
+        contexto_en,
+        "```",
+    ]
+    return linhas
+
+
 def falhas_da_verificacao(
     resumos: list[Resumo],
     minimo_de_casos: int = MINIMO_DE_CASOS,
@@ -392,7 +544,88 @@ def construir_parser() -> argparse.ArgumentParser:
         help=f"acerto minimo da intencao em %% (por omissao {META_INTENCAO:.0%}), por exemplo 99.1",
     )
     parser.add_argument("--evidencia", nargs="?", const="", default=None, help="escreve o resumo em .md")
+    parser.add_argument(
+        "--comparar-contexto",
+        action="store_true",
+        help="corre o golden sem contexto e com um contexto ficticio de 5 frases; "
+        "sai com erro se o contexto baixar o acerto ou subir o p50 mais de 20%%",
+    )
     return parser
+
+
+def _comparar_contexto(
+    interprete: Interprete,
+    linguas: tuple[str, ...],
+    goldens: dict[str, list[Caso]],
+    escolha,
+    configurado: str,
+    vram_antes: object,
+    medir: Callable[[], object],
+    evidencia: str | None,
+) -> int:
+    """O modo `--comparar-contexto`: as duas corridas, o veredito e a evidencia."""
+    sem: list[Resumo] = []
+    com: list[Resumo] = []
+    for lingua in linguas:
+        print(f"A avaliar {len(goldens[lingua])} casos em {lingua}, sem e com contexto...")
+        resumo_sem, resumo_com = avaliar_com_e_sem_contexto(
+            interprete, lingua, goldens[lingua], CONTEXTO_FICTICIO[lingua]
+        )
+        sem.append(resumo_sem)
+        com.append(resumo_com)
+    vram_depois = medir()
+    comuns = dict(
+        modelo=escolha.modelo,
+        configurado=configurado,
+        escolha_motivo=escolha.motivo,
+        vram_antes=str(vram_antes or "nao medida"),
+        vram_depois=str(vram_depois or "nao medida"),
+        vram_do_modelo_mib=escolha.vram_do_modelo_mib,
+        mostrar_erros=True,
+    )
+    comparacao = relatorio_da_comparacao(sem, com, texto_do_contexto(CONTEXTO_FICTICIO["en"]))
+    falhas = falhas_da_comparacao(sem, com)
+    print()
+    print("\n".join(comparacao))
+    print()
+    if falhas:
+        print("O contexto piora o interprete:")
+        for falha in falhas:
+            print(f"  - {falha}")
+    else:
+        print("Com contexto: acerto igual ou melhor em cada lingua e p50 dentro do limite.")
+
+    if evidencia is not None:
+        carimbo = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            saida = caminho_evidencia_de_saida(evidencia or f"docs/forja/evidence/interprete-contexto-{carimbo}.md")
+        except ValueError as erro:
+            print(f"ERRO: {erro}")
+            return 1
+        saida.parent.mkdir(parents=True, exist_ok=True)
+        texto = [
+            f"# Interprete: golden set sem e com contexto recente ({datetime.datetime.now():%Y-%m-%d %H:%M})",
+            "",
+            "Frases ficticias do golden set e um contexto ficticio fixo de 5 frases; nenhuma voz nem nome real.",
+            "Cada caso corre sem contexto e logo a seguir com ele (alternados).",
+            "",
+            *comparacao,
+            "",
+            "## Veredito",
+            "",
+            *([f"- {f}" for f in falhas] or ["- sem descida de acerto e p50 dentro do limite"]),
+            "",
+            "## Sem contexto",
+            "",
+            *relatorio(sem, **comuns),
+            "",
+            "## Com contexto",
+            "",
+            *relatorio(com, **comuns),
+        ]
+        saida.write_text("\n".join(texto) + "\n", encoding="utf-8")
+        print(f"Evidencia: {caminho_para_mostrar(saida)}")
+    return 1 if falhas else 0
 
 
 def principal(
@@ -439,6 +672,11 @@ def principal(
             print(f"  ollama pull {modelo}")
         return 2
     print(f"Modelo: {escolha.modelo} ({escolha.motivo})")
+
+    if args.comparar_contexto:
+        return _comparar_contexto(
+            interprete, linguas, goldens, escolha, configurado, vram_antes, medir, args.evidencia
+        )
 
     resumos = []
     for lingua in linguas:

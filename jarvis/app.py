@@ -27,6 +27,13 @@ O CAMINHO VIVO de cada frase:
               (`jarvis.pergunta_geral`); a resposta passa pelo filtro da
               resposta falada. "cala-te", Ctrl+C, "dorme" ou um pedido novo
               descartam a resposta que ainda nao chegou.
+  memoria     (`jarvis.memoria`) as ultimas perguntas gerais respondidas e
+              as respostas ditas vao com a pergunta seguinte (so em RAM,
+              com teto e prazo; "new conversation" esquece-as); o caderno de
+              factos ("remember that ...", "forget that ...", "what do you
+              remember about me?") fica num ficheiro local fora do Git e vai
+              com cada pergunta geral. Guardar ou apagar um facto tem recap e
+              "sim"; segredos e dados financeiros sao recusados antes.
   executor    as accoes locais (`jarvis.acoes_locais`), o estado e os runs
               FORJA do projeto (`jarvis.forja_voz`) ou o canal para a
               sessao do Claude Code do projeto (`jarvis.sessoes`): o prompt
@@ -116,7 +123,13 @@ from jarvis.audio_util import RAIZ, garantir_pasta
 from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns
 from jarvis.bolinha import LigacaoABolinha, PonteDaBolinha
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
-from jarvis.confirmacao import Confirmacao, Desfecho, Pedido
+from jarvis.confirmacao import (
+    INTENCAO_ESQUECER_FACTO,
+    INTENCAO_LEMBRAR_FACTO,
+    Confirmacao,
+    Desfecho,
+    Pedido,
+)
 from jarvis.consola import forcar_consola_utf8
 from jarvis.forja_voz import INTENCOES_POR_VOZ, ForjaPorVoz
 from jarvis.instancia import (
@@ -128,8 +141,10 @@ from jarvis.instancia import (
 )
 from jarvis.interprete import (
     INTENCAO_CORTESIA,
+    INTENCAO_MEMORIA,
     INTENCAO_PERGUNTA_GERAL,
     INTENCAO_RECUSADA,
+    INTENCAO_SOCIAL,
     Interpretacao,
     Interprete,
     medir_vram,
@@ -157,11 +172,24 @@ from jarvis.ouvido import (
     palavra_de_ativacao,
     pcm_do_wav,
 )
+from jarvis.memoria import (
+    CadernoCheio,
+    CadernoDeFactos,
+    FactoRecusado,
+    FrasesRecentes,
+    HistoricoDePerguntas,
+    contexto_do_interprete,
+    facto_mais_parecido,
+    recusa_do_facto,
+    texto_do_facto,
+)
 from jarvis.pergunta_geral import Consulta, PerguntasGerais
 from jarvis.resposta_falada import (
+    FRASES_DE_RECURSO,
     MAXIMO_ABSOLUTO_FALADO,
     cortar_no_limite,
     frase_de_recurso,
+    prefixo_da_resposta,
     resumo_falado,
 )
 from jarvis.router import _normalizar, encaminhar
@@ -249,6 +277,25 @@ _TEXTOS = {
         "sem_perguntas": "As perguntas gerais não estão disponíveis.",
         "cortesia": "Está bem.",
         "um_momento": "Um momento.",
+        "social_como_estas": "Estou bem, obrigado por perguntares.",
+        "social_o_que_ha": "Nada de especial, estou aqui para ajudar.",
+        "social_quem_es": "Sou o Jarvis, o teu assistente de voz para os projetos.",
+        "social_estas_ai": "Sim, estou aqui.",
+        "social_cumprimento": "Olá, estou aqui.",
+        "memoria_nova_conversa": "Está bem, começamos uma conversa nova.",
+        "memoria_sem_caderno": "O caderno da memória não está disponível. Não guardei nada.",
+        "memoria_sem_facto": "Diz lembra-te que, e depois o que queres que eu guarde.",
+        "memoria_recusado_segredo": "Não guardo palavras-passe, códigos nem outros segredos. Não guardei nada.",
+        "memoria_recusado_financeiro": "Não guardo dados de dinheiro nem do banco. Não guardei nada.",
+        "memoria_cheio": "O caderno está cheio. Pede-me primeiro para esquecer alguma coisa.",
+        "memoria_ja_sei": "Já me lembro disso.",
+        "memoria_nada_parecido": "Não me lembro de nada assim. Não apaguei nada.",
+        "memoria_guardado": "Guardado, vou lembrar-me disso.",
+        "memoria_apagado": "Esquecido.",
+        "memoria_falhou": "Não consegui escrever no caderno. Não mudou nada.",
+        "memoria_vazia": "Ainda não me lembro de nada sobre ti.",
+        "memoria_um": "Lembro-me de uma coisa sobre ti: {facto}",
+        "memoria_lista": "Lembro-me de {n} coisas sobre ti. A lista está no ecrã.",
     },
     "en": {
         "calado": "I'll be quiet.",
@@ -268,6 +315,25 @@ _TEXTOS = {
         "sem_perguntas": "General questions are not available.",
         "cortesia": "Okay.",
         "um_momento": "One moment.",
+        "social_como_estas": "I'm doing well, thanks for asking.",
+        "social_o_que_ha": "Not much, just here to help.",
+        "social_quem_es": "I'm Jarvis, your voice assistant for your projects.",
+        "social_estas_ai": "Yes, I'm here.",
+        "social_cumprimento": "Hello, I'm here.",
+        "memoria_nova_conversa": "Okay, new conversation.",
+        "memoria_sem_caderno": "My memory notebook is not available. Nothing was saved.",
+        "memoria_sem_facto": "Say remember that, and then what you want me to keep.",
+        "memoria_recusado_segredo": "I don't keep passwords, codes or other secrets. Nothing was saved.",
+        "memoria_recusado_financeiro": "I don't keep money or bank details. Nothing was saved.",
+        "memoria_cheio": "My notebook is full. Ask me to forget something first.",
+        "memoria_ja_sei": "I already remember that.",
+        "memoria_nada_parecido": "I don't remember anything like that. Nothing was deleted.",
+        "memoria_guardado": "Saved, I'll remember that.",
+        "memoria_apagado": "Forgotten.",
+        "memoria_falhou": "I couldn't write to my notebook. Nothing changed.",
+        "memoria_vazia": "I don't remember anything about you yet.",
+        "memoria_um": "I remember one thing about you: {facto}",
+        "memoria_lista": "I remember {n} things about you. The list is on screen.",
     },
 }
 
@@ -767,6 +833,9 @@ class Jarvis:
         avisos: Avisos | None = None,
         janela_de_conversa_s: float = conversa.JANELA_S,
         sons: Callable[[str], object] | None = None,
+        historico: HistoricoDePerguntas | None = None,
+        caderno: CadernoDeFactos | None = None,
+        frases_recentes: FrasesRecentes | None = None,
     ) -> None:
         self.config = config
         self.log = log
@@ -776,6 +845,17 @@ class Jarvis:
         self.canal = canal
         self.forja = forja
         self.perguntas = perguntas
+        #: As ultimas perguntas gerais respondidas (so em RAM, com teto e prazo).
+        self.historico = historico if historico is not None else HistoricoDePerguntas.da_config(config.memoria)
+        #: O caderno de factos; None: os comandos de factos dizem que nao esta disponivel.
+        self.caderno = caderno
+        #: As ultimas frases interpretadas e o que o jarvis fez com elas, para
+        #: o interprete local perceber "send that to jarvis too" (so em RAM).
+        self.frases_recentes = (
+            frases_recentes if frases_recentes is not None else FrasesRecentes.da_config(config.memoria)
+        )
+        #: O numero (em `frases_recentes`) da frase cujo recap esta pendente.
+        self._frase_do_recap: int | None = None
         self.lingua ="en" if config.ouvido.lingua == "en" else "pt"
         self._falar = falar
         self._calar = calar
@@ -1101,6 +1181,7 @@ class Jarvis:
             medida.resposta_ao_recap = True
             registo.marcar(3, "resposta ao recap pendente")
             desfecho = self.confirmacao.responder(frase.texto, dito_em=frase.inicio_da_escuta)
+            self._desfecho_do_recap(desfecho)
         elif rapida is None and self.janela.aceita(frase.inicio_da_escuta):
             desfecho = self._responder_na_conversa(frase, registo, medida)
         elif rapida is None and self._ruido_no_seguimento(frase):
@@ -1127,11 +1208,13 @@ class Jarvis:
             # Um pedido novo: a resposta de uma pergunta anterior ja nao se diz.
             self._cancelar_pergunta("pedido novo")
             if self.confirmacao.a_espera and rapida == "dormir":
-                self.confirmacao.cancelar("o jarvis foi dormir")
-            interpretacao = self.interprete.interpretar(frase.texto)
+                self._desfecho_do_recap(self.confirmacao.cancelar("o jarvis foi dormir"))
+            contexto = contexto_do_interprete(frase.texto, self.frases_recentes, self.caderno)
+            interpretacao = self.interprete.interpretar(frase.texto, contexto=contexto)
             medida.intencao, medida.projeto = interpretacao.intencao, interpretacao.projeto
             registo.marcar(3, self._detalhe_da_interpretacao(interpretacao))
             desfecho = self._decidir(interpretacao)
+            self._lembrar_frase(interpretacao, desfecho)
         if desfecho is not None:
             medida.desfecho = desfecho.estado
             if desfecho.pedido is not None:
@@ -1411,7 +1494,162 @@ class Jarvis:
             self._marcar_decisao("so cortesia: nada enviado")
             self._dizer(self._texto("cortesia"))
             return Desfecho("ignorado", "so cortesia")
+        if interpretacao.intencao == INTENCAO_SOCIAL:
+            # Conversa social curta: uma frase local, sem LLM, sem Claude e sem recap.
+            self._marcar_decisao(f"conversa social ({interpretacao.detalhe}): resposta local, nada enviado")
+            self._dizer(self._texto(f"social_{interpretacao.detalhe or 'como_estas'}"))
+            return Desfecho("executado", "conversa social: resposta local")
+        if interpretacao.intencao == INTENCAO_MEMORIA:
+            return self._memoria(interpretacao)
         return self.confirmacao.iniciar(interpretacao)
+
+    # -- frases recentes para o interprete local
+
+    def _lembrar_frase(self, interpretacao: Interpretacao, desfecho: Desfecho | None) -> None:
+        """Guarda a frase interpretada e o que o jarvis fez com ela.
+
+        Cortesia, conversa social e comandos da memoria ficam de fora: sao
+        regras locais, nunca um pedido a que uma frase seguinte se refira.
+        """
+        estado = desfecho.estado if desfecho is not None else None
+        if estado == "pendente" or not self.confirmacao.a_espera:
+            # Um recap novo (ou nenhum) substitui o anterior.
+            self._frase_do_recap = None
+        if interpretacao.intencao in (INTENCAO_CORTESIA, INTENCAO_SOCIAL, INTENCAO_MEMORIA):
+            return
+        pedido = self._pedido_do_desfecho(desfecho)
+        numero = self.frases_recentes.acrescentar(
+            interpretacao.texto,
+            interpretacao.intencao,
+            pedido.projeto if pedido is not None else interpretacao.projeto,
+            pedido.prompt if pedido is not None and pedido.prompt else interpretacao.prompt,
+            estado,
+        )
+        if estado == "pendente":
+            self._frase_do_recap = numero
+
+    @staticmethod
+    def _pedido_do_desfecho(desfecho: Desfecho | None) -> Pedido | None:
+        if desfecho is None:
+            return None
+        if desfecho.pedido is not None:
+            return desfecho.pedido
+        return desfecho.recap.pedido if desfecho.recap is not None else None
+
+    def _desfecho_do_recap(self, desfecho: Desfecho | None) -> None:
+        """Atualiza a frase do recap pendente com o desfecho (sim, nao, correcao, prazo)."""
+        numero = self._frase_do_recap
+        if numero is None or desfecho is None:
+            return
+        pedido = self._pedido_do_desfecho(desfecho)
+        self.frases_recentes.atualizar(numero, desfecho.estado, pedido.prompt if pedido is not None else None)
+        if not self.confirmacao.a_espera:
+            self._frase_do_recap = None
+
+    # -- memoria: conversa recente e caderno de factos
+
+    def _nomes_de_projeto(self) -> tuple[str, ...]:
+        return tuple(projeto.nome for projeto in self.config.projetos)
+
+    def _memoria(self, interpretacao: Interpretacao) -> Desfecho:
+        """Um comando da memoria. Guardar ou apagar um facto passa pelo recap e pelo "sim"."""
+        comando = interpretacao.detalhe
+        if comando == "nova_conversa":
+            quantas = self.historico.limpar()
+            # A conversa nova tambem comeca sem as frases recentes do interprete.
+            self.frases_recentes.limpar()
+            self._frase_do_recap = None
+            self._marcar_decisao(f"memoria: conversa recente esquecida ({quantas} troca(s))")
+            self._dizer(self._texto("memoria_nova_conversa"))
+            return Desfecho("executado", "memoria: nova conversa")
+        if self.caderno is None:
+            self._marcar_decisao("memoria: caderno indisponivel, nada feito")
+            self._dizer(self._texto("memoria_sem_caderno"))
+            return Desfecho("falhou", "memoria: caderno indisponivel")
+        if comando == "listar":
+            return self._listar_factos()
+        if comando == "lembrar":
+            facto = texto_do_facto(interpretacao.prompt)
+            if not facto:
+                self._marcar_decisao("memoria: lembrar sem facto, nada guardado")
+                self._dizer(self._texto("memoria_sem_facto"))
+                return Desfecho("nao_percebido", "memoria: lembrar sem facto")
+            motivo = recusa_do_facto(facto, self._nomes_de_projeto())
+            if motivo is not None:
+                # Recusado antes do recap: o facto nunca e dito nem escrito.
+                self._marcar_decisao(f"memoria: facto recusado ({motivo}), nada guardado")
+                self._dizer(self._texto(f"memoria_recusado_{motivo}"))
+                return Desfecho("recusado", f"memoria: facto com {motivo}")
+            if facto in self.caderno.factos():
+                self._marcar_decisao("memoria: facto ja guardado, nada mudou")
+                self._dizer(self._texto("memoria_ja_sei"))
+                return Desfecho("ignorado", "memoria: facto ja guardado")
+            if not self.caderno.cabe(facto):
+                self._marcar_decisao("memoria: caderno cheio, nada guardado")
+                self._dizer(self._texto("memoria_cheio"))
+                return Desfecho("recusado", "memoria: caderno cheio")
+            return self.confirmacao.iniciar(
+                Interpretacao(
+                    interpretacao.texto, INTENCAO_LEMBRAR_FACTO, None, facto, "regra", "memoria: guardar um facto"
+                )
+            )
+        if comando == "esquecer":
+            alvo = facto_mais_parecido(interpretacao.prompt, self.caderno.factos())
+            if alvo is None:
+                self._marcar_decisao("memoria: nenhum facto parecido, nada apagado")
+                self._dizer(self._texto("memoria_nada_parecido"))
+                return Desfecho("ignorado", "memoria: nenhum facto parecido")
+            return self.confirmacao.iniciar(
+                Interpretacao(
+                    interpretacao.texto, INTENCAO_ESQUECER_FACTO, None, alvo, "regra", "memoria: apagar um facto"
+                )
+            )
+        return self.confirmacao.iniciar(interpretacao)
+
+    def _listar_factos(self) -> Desfecho:
+        """Le o caderno localmente: um resumo curto na voz e a lista inteira no ecra."""
+        factos = self.caderno.factos() if self.caderno is not None else ()
+        self._marcar_decisao(f"memoria: {len(factos)} facto(s) lidos localmente, nada enviado")
+        for numero, facto in enumerate(factos, start=1):
+            self.log.linha(f"ecra | {numero}. {facto}")
+        if not factos:
+            self._dizer(self._texto("memoria_vazia"))
+        elif len(factos) == 1:
+            self._dizer(self._texto("memoria_um", facto=factos[0]))
+        else:
+            self._dizer(self._texto("memoria_lista", n=str(len(factos))))
+        return Desfecho("executado", "memoria: lista dos factos")
+
+    def _gravar_facto(self, pedido: Pedido) -> object:
+        """Grava ou apaga o facto confirmado com "sim". O caderno volta a verificar tudo."""
+        if self.caderno is None:
+            self._dizer(self._texto("memoria_sem_caderno"))
+            return None
+        try:
+            if pedido.intencao == INTENCAO_LEMBRAR_FACTO:
+                feito = self.caderno.acrescentar(pedido.prompt)
+                self.log.linha("memoria | facto confirmado e guardado no caderno")
+                self._dizer(self._texto("memoria_guardado"))
+            else:
+                feito = self.caderno.apagar(pedido.prompt)
+                self.log.linha(
+                    "memoria | facto confirmado e apagado do caderno" if feito else "memoria | o facto ja nao existia"
+                )
+                self._dizer(self._texto("memoria_apagado"))
+        except FactoRecusado as erro:
+            motivo = str(erro) if str(erro) in ("segredo", "financeiro") else "segredo"
+            self.log.linha(f"memoria | facto recusado ao gravar ({erro}); nada guardado")
+            self._dizer(self._texto(f"memoria_recusado_{motivo}"))
+            return None
+        except CadernoCheio as erro:
+            self.log.linha(f"memoria | caderno cheio ({erro}); nada guardado")
+            self._dizer(self._texto("memoria_cheio"))
+            return None
+        except OSError as erro:
+            self.log.linha(f"memoria | ERRO a escrever o caderno ({erro.__class__.__name__}); nada mudou")
+            self._dizer(self._texto("memoria_falhou"))
+            return None
+        return feito
 
     # -- saida para o ecra e para a voz
 
@@ -1546,6 +1784,8 @@ class Jarvis:
             return resposta
         if intencao == INTENCAO_PERGUNTA_GERAL:
             return self._perguntar(pedido.prompt)
+        if intencao in (INTENCAO_LEMBRAR_FACTO, INTENCAO_ESQUECER_FACTO):
+            return self._gravar_facto(pedido)
         if intencao in INTENCOES_DO_CANAL and pedido.projeto:
             if self.canal is None:
                 self.log.linha("canal | indisponivel: o prompt confirmado NAO foi enviado")
@@ -1616,7 +1856,9 @@ class Jarvis:
             self.log.linha(f"pergunta | recusada (pedido financeiro, '{termo}'): nada saiu do PC")
             self._dizer(self._texto("pergunta_recusada"))
             return None
-        consulta = self.perguntas.nova(pergunta)
+        trocas = self.historico.trocas()
+        factos = self.caderno.factos_para_contexto() if self.caderno is not None else ()
+        consulta = self.perguntas.nova(pergunta, trocas=trocas, factos=factos)
         fio = threading.Thread(target=self._consultar, args=(consulta,), name="jarvis-pergunta", daemon=True)
         with self._tranca_da_pergunta:
             anterior, self._consulta = self._consulta, consulta
@@ -1625,7 +1867,8 @@ class Jarvis:
             self.log.linha("pergunta | a anterior foi substituida por uma nova; a resposta dela nao se diz")
         self.log.linha(
             f"pergunta | ao Claude Code ({self.perguntas.config.modelo}, so pesquisa na web, "
-            f"limite {self.perguntas.config.limite_s:g} s): {consulta.pergunta!r}"
+            f"limite {self.perguntas.config.limite_s:g} s, memoria: {len(trocas)} troca(s) e "
+            f"{len(factos)} facto(s)): {consulta.pergunta!r}"
         )
         fio.start()
         # "Let me check." nao abre a janela: a resposta, quando chegar, abre.
@@ -1666,11 +1909,25 @@ class Jarvis:
                 return
             if self.estado.adormecido:
                 return
+            if estado == "respondida":
+                self._lembrar_troca(consulta.pergunta, falar)
             self._local.registo = None
             self._local.medida = None
             self._dizer(falar)
             self._assentar_escuta()
             self._mostrar_repouso()
+
+    def _lembrar_troca(self, pergunta: str, falado: str) -> None:
+        """Guarda no historico a pergunta respondida e a resposta como e dita, sem o prefixo.
+
+        Uma frase de recurso (resposta vazia ou so tecnica) nao e uma resposta: nao entra.
+        """
+        recursos = {frase for frases in FRASES_DE_RECURSO.values() for frase in frases.values()}
+        if not falado or falado in recursos:
+            return
+        prefixo = prefixo_da_resposta(self.lingua)
+        resposta = falado[len(prefixo):].strip() if falado.startswith(prefixo) else falado
+        self.historico.acrescentar(pergunta, resposta)
 
     def _cancelar_pergunta(self, motivo: str) -> None:
         """A pergunta em curso deixa de ser dita e o processo dela e morto."""
@@ -1699,6 +1956,7 @@ class Jarvis:
             self._local.medida = None
             # Uma resposta a meio de ser dita ou transcrita ainda conta: o prazo espera por ela.
             desfecho = None if self._alguem_a_responder() else self.confirmacao.verificar_tempo()
+            self._desfecho_do_recap(desfecho)
             if desfecho is not None:
                 self.log.linha(f"confirmacao | {desfecho.estado}: {desfecho.motivo}")
                 # O aviso de que cancelou nao abre a janela de seguimento.
@@ -2109,6 +2367,9 @@ def _arrancar_e_correr(
         pastas_proibidas=[RAIZ, *(projeto.caminho for projeto in config.projetos)],
         nomes_de_projeto=[projeto.nome for projeto in config.projetos],
     )
+    caderno = CadernoDeFactos.da_config(
+        config.memoria, nomes_de_projeto=[projeto.nome for projeto in config.projetos], registar=log.linha
+    )
     jarvis = Jarvis(
         config,
         log,
@@ -2118,6 +2379,7 @@ def _arrancar_e_correr(
         com_voz=com_voz,
         painel=Painel(log.linha, titulo=not modo_ficheiro),
         sons=construir_sons(config, modo_ficheiro=modo_ficheiro, com_som=args.com_som),
+        caderno=caderno,
     )
     jarvis.canal = construir_canal(config, log, ao_evento=jarvis.avisos.receber)
     sem_bolinha = modo_ficheiro or args.sem_bolinha or bool(os.environ.get(VARIAVEL_SEM_BOLINHA))

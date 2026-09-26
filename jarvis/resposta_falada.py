@@ -90,6 +90,11 @@ texto; o texto a volta fica. Uma linha que era so enfase ou um item de lista sem
 ganha um ponto, para nao se colar a frase seguinte. Os titulos (`## x`) saem inteiros da voz, sem
 levar com eles o paragrafo de baixo. Nada disto enfraquece a exclusao: o filtro corre a seguir, sobre o texto ja limpo.
 
+FONTES: uma linha que abre uma seccao de fontes, referencias ou links (`Sources:`, `References:`,
+`Links:`, `Fontes:`, `Referências:`, tambem como titulo markdown ou a negrito) e tudo o que vem
+depois dela ficam fora da voz. A palavra na prosa ("Sources say ...") nao corta nada. Se a
+resposta era so fontes, cai a frase de recurso; o ecra e o log mostram a resposta inteira.
+
 RESPOSTAS LONGAS: so as primeiras frases (no maximo `MAXIMO_FRASES_FALADAS`) vao a voz, dentro
 dos limites de caracteres; a resposta inteira fica no ecra e no log.
 
@@ -584,6 +589,32 @@ def _juntar(linhas: list[str]) -> str:
     return " ".join(" ".join(linhas).replace("`", "").split())
 
 
+#: Linha que abre uma seccao de fontes, referencias ou links, em ingles ou portugues, com ou sem
+#: marcacao markdown (`Sources:`, `## References`, `**Fontes:**`, `- Links:`). A palavra tem de
+#: estar sozinha na linha ou seguida de dois pontos: "Sources say the match ended 2-1" e prosa e
+#: continua a falar-se.
+_PADRAO_SECCAO_DE_FONTES = re.compile(
+    r"^[\s>#*_\-•]*(?:\d{1,3}[.)]\s*)?[*_]{0,3}\s*"
+    r"(?:sources?|references?|links?|citations?|further reading|read more"
+    r"|fontes?|refer[eê]ncias?|liga[cç][oõ]es|ler mais|para saber mais)"
+    r"\s*[*_]{0,3}\s*(?::|[*_]{0,3}\s*$)",
+    re.IGNORECASE,
+)
+
+
+def sem_seccao_de_fontes(texto: str) -> str:
+    """O texto ate a primeira linha que abre uma seccao de fontes/referencias/links, exclusive.
+
+    A lista de fontes nunca e lida em voz alta (nem os titulos dos links): o que vem depois
+    desse titulo sai todo da voz. O ecra e o log continuam a mostrar a resposta inteira.
+    """
+    linhas = (texto or "").splitlines()
+    for indice, linha in enumerate(linhas):
+        if _PADRAO_SECCAO_DE_FONTES.match(linha):
+            return "\n".join(linhas[:indice])
+    return texto or ""
+
+
 def texto_falavel(resposta: str, *, resgatar_perguntas: bool = False) -> str:
     """So o que passa o filtro por exclusao, numa unica linha, sem crases nem espacos a mais.
 
@@ -597,7 +628,7 @@ def texto_falavel(resposta: str, *, resgatar_perguntas: bool = False) -> str:
     na frase de recurso (inteiro ou nada, nunca meio). Se o texto so fica proibido por causa de
     uma pergunta resgatada, fica o texto sem ela.
     """
-    sem_blocos = _sem_blocos_de_tres_crases(resposta or "")
+    sem_blocos = sem_seccao_de_fontes(_sem_blocos_de_tres_crases(resposta or ""))
     junto = _juntar(_linhas_falaveis(sem_blocos, resgatar_perguntas=resgatar_perguntas))
     if resgatar_perguntas and texto_proibido(junto):
         junto = _juntar(_linhas_falaveis(sem_blocos))

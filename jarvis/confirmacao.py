@@ -14,6 +14,10 @@ Recebe a `Interpretacao` de uma frase e decide:
     ou a pasta, lancar, retomar ou parar um run, responder numa conversa) e
     ficam PENDENTES: o jarvis mostra na consola o que percebeu e o texto
     exato a enviar, e diz em voz alta um resumo com no maximo duas frases;
+  - guardar ou apagar um facto do caderno da memoria (`lembrar_facto`,
+    `esquecer_facto`, vindos do jarvis depois de `jarvis.memoria` aceitar o
+    facto) tambem fica pendente: o recap diz o facto e so um "sim" o grava
+    ou apaga; uma correcao nao se aplica a um facto (diz-se outra vez);
   - a unica excecao e `enviar_sem_recap`: uma resposta curta a uma pergunta
     do Claude, dita na janela de conversa (`jarvis.conversa`), vai logo.
 
@@ -87,6 +91,18 @@ from jarvis.router import _normalizar, encaminhar
 #: quando o projeto e conhecido. Sem projeto, o jarvis pergunta qual e corre
 #: logo que ele e dito. Lancar, retomar e parar um run continuam a confirmar.
 INTENCOES_SO_DE_LEITURA = frozenset({"estado", "ler_relatorio"})
+
+#: Guardar e apagar um facto do caderno da memoria: fora do esquema do LLM,
+#: so o jarvis as cria (`jarvis.memoria` ja verificou o facto), e so correm
+#: depois de um "sim" ao recap que diz o facto.
+INTENCAO_LEMBRAR_FACTO = "lembrar_facto"
+INTENCAO_ESQUECER_FACTO = "esquecer_facto"
+INTENCOES_DA_MEMORIA = frozenset({INTENCAO_LEMBRAR_FACTO, INTENCAO_ESQUECER_FACTO})
+
+#: Tudo o que fica pendente de um recap e de um "sim".
+_INTENCOES_COM_RECAP = INTENCOES_COM_EFEITO | INTENCOES_DA_MEMORIA
+#: Intencoes cujo texto aparece no recap e vai no pedido.
+_INTENCOES_COM_TEXTO = INTENCOES_COM_PROMPT | INTENCOES_DA_MEMORIA
 
 #: No maximo este numero de palavras do prompt e dito em voz alta; um prompt
 #: mais longo e resumido na voz e mostrado inteiro na consola.
@@ -510,6 +526,8 @@ _ACOES_PT = {
     "abrir_pasta": "Abrir a pasta do {p}",
     "estado": "Ver o estado do {p}",
     "ler_relatorio": "Ler o relatório do {p}",
+    "lembrar_facto": "Lembrar",
+    "esquecer_facto": "Esquecer",
 }
 _ACOES_EN = {
     "ditar_prompt": "To {p}",
@@ -521,6 +539,8 @@ _ACOES_EN = {
     "abrir_pasta": "Open the folder of {p}",
     "estado": "Check the status of {p}",
     "ler_relatorio": "Read the report of {p}",
+    "lembrar_facto": "Remember",
+    "esquecer_facto": "Forget",
 }
 _SEM_PROJETO = {
     "pt": {"conversa": "Responder ao Claude", "projeto": "que projeto", "marcador": "<projeto>"},
@@ -545,6 +565,14 @@ _FRASES = {
         "ecra_enviar": "Texto a enviar:",
         "ecra_ajuda": 'Diz "sim" para enviar, ou "aborta" ("cancela" também serve). Para corrigir: "não, muda X para Y" ou "acrescenta ...".',
         "ecra_falta_projeto": "Falta o projeto: diz o nome do projeto, ou \"aborta\".",
+        "guardar": "Guardo?",
+        "apagar": "Apago?",
+        "ecra_guardar": "Facto a guardar:",
+        "ecra_apagar": "Facto a apagar:",
+        "ecra_ajuda_memoria": 'Diz "sim" para confirmar, ou "aborta" ("cancela" também serve).',
+        "cancelado_memoria": "Cancelado, não mudei nada na memória.",
+        "expirado_memoria": "Sem resposta, cancelei. Não mudei nada na memória.",
+        "de_novo_memoria": "Diz sim para confirmar, ou aborta.",
     },
     "en": {
         "enviar": "Send it?",
@@ -563,6 +591,14 @@ _FRASES = {
         "ecra_enviar": "Text to send:",
         "ecra_ajuda": 'Say "yes" to send, or "abort" ("cancel" works too). To correct: "no, change X to Y" or "add ...".',
         "ecra_falta_projeto": "Missing project: say the project name, or \"abort\".",
+        "guardar": "Save it?",
+        "apagar": "Delete it?",
+        "ecra_guardar": "Fact to save:",
+        "ecra_apagar": "Fact to delete:",
+        "ecra_ajuda_memoria": 'Say "yes" to confirm, or "abort" ("cancel" works too).',
+        "cancelado_memoria": "Cancelled, my memory is unchanged.",
+        "expirado_memoria": "No answer, so I cancelled. My memory is unchanged.",
+        "de_novo_memoria": "Say yes to confirm, or abort.",
     },
 }
 
@@ -590,7 +626,8 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
     acoes = _ACOES_EN if lingua == "en" else _ACOES_PT
     intencao, projeto = interpretacao.intencao, interpretacao.projeto
     # O texto mostrado e o texto enviado sao o mesmo objeto, numa so linha.
-    prompt = limpar_texto(interpretacao.prompt) if intencao in INTENCOES_COM_PROMPT else ""
+    prompt = limpar_texto(interpretacao.prompt) if intencao in _INTENCOES_COM_TEXTO else ""
+    memoria = intencao in INTENCOES_DA_MEMORIA
     pedido = Pedido(intencao, projeto, prompt, interpretacao.detalhe)
     falta_projeto = intencao in INTENCOES_COM_PROJETO and projeto is None
 
@@ -604,7 +641,10 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
         pergunta = pergunta[0].upper() + pergunta[1:]
         fala = f"{frases['sem_projeto']}. {pergunta}"
     else:
-        pergunta = frases["enviar"] if prompt else frases["confirmar"]
+        if memoria:
+            pergunta = frases["guardar" if intencao == INTENCAO_LEMBRAR_FACTO else "apagar"]
+        else:
+            pergunta = frases["enviar"] if prompt else frases["confirmar"]
         if not prompt:
             fala = f"{acao}. {pergunta}"
         else:
@@ -623,11 +663,16 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
             intencao=nome_da_intencao, projeto=f" | projeto: {projeto}" if projeto else ""
         )
     ]
-    if prompt:
+    if prompt and memoria:
+        linhas += [frases["ecra_guardar" if intencao == INTENCAO_LEMBRAR_FACTO else "ecra_apagar"], prompt]
+    elif prompt:
         linhas += [frases["ecra_enviar"], prompt]
     else:
         linhas.append(acao)
-    linhas.append(frases["ecra_falta_projeto"] if falta_projeto else frases["ecra_ajuda"])
+    if falta_projeto:
+        linhas.append(frases["ecra_falta_projeto"])
+    else:
+        linhas.append(frases["ecra_ajuda_memoria" if memoria else "ecra_ajuda"])
     return Recap(numero, pedido, fala, "\n".join(linhas), pergunta, falta_projeto)
 
 
@@ -701,6 +746,12 @@ class Confirmacao:
     def _texto(self, chave: str, **valores: str) -> str:
         return _FRASES[self.lingua][chave].format(**valores)
 
+    def _texto_do(self, recap: Recap | None, chave: str) -> str:
+        """A frase `chave`, na forma da memoria quando o recap e de um facto."""
+        if recap is not None and recap.pedido.intencao in INTENCOES_DA_MEMORIA:
+            return self._texto(f"{chave}_memoria")
+        return self._texto(chave)
+
     def _limpar(self) -> None:
         self._pendente = None
         self._recap = None
@@ -729,8 +780,8 @@ class Confirmacao:
             return self._correr(pedido, None, "pergunta geral: so le, dispensa confirmacao")
         if interpretacao.intencao in INTENCOES_SO_DE_LEITURA and interpretacao.projeto and not interpretacao.so_confirmacao:
             return self._correr(_pedido_de_leitura(interpretacao), None, "so leitura: dispensa confirmacao")
-        sem_texto = interpretacao.intencao in INTENCOES_COM_PROMPT and not limpar_texto(interpretacao.prompt)
-        if interpretacao.so_confirmacao or interpretacao.intencao not in INTENCOES_COM_EFEITO or sem_texto:
+        sem_texto = interpretacao.intencao in _INTENCOES_COM_TEXTO and not limpar_texto(interpretacao.prompt)
+        if interpretacao.so_confirmacao or interpretacao.intencao not in _INTENCOES_COM_RECAP or sem_texto:
             if interpretacao.texto:
                 self._mostrar(f"confirmacao | nao percebi: {interpretacao.texto}")
             self._falar(self._texto("nao_percebi"))
@@ -854,7 +905,7 @@ class Confirmacao:
             return self._correr(recap.pedido, recap, "confirmado")
         if acao == "cancelar":
             self._mostrar("confirmacao | cancelado; nada foi enviado")
-            self._falar(self._texto("cancelado"))
+            self._falar(self._texto_do(recap, "cancelado"))
             return Desfecho("cancelado", "cancelado pelo utilizador", recap=recap)
         if acao == "recusar":
             self._mostrar("confirmacao | resposta recusada (pedido financeiro); nada foi enviado")
@@ -862,11 +913,11 @@ class Confirmacao:
             return Desfecho("recusado", "pedido financeiro na resposta ao projeto", recap=recap)
         if acao == "desistir":
             self._mostrar("confirmacao | cancelado depois de respostas que nao percebi; nada foi enviado")
-            self._falar(self._texto("cancelado"))
+            self._falar(self._texto_do(recap, "cancelado"))
             return Desfecho("cancelado", f"{TENTATIVAS} respostas sem confirmar nem corrigir", recap=recap)
         if acao == "de_novo":
             try:
-                self._falar(recap.pergunta if recap.falta_projeto else self._texto("de_novo"))
+                self._falar(recap.pergunta if recap.falta_projeto else self._texto_do(recap, "de_novo"))
             finally:
                 with self._trinco:
                     if self._pendente is pendente:
@@ -934,6 +985,10 @@ class Confirmacao:
     def _aplicar_correcao(
         self, pendente: Interpretacao, recap: Recap, edicao: str, tipo: str
     ) -> Desfecho:
+        if pendente.intencao in INTENCOES_DA_MEMORIA:
+            # Um facto nao se reescreve pelo LLM: diz-se outra vez, inteiro.
+            self._mostrar("confirmacao | correcao nao aplicada: um facto diz-se outra vez, inteiro")
+            return self._propor(pendente, fala=self._texto("correcao_falhou", pergunta=recap.pergunta))
         try:
             nova = self.interprete.corrigir(pendente, edicao, tipo)
         except Exception as erro:  # noqa: BLE001 - uma falha nunca envia nada
@@ -968,7 +1023,7 @@ class Confirmacao:
             recap = self._recap
             self._limpar()
         self._mostrar(f"confirmacao | sem resposta em {self.limite_s:g} s: cancelado; nada foi enviado")
-        self._falar(self._texto("expirado"))
+        self._falar(self._texto_do(recap, "expirado"))
         return Desfecho("expirado", f"sem resposta em {self.limite_s:g} s", recap=recap)
 
     def cancelar(self, motivo: str) -> Desfecho | None:

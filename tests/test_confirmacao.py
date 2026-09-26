@@ -30,6 +30,9 @@ from jarvis.config import (
 )
 from jarvis.confirmacao import (
     FRASES_DE_CONFIRMAR,
+    INTENCAO_ESQUECER_FACTO,
+    INTENCAO_LEMBRAR_FACTO,
+    INTENCOES_DA_MEMORIA,
     INTENCOES_SO_DE_LEITURA,
     PALAVRAS_DE_CONFIRMAR,
     PALAVRAS_DE_CORTESIA,
@@ -1569,6 +1572,74 @@ class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
         self.assertEqual(novo.recap.pedido.projeto, "atlas")
         self.assertTrue(self.falas[-1].startswith("Responder ao Claude no atlas: "), self.falas[-1])
         self.assertEqual(self.canal.recebidos, [])
+
+
+# --- Factos do caderno da memoria -------------------------------------------------
+
+
+class TestFactosDaMemoria(Base):
+    lingua = "en"
+
+    def facto(self, intencao: str = INTENCAO_LEMBRAR_FACTO, texto: str = "My favourite team is Benfica.") -> Interpretacao:
+        return Interpretacao("frase", intencao, None, texto, "regra", "teste")
+
+    def test_guardar_um_facto_tem_recap_e_so_corre_depois_do_sim(self) -> None:
+        confirmacao = self.montar()
+        desfecho = confirmacao.iniciar(self.facto())
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(self.falas, ["Remember: My favourite team is Benfica. Save it?"])
+        self.assertIn("Fact to save:", self.ecra[-1])
+        self.assertEqual(self.canal.recebidos, [])
+        self.relogio.avancar(1)
+        desfecho = confirmacao.responder("yes")
+        self.assertEqual(desfecho.estado, "executado")
+        self.assertEqual(
+            self.canal.recebidos, [Pedido(INTENCAO_LEMBRAR_FACTO, None, "My favourite team is Benfica.")]
+        )
+
+    def test_apagar_um_facto_tem_recap(self) -> None:
+        confirmacao = self.montar(lingua="pt")
+        confirmacao.iniciar(self.facto(INTENCAO_ESQUECER_FACTO, "Moro em Braga."))
+        self.assertEqual(self.falas, ["Esquecer: Moro em Braga. Apago?"])
+        self.assertIn("Facto a apagar:", self.ecra[-1])
+
+    def test_abort_e_prazo_nao_correm_nada(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.facto())
+        self.relogio.avancar(1)
+        self.assertEqual(confirmacao.responder("abort").estado, "cancelado")
+        self.assertEqual(self.falas[-1], "Cancelled, my memory is unchanged.")
+        confirmacao.iniciar(self.facto())
+        self.relogio.avancar(ESPERA_DA_CONFIRMACAO_S + 1)
+        self.assertEqual(confirmacao.verificar_tempo().estado, "expirado")
+        self.assertEqual(self.falas[-1], "No answer, so I cancelled. My memory is unchanged.")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_resposta_que_nao_se_percebe_pede_sim_ou_aborta(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.facto())
+        self.relogio.avancar(1)
+        confirmacao.responder("banana")
+        self.assertEqual(self.falas[-1], "Say yes to confirm, or abort.")
+
+    def test_correcao_nunca_vai_ao_llm(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.facto())
+        self.relogio.avancar(1)
+        desfecho = confirmacao.responder("no, change Benfica to Porto")
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(self.llm.pedidos, [])
+        self.assertEqual(desfecho.recap.pedido.prompt, "My favourite team is Benfica.")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_facto_vazio_nao_faz_recap(self) -> None:
+        confirmacao = self.montar()
+        self.assertEqual(confirmacao.iniciar(self.facto(texto="  ")).estado, "nao_percebido")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_ficam_fora_do_esquema_do_llm(self) -> None:
+        for intencao in INTENCOES_DA_MEMORIA:
+            self.assertNotIn(intencao, INTENCOES)
 
 
 if __name__ == "__main__":
