@@ -12,11 +12,13 @@ um unico callback, por dois gatilhos:
 
 Janela de escuta: `abrir_escuta(segundos, para=...)` abre uma escuta como a
 das maos-livres, mas sem palavra de ativacao: a resposta a um recap pendente
-(`ESCUTA_RECAP`) ou a conversa com o Claude, quando ele faz uma pergunta
-(`ESCUTA_CONVERSA`). Se ninguem comecar a falar dentro do prazo, fecha
+(`ESCUTA_RECAP`), a conversa com o Claude, quando ele faz uma pergunta
+(`ESCUTA_CONVERSA`), ou o seguimento depois de qualquer resposta falada
+(`ESCUTA_SEGUIMENTO`). Se ninguem comecar a falar dentro do prazo, fecha
 sozinha. So existe com VAD; sem ele, fica a tecla de falar. A espera de fala
-so guarda os ultimos 300 ms de audio, e a resposta ao recap deita fora o
-primeiro meio segundo, onde ainda pode soar o fim da voz do jarvis.
+so guarda os ultimos 300 ms de audio, e todas estas escutas deitam fora o
+primeiro meio segundo, onde ainda pode soar o fim da voz do jarvis ou o som
+de abertura da escuta.
 
 Palavra de ativacao da lingua do config ([ouvido].lingua): "hey jarvis" em
 ingles (modelo pre-treinado do openWakeWord) e "boas jarvis" em portugues
@@ -44,7 +46,9 @@ tecla corresponde sempre ao audio que acabou de chegar.
 
 Sinais de escuta: cada inicio e fim de escuta escreve uma linha na consola
 (sempre) e, so com `com_som=True` (a flag --com-som), toca um bip curto numa
-thread a parte. Nenhum teste nem autoteste toca som.
+thread a parte. Nas escutas sem palavra de ativacao nao ha bip: ai quem toca
+os sons de abrir e fechar e o jarvis (`jarvis.sinais`), e os tons nunca se
+somam. Nenhum teste nem autoteste toca som.
 
 Uso:
 
@@ -99,10 +103,10 @@ CHUNKS_PARA_COMECAR_A_FALA = 3
 #: guardados (300 ms antes do inicio da fala), nunca o silencio todo da espera.
 #: Assim o teto da frase conta desde o inicio da fala e nao desde a abertura.
 CHUNKS_ANTES_DA_FALA = 10
-#: A resposta ao recap abre quando a voz do jarvis devolve o controlo, mas o fim
-#: do recap ("Send it?") ainda pode estar no buffer da placa de som e do
-#: microfone. O audio deste intervalo e deitado fora: nem conta para o VAD nem
-#: entra na frase.
+#: Uma escuta sem palavra de ativacao abre quando a voz do jarvis devolve o
+#: controlo, mas o fim da fala ("Send it?") e o som de abertura da escuta ainda
+#: podem estar no buffer da placa de som e do microfone. O audio deste intervalo
+#: e deitado fora: nem conta para o VAD nem entra na frase.
 GUARDA_APOS_A_VOZ_S = 0.5
 #: Silencio que fecha a frase das maos-livres.
 SILENCIO_FINAL_S = 0.6
@@ -193,13 +197,19 @@ MAXIMO_DO_WAV_MEDIDO_S = 5.0
 
 GATILHO_TECLA = "tecla"
 GATILHO_ATIVACAO = "ativacao"
-#: Escuta aberta pelo jarvis (resposta ao recap ou conversa), sem palavra de ativacao.
+#: Escuta aberta pelo jarvis (resposta ao recap, conversa ou seguimento), sem palavra de ativacao.
 GATILHO_JANELA = "janela"
 
 #: Para que e a janela de escuta sem palavra de ativacao.
 ESCUTA_CONVERSA = "conversa"
 ESCUTA_RECAP = "recap"
-_NOMES_DAS_ESCUTAS = {ESCUTA_CONVERSA: "janela de conversa", ESCUTA_RECAP: "resposta ao recap"}
+#: Depois de qualquer resposta falada: continuar sem "hey jarvis".
+ESCUTA_SEGUIMENTO = "seguimento"
+_NOMES_DAS_ESCUTAS = {
+    ESCUTA_CONVERSA: "janela de conversa",
+    ESCUTA_RECAP: "resposta ao recap",
+    ESCUTA_SEGUIMENTO: "escuta de seguimento",
+}
 
 
 @dataclass(frozen=True)
@@ -652,7 +662,7 @@ class Ouvido:
         #: Inicio de uma janela cujo audio e deitado fora (ver GUARDA_APOS_A_VOZ_S).
         self._guarda_s = 0.0
         #: Prazo (no relogio) de uma janela de escuta pedida e ainda por abrir,
-        #: e para que e (`ESCUTA_RECAP` ou `ESCUTA_CONVERSA`).
+        #: e para que e (`ESCUTA_RECAP`, `ESCUTA_CONVERSA` ou `ESCUTA_SEGUIMENTO`).
         self._janela_ate: float | None = None
         self._janela_para = ESCUTA_CONVERSA
         #: Para que e a janela aberta agora (a espera de fala ou ja com ela).
@@ -692,7 +702,8 @@ class Ouvido:
         seta = ">>> A OUVIR" if tipo == "inicio" else "<<< FIM DA ESCUTA"
         self.escrever(f"ouvido | {seta} | {detalhe}")
         self._avisar(tipo)
-        if self.com_som:
+        # Nas escutas sem palavra de ativacao os sons sao do jarvis, nao do bip.
+        if self.com_som and self._gatilho != GATILHO_JANELA:
             try:
                 self.tocar(tipo)
             except Exception:  # noqa: BLE001 - um bip falhado nunca para a escuta
@@ -860,7 +871,8 @@ class Ouvido:
                     self._escuta = self._janela_para
                     self._espera_pela_fala_s = janela_ate - agora
                     self._surdez_s = 0.0
-                    self._guarda_s = GUARDA_APOS_A_VOZ_S if self._escuta == ESCUTA_RECAP else 0.0
+                    # Todas abrem logo depois da voz (e do som de abertura).
+                    self._guarda_s = GUARDA_APOS_A_VOZ_S
                     self._aguardado_s = 0.0
                     self._inicio = agora
                     self._buffer = []

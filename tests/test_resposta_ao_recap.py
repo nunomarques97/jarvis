@@ -18,7 +18,9 @@ tocar som. O que protegem:
   * uma resposta que comeca no fim da escuta chega inteira ao motor (o teto
     da frase conta desde o inicio da fala) e o fim da voz do jarvis que ainda
     soa quando a escuta abre nunca entra na resposta;
-  * sem recap pendente nada e ouvido sem palavra de ativacao nem tecla.
+  * sem recap pendente so a janela de seguimento (depois de qualquer resposta
+    falada) ouve sem palavra de ativacao; fechada ela, nada e ouvido sem
+    palavra de ativacao nem tecla.
 
 Corre com:
 
@@ -31,8 +33,18 @@ import unittest
 from types import SimpleNamespace
 
 from jarvis import app
-from jarvis.app import A_ESPERA_A_OUVIR, A_OUVIR
-from jarvis.ouvido import BYTES_POR_CHUNK, DURACAO_DO_CHUNK_S, ESCUTA_RECAP, GATILHO_JANELA, GATILHO_TECLA, Ouvido
+from jarvis.app import A_ESPERA_A_OUVIR, A_OUVIR, A_OUVIR_TE
+from jarvis.config import ConfigEscuta
+from jarvis.ouvido import (
+    BYTES_POR_CHUNK,
+    DURACAO_DO_CHUNK_S,
+    ESCUTA_RECAP,
+    ESCUTA_SEGUIMENTO,
+    GATILHO_JANELA,
+    GATILHO_TECLA,
+    GUARDA_APOS_A_VOZ_S,
+    Ouvido,
+)
 from jarvis.voz import ResultadoFala
 from tests.test_app import CanalFalso, LogFalso, Montagem, RelogioFalso, resposta_llm
 from tests.test_ouvido import SILENCIO, MotorFalso, TeclaFixa, VadFalso, chunk, chunks_em
@@ -161,6 +173,16 @@ def _sem_escuta_nada_e_ouvido(teste: unittest.TestCase, cena: Cena) -> None:
     cena.motor.textos.clear()
 
 
+def _seguimento_ate_ao_prazo(teste: unittest.TestCase, cena: Cena) -> None:
+    """Depois de uma resposta falada fica a janela de seguimento; fechada ela, nada e ouvido."""
+    teste.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_SEGUIMENTO)
+    teste.assertEqual(cena.aberturas[-1][1:], (8.0, ESCUTA_SEGUIMENTO, False))
+    teste.assertEqual(cena.jarvis.painel.atual, A_OUVIR_TE)
+    cena.passar(SILENCIO, 8.5, verificar=True)
+    _sem_escuta_nada_e_ouvido(teste, cena)
+    teste.assertEqual(cena.jarvis.painel.atual, A_OUVIR)
+
+
 # --- A escuta abre depois da voz, com o prazo que falta --------------------------
 
 
@@ -225,9 +247,10 @@ class TestRespostaSemPalavraDeAtivacao(unittest.TestCase):
         self.assertEqual(cena.canal.recebidos, [("atlas", "Fix the login test.")])
         self.assertIn("resposta ao recap (escuta sem palavra de ativacao)", cena.log())
         self.assertIn("resposta ao recap pendente", cena.log())
-        _sem_escuta_nada_e_ouvido(self, cena)
+        # "Sent." e uma resposta falada: abre a janela de seguimento, que
+        # nunca envia nada sozinha; fechada ela, nada mais e ouvido.
+        _seguimento_ate_ao_prazo(self, cena)
         self.assertEqual(len(cena.canal.recebidos), 1)
-        self.assertEqual(cena.jarvis.painel.atual, A_OUVIR)
 
     def test_uh_cancel_cancela_sem_enviar(self) -> None:
         cena = Cena([DITADO_EN])
@@ -236,7 +259,9 @@ class TestRespostaSemPalavraDeAtivacao(unittest.TestCase):
         self.assertFalse(cena.jarvis.confirmacao.a_espera)
         self.assertEqual(cena.canal.recebidos, [])
         self.assertEqual(cena.falados[-1], "Cancelled, nothing was sent.")
-        _sem_escuta_nada_e_ouvido(self, cena)
+        # O aviso de que cancelou e uma resposta falada: abre o seguimento.
+        _seguimento_ate_ao_prazo(self, cena)
+        self.assertEqual(cena.canal.recebidos, [])
 
     def test_correcao_faz_recap_novo_e_a_escuta_volta_a_abrir_depois_dele(self) -> None:
         cena = Cena([DITADO_EN, CORRIGIDO_EN])
@@ -496,13 +521,19 @@ class TestCapturaDaResposta(unittest.TestCase):
         self.assertEqual(cena.canal.recebidos, [])
         self.assertTrue(cena.jarvis.confirmacao.a_espera)
 
-    def test_a_janela_de_conversa_nao_tem_guarda(self) -> None:
-        ouvido, frases, linhas, passar, _ = _ouvido_com_escuta(8.0, para="conversa")
-        passar(VOZ, 1.0)
-        passar(SILENCIO, 1.0)
-        self.assertEqual(ouvido.transcrever_pendentes(), 1)
-        # So o chunk em que a escuta abre fica de fora, como sempre.
-        self.assertEqual(ouvido.motor.recebidos[0].count(bytes([VOZ])), (chunks_em(1.0) - 1) * BYTES_POR_CHUNK)
+    def test_as_janelas_de_conversa_e_de_seguimento_tambem_tem_guarda(self) -> None:
+        # Tambem abrem logo depois da voz do jarvis e do som de abertura: o
+        # primeiro meio segundo fica de fora, como na resposta ao recap.
+        for para in ("conversa", ESCUTA_SEGUIMENTO):
+            with self.subTest(para=para):
+                ouvido, frases, linhas, passar, _ = _ouvido_com_escuta(8.0, para=para)
+                passar(VOZ, 1.0)
+                passar(SILENCIO, 1.0)
+                self.assertEqual(ouvido.transcrever_pendentes(), 1)
+                self.assertEqual(
+                    ouvido.motor.recebidos[0].count(bytes([VOZ])),
+                    (chunks_em(1.0) - chunks_em(GUARDA_APOS_A_VOZ_S)) * BYTES_POR_CHUNK,
+                )
 
 
 # --- Prazo -----------------------------------------------------------------------
@@ -565,10 +596,14 @@ class TestSemRecapPendente(unittest.TestCase):
         _sem_escuta_nada_e_ouvido(self, cena)
         self.assertEqual(cena.aberturas, [])
 
-    def test_horas_sem_recap_nao_abre_escuta(self) -> None:
+    def test_horas_sem_recap_abrem_so_a_janela_de_seguimento(self) -> None:
+        # Qualquer resposta falada abre a janela de seguimento (nunca a do
+        # recap); passado o prazo dela nada e ouvido sem palavra de ativacao.
         cena = Cena()
         cena.pedir("hey jarvis, what time is it")
-        _sem_escuta_nada_e_ouvido(self, cena)
+        self.assertFalse(cena.jarvis._a_ouvir_o_recap)
+        self.assertNotIn(ESCUTA_RECAP, [para for _i, _l, para, _f in cena.aberturas])
+        _seguimento_ate_ao_prazo(self, cena)
 
     def test_dorme_durante_o_recap_fecha_a_escuta(self) -> None:
         cena = Cena([DITADO_PT], lingua="pt")
@@ -601,8 +636,8 @@ class TestSemRecapPendente(unittest.TestCase):
 
 
 class TestCabecalho(unittest.TestCase):
-    def _cabecalho(self, vad) -> str:
-        cena = Cena()
+    def _cabecalho(self, vad, **ajustes) -> str:
+        cena = Cena(**ajustes)
         ouvido = SimpleNamespace(
             fonte=SimpleNamespace(descricao="microfone falso"), nome_da_tecla="F8", detetor=None, vad=vad
         )
@@ -615,6 +650,18 @@ class TestCabecalho(unittest.TestCase):
 
     def test_sem_vad_diz_que_e_com_a_tecla(self) -> None:
         self.assertIn("a resposta ao recap diz-se com a tecla de falar, dentro de 30 s", self._cabecalho(None))
+
+    def test_diz_a_janela_de_seguimento_com_os_segundos_por_omissao(self) -> None:
+        self.assertIn(
+            "depois de o jarvis falar: 8 s para continuar sem palavra de ativacao;"
+            " o som e a bolinha (A OUVIR-TE) dizem quando esta a ouvir",
+            self._cabecalho(VadFalso()),
+        )
+
+    def test_a_janela_de_seguimento_usa_os_segundos_configurados(self) -> None:
+        texto = self._cabecalho(VadFalso(), escuta=ConfigEscuta(seguimento_s=12.5))
+        self.assertIn("depois de o jarvis falar: 12.5 s para continuar sem palavra de ativacao", texto)
+        self.assertNotIn("depois de o jarvis falar: 8 s", texto)
 
 
 

@@ -53,9 +53,16 @@ nunca contam. Sem sessão, a evidência fica "PENDENTE — passo do Sponsor".
 8. Usa pedidos que só leem, para não mexer nos projetos: por exemplo "diz ao
    <projeto-1> para listar os ficheiros da pasta docs. Não mudes nada." As
    frases de O QUE DIZER já são assim.
+9. Depois de o jarvis falar tens 8 s para continuar sem "hey jarvis" nem
+   tecla (`[escuta] seguimento_s` no `config.toml`). Um som suave e a bolinha
+   a ouvir (linha de estado `A OUVIR-TE`) indicam quando está a ouvir; um som
+   diferente indica quando deixou de ouvir. A resposta ao recap continua a ter
+   os seus 30 s e a resposta a uma pergunta do Claude a sua janela.
 
 Não faças mais nada com o jarvis durante a sessão: tudo o que ele ouvir dentro
-da janela de uma tarefa conta para essa tarefa.
+da janela de uma tarefa conta para essa tarefa, também o que disseres sem
+"hey jarvis" nos segundos depois de ele falar. Espera pelo som de fecho antes
+de falar com outra pessoa ou de carregar Enter.
 
 ## Como se mede
 

@@ -1107,6 +1107,21 @@ class TestGuiaoEmTexto(unittest.TestCase):
             "O QUE DEVE ACONTECER",
         ):
             self.assertIn(trecho, antes)
+        def normal(texto: str) -> str:
+            return " ".join(texto.replace("`", "").split()).lower()
+
+        ecra = normal(" ".join(ac.ECRA_INICIAL))
+        for trecho in (
+            '8 s para continuar sem "hey jarvis"',
+            "[escuta] seguimento_s",
+            "Um som suave e a bolinha a ouvir",
+            "A OUVIR-TE",
+            "um som diferente indica quando deixou de ouvir",
+            "espera pelo som de fecho",
+        ):
+            with self.subTest(trecho=trecho):
+                self.assertIn(trecho.lower(), normal(antes))
+                self.assertIn(trecho.lower(), ecra)
         fluxos = texto[texto.index("Fluxos"):texto.index("| id |")]
         for trecho in ("ABORT", "YES", "Don't change anything.", "Não mudes nada."):
             self.assertIn(trecho, fluxos)

@@ -59,7 +59,7 @@ from jarvis.app import (
     construir_parser,
     formatar_etapa,
 )
-from jarvis.config import Config, ConfigInterprete, ConfigOuvido, Projeto
+from jarvis.config import Config, ConfigEscuta, ConfigInterprete, ConfigOuvido, Projeto
 from jarvis.interprete import Interprete, MotorIndisponivel, Vram
 from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Frase, TeclaDoFicheiro
 from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE, frase_de_recurso, prefixo_da_resposta
@@ -100,12 +100,15 @@ class LogFalso:
             return "\n".join(self.linhas)
 
 
-def config_de_teste(lingua: str = "pt", *, nomes: tuple[str, ...] = NOMES, **ajustes) -> Config:
+def config_de_teste(
+    lingua: str = "pt", *, nomes: tuple[str, ...] = NOMES, escuta: ConfigEscuta | None = None, **ajustes
+) -> Config:
     return Config(
         microfone="Microfone Ficticio de Teste",
         projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in nomes),
         ouvido=ConfigOuvido(lingua=lingua),
         interprete=ConfigInterprete(**ajustes),
+        escuta=escuta or ConfigEscuta(),
     )
 
 
@@ -171,6 +174,7 @@ class Montagem:
         primeiro_audio_depois_s: float = 0.1,
         nomes: tuple[str, ...] = NOMES,
         perguntas=None,
+        sons=None,
         **ajustes,
     ) -> None:
         self.log = LogFalso()
@@ -214,6 +218,7 @@ class Montagem:
             calar=calar,
             executar_local=executar_local,
             relogio=self.relogio,
+            sons=sons,
         )
 
     def ouvir(

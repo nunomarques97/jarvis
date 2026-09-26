@@ -49,6 +49,11 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     bonus = 1.5                   # forca do reforco, no logit de cada token
     lexico = false                # correcoes aprendidas (models/adaptacao/lexico-en.json)
 
+    [escuta]                      # opcional; sem ela valem os valores por omissao
+    seguimento_s = 8.0            # escuta sem palavra de ativacao depois de o jarvis falar (3 a 30)
+    sons = true                   # som curto quando essa escuta abre e outro quando fecha
+    volume = 0.15                 # volume desses sons (maior do que 0, no maximo 1)
+
 `carregar_config()` le com `tomllib` (biblioteca padrao do Python 3.11+, sem
 dependencia nova), valida a estrutura E os caminhos no disco (um caminho
 de configuracao e entrada externa e verifica-se na leitura, nao se aceita em
@@ -178,6 +183,16 @@ VOZ_INGLESA_PADRAO = "bm_fable"
 BONUS_DE_REFORCO_PADRAO = 1.5
 BONUS_DE_REFORCO_MAXIMO = 10.0
 
+#: Quanto tempo o jarvis continua a ouvir sem palavra de ativacao depois de
+#: acabar de falar, e o intervalo aceite.
+SEGUIMENTO_S = 8.0
+SEGUIMENTO_MINIMO_S = 3.0
+SEGUIMENTO_MAXIMO_S = 30.0
+
+#: Volume dos sons de abertura e fecho da escuta (fracao da escala completa):
+#: baixo por omissao, para marcar sem assustar.
+VOLUME_DOS_SONS_PADRAO = 0.15
+
 
 class ConfigError(Exception):
     """Configuracao em falta, mal formada, ou com um caminho que nao existe."""
@@ -272,6 +287,20 @@ class ConfigAdaptacao:
 
 
 @dataclass(frozen=True)
+class ConfigEscuta:
+    """A escuta sem palavra de ativacao depois de o jarvis falar, e os seus sons.
+
+    `seguimento_s` e quanto tempo se pode continuar sem "hey jarvis"; `sons`
+    liga os sons de abertura e fecho dessa escuta; `volume` e a amplitude
+    maxima desses sons, em fracao da escala completa.
+    """
+
+    seguimento_s: float = SEGUIMENTO_S
+    sons: bool = True
+    volume: float = VOLUME_DOS_SONS_PADRAO
+
+
+@dataclass(frozen=True)
 class Projeto:
     """Um projeto conhecido: o nome que o utilizador diz e o caminho no disco."""
 
@@ -292,6 +321,7 @@ class Config:
     perguntas: ConfigPerguntas = ConfigPerguntas()
     voz: ConfigVoz = ConfigVoz()
     adaptacao: ConfigAdaptacao = ConfigAdaptacao()
+    escuta: ConfigEscuta = ConfigEscuta()
 
     def encontrar_projeto(self, nome: str) -> Projeto | None:
         """Devolve o Projeto com este nome exato (case-insensitive), ou None."""
@@ -645,6 +675,51 @@ def _validar_adaptacao(bruto: dict, caminho: Path) -> ConfigAdaptacao:
     return ConfigAdaptacao(**valores)
 
 
+def _validar_escuta(bruto: dict, caminho: Path) -> ConfigEscuta:
+    """A tabela [escuta], opcional: duracao da escuta de seguimento e os sons."""
+    if "escuta" not in bruto:
+        return ConfigEscuta()
+    tabela = bruto["escuta"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [escuta] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    permitidas = ("seguimento_s", "sons", "volume")
+    desconhecidas = sorted(set(tabela) - set(permitidas))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [escuta] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(permitidas)})."
+        )
+    valores: dict[str, object] = {}
+    if "seguimento_s" in tabela:
+        segundos = tabela["seguimento_s"]
+        if (
+            isinstance(segundos, bool)
+            or not isinstance(segundos, (int, float))
+            or not SEGUIMENTO_MINIMO_S <= segundos <= SEGUIMENTO_MAXIMO_S
+        ):
+            raise ConfigError(
+                f"'{caminho}': [escuta].seguimento_s = {segundos!r} nao e valido; tem de ser um numero "
+                f"de segundos entre {SEGUIMENTO_MINIMO_S:g} e {SEGUIMENTO_MAXIMO_S:g} "
+                f"(por omissao {SEGUIMENTO_S:g})."
+            )
+        valores["seguimento_s"] = float(segundos)
+    if "sons" in tabela:
+        if not isinstance(tabela["sons"], bool):
+            raise ConfigError(
+                f"'{caminho}': [escuta].sons = {tabela['sons']!r} nao e valido; tem de ser true ou false."
+            )
+        valores["sons"] = tabela["sons"]
+    if "volume" in tabela:
+        volume = tabela["volume"]
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not 0 < volume <= 1:
+            raise ConfigError(
+                f"'{caminho}': [escuta].volume = {volume!r} nao e valido; tem de ser um numero maior "
+                f"do que 0 e no maximo 1 (por omissao {VOLUME_DOS_SONS_PADRAO:g})."
+            )
+        valores["volume"] = float(volume)
+    return ConfigEscuta(**valores)
+
+
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
     """Resolve e valida o caminho de um projeto no disco.
 
@@ -729,6 +804,7 @@ def carregar_config(
         perguntas=_validar_perguntas(bruto, caminho),
         voz=_validar_voz(bruto, caminho),
         adaptacao=_validar_adaptacao(bruto, caminho),
+        escuta=_validar_escuta(bruto, caminho),
     )
 
 
@@ -897,6 +973,31 @@ def _autoteste() -> int:
             config_sem_validar.projetos[0].caminho,
             Path(fantasma).resolve(strict=False),
         )
+
+    # 10. [escuta]: sem a tabela valem os valores por omissao; valores fora do
+    # intervalo, tipos errados e chaves desconhecidas sao recusados.
+    with tempfile.TemporaryDirectory() as pasta:
+        caminho = Path(pasta) / "config.toml"
+        base = '[microfone]\nnome = "Microfone"\n\n[[projetos]]\nnome = "x"\ncaminho = "."\n\n'
+        caminho.write_text(base, encoding="utf-8")
+        verificar(
+            "sem [escuta]: valores por omissao",
+            carregar_config(caminho, validar_caminhos=False).escuta,
+            ConfigEscuta(),
+        )
+        caminho.write_text(base + "[escuta]\nseguimento_s = 5\nsons = false\nvolume = 0.1\n", encoding="utf-8")
+        verificar(
+            "[escuta] valida: lida",
+            carregar_config(caminho, validar_caminhos=False).escuta,
+            ConfigEscuta(seguimento_s=5.0, sons=False, volume=0.1),
+        )
+        for texto in ("seguimento_s = 1", "seguimento_s = 31", 'sons = "sim"', "volume = 0", "volume = 1.5", "outra = 1"):
+            caminho.write_text(base + "[escuta]\n" + texto + "\n", encoding="utf-8")
+            verificar(
+                f"[escuta] {texto}: recusado",
+                "[escuta]" in apanhar(lambda: carregar_config(caminho, validar_caminhos=False)),
+                True,
+            )
 
     print()
     if falhas:

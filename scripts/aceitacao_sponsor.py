@@ -9,7 +9,8 @@ prompt, (b) ouvir o estado e o relatorio, (c) lancar, parar e retomar um run
 FORJA, (d) a conversa maos-livres, mais os comandos locais.
 
 Para cada tarefa: Enter para comecar, a tarefa e feita na janela do jarvis
-(a resposta ao recap diz-se logo, sem "hey jarvis" nem tecla),
+(a resposta ao recap diz-se logo, sem "hey jarvis" nem tecla, e depois de o
+jarvis falar ha 8 s para continuar sem "hey jarvis"),
 Enter quando ele acabar; depois o Sponsor responde por tecla (s/n) se o jarvis
 fez o que ele pediu e, nos ditados e lancamentos, se o que foi enviado tinha
 algum pedido que ele nao fez. `p` salta a tarefa e `q` guarda e sai
@@ -237,6 +238,11 @@ ECRA_INICIAL = (
     "5. Usa pedidos que só leem, para não mexer nos projetos. Por exemplo:",
     "   {exemplo}",
     "   As frases da linha O QUE DIZER já são assim.",
+    '6. Depois de o jarvis falar tens 8 s para continuar sem "hey jarvis" nem tecla',
+    "   ([escuta] seguimento_s no config.toml). Um som suave e a bolinha a ouvir (linha de estado A OUVIR-TE)",
+    "   indicam quando está a ouvir; um som diferente indica quando deixou de ouvir.",
+    "   Tudo o que disseres nesses segundos conta para a tarefa aberta: espera pelo som de fecho",
+    "   antes de falar com outra pessoa ou de carregar Enter.",
 )
 
 EXEMPLO_DO_ECRA_INICIAL = {

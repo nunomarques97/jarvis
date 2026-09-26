@@ -106,3 +106,18 @@ nome = "bm_fable"
 reforco = false
 bonus = 1.5
 lexico = false
+
+# Opcional: a escuta sem palavra de ativacao depois de o jarvis falar. Sem esta
+# tabela valem estes mesmos valores.
+# seguimento_s: depois de o jarvis acabar de falar tens estes segundos para
+#   continuar sem dizer "hey jarvis" (entre 3 e 30). O que disseres nesse tempo
+#   e um pedido normal, com as mesmas confirmacoes; silencio, hesitacoes ou so
+#   "obrigado" sao ignorados.
+# sons: um som curto e suave marca quando essa escuta abre e outro, diferente,
+#   quando fecha. Poe false para os desligar (a bolinha e a linha de estado
+#   continuam a mostrar "A OUVIR-TE").
+# volume: volume desses sons (maior do que 0, no maximo 1); baixo por omissao.
+[escuta]
+seguimento_s = 8.0
+sons = true
+volume = 0.15

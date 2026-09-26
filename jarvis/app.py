@@ -110,7 +110,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
-from jarvis import acoes_locais, conversa, voz
+from jarvis import acoes_locais, conversa, sinais, voz
 from jarvis.adaptacao import criar_adaptacao
 from jarvis.audio_util import RAIZ, garantir_pasta
 from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns
@@ -138,7 +138,9 @@ from jarvis.interprete import (
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
+    ESCUTA_CONVERSA,
     ESCUTA_RECAP,
+    ESCUTA_SEGUIMENTO,
     GATILHO_ATIVACAO,
     GATILHO_JANELA,
     GATILHO_TECLA,
@@ -205,6 +207,10 @@ A_ESPERA_A_OUVIR = "À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA"
 A_FALAR = "A FALAR"
 A_DORMIR = "A DORMIR"
 A_CONVERSA = "EM CONVERSA"
+#: Depois de o jarvis falar: a ouvir sem palavra de ativacao.
+A_OUVIR_TE = "A OUVIR-TE"
+#: Detalhe da linha de estado quando a escuta sem palavra de ativacao fecha.
+ESCUTA_FECHADA = "escuta sem palavra de ativacao fechada; diz hey jarvis ou usa a tecla"
 
 #: Intencoes sobre o estado e os runs FORJA de um projeto (`jarvis.forja_voz`).
 INTENCOES_DA_FORJA = frozenset(INTENCOES_POR_VOZ)
@@ -718,6 +724,22 @@ def _falar_com_som(texto: str) -> voz.ResultadoFala:
     return voz.falar(texto, com_som=True)
 
 
+def construir_sons(config: Config, *, modo_ficheiro: bool, com_som: bool) -> Callable[[str], object] | None:
+    """Os sons de abrir e fechar a escuta sem palavra de ativacao, ou None (sem som).
+
+    Com o microfone tocam salvo `[escuta] sons = false`; com --wav so com
+    --com-som (e tambem so se `sons` estiver ligado).
+    """
+    escuta = config.escuta
+    if not escuta.sons or (modo_ficheiro and not com_som):
+        return None
+
+    def tocar(tipo: str) -> object:
+        return sinais.tocar(tipo, volume=escuta.volume, com_som=True)
+
+    return tocar
+
+
 class Jarvis:
     """Liga o ouvido ao interprete, a confirmacao, ao executor e a voz.
 
@@ -744,6 +766,7 @@ class Jarvis:
         limite_da_confirmacao_s: float | None = None,
         avisos: Avisos | None = None,
         janela_de_conversa_s: float = conversa.JANELA_S,
+        sons: Callable[[str], object] | None = None,
     ) -> None:
         self.config = config
         self.log = log
@@ -776,6 +799,11 @@ class Jarvis:
         self.vigia: VigiaDosRuns | None = None
         #: Janela de escuta de uma conversa com o Claude (mesmo relogio das frases).
         self.janela = conversa.JanelaDeConversa(limite_s=janela_de_conversa_s, relogio=relogio)
+        #: Janela de seguimento: depois de qualquer resposta falada, continuar
+        #: sem palavra de ativacao durante [escuta].seguimento_s.
+        self.seguimento = conversa.JanelaDeConversa(limite_s=config.escuta.seguimento_s, relogio=relogio)
+        #: Toca "abrir" ou "fechar" (`jarvis.sinais`); None nos testes: sem som.
+        self._sons = sons
         #: O ouvido, quando existe: abre e fecha a escuta sem palavra de ativacao.
         self.ouvido: Ouvido | None = None
         self.medidas: list[MedidaDaFrase] = []
@@ -796,6 +824,18 @@ class Jarvis:
         #: O ouvido tem (ou teve ha pouco) uma escuta sem palavra de ativacao
         #: aberta para a resposta ao recap pendente.
         self._a_ouvir_o_recap = False
+        #: A escuta sem palavra de ativacao que o jarvis abriu (recap, conversa
+        #: ou seguimento) e cujo som de fecho ainda nao tocou; None sem ela.
+        self._escuta_de: str | None = None
+        #: A voz falou desde a ultima abertura: a proxima e nova e tem som.
+        self._voz_desde_a_escuta = False
+        #: A ultima fala foi uma resposta que abre a janela de seguimento.
+        self._falou_resposta = False
+        #: Conta os silencios pedidos (cala-te, clique na bolinha): uma fala
+        #: interrompida por um deles nao abre a janela de seguimento.
+        self._silencios = 0
+        #: A linha de estado ainda tem de dizer que a escuta fechou.
+        self._escuta_fechou = False
         #: A pergunta geral em curso e a thread que espera pela resposta. So a
         #: consulta mais recente pode ser dita.
         self._tranca_da_pergunta = threading.Lock()
@@ -821,7 +861,7 @@ class Jarvis:
         self.avisos.iniciar()
         if self.vigia is not None:
             self.vigia.iniciar()
-        self.painel.mudar(self._estado_de_repouso())
+        self._mostrar_repouso()
 
     def fechar(self) -> None:
         self._cancelar_pergunta("o jarvis vai fechar")
@@ -884,9 +924,12 @@ class Jarvis:
         self._calar_ja("clique na bolinha", "clique na bolinha")
 
     def _calar_ja(self, motivo: str, curto: str) -> None:
+        self._silencios += 1
         self.calar_agora(motivo, definitivo=False)
         self.avisos.descartar(curto)
         self._fechar_conversa(curto)
+        self._terminar_escuta(curto)
+        self._mostrar_repouso()
 
     def ocioso(self) -> bool:
         with self._condicao:
@@ -901,7 +944,20 @@ class Jarvis:
             return A_DORMIR
         if self.confirmacao.a_espera:
             return A_ESPERA_A_OUVIR if self._a_ouvir_o_recap else A_ESPERA
-        return A_CONVERSA if self.janela.aberta() else A_OUVIR
+        if self.janela.aberta():
+            return A_CONVERSA
+        return A_OUVIR_TE if self.seguimento.aberta() else A_OUVIR
+
+    def _mostrar_repouso(self) -> None:
+        """A linha de estado em repouso, com o detalhe da escuta sem palavra de ativacao."""
+        estado = self._estado_de_repouso()
+        detalhe = ""
+        if estado == A_OUVIR_TE and self.painel.atual != A_OUVIR_TE:
+            detalhe = f"sem palavra de ativacao, {self.seguimento.limite_s:.0f} s"
+        elif estado == A_OUVIR and self._escuta_fechou and self.painel.atual != A_OUVIR:
+            detalhe = ESCUTA_FECHADA
+        self._escuta_fechou = False
+        self.painel.mudar(estado, detalhe)
 
     # -- entrada: uma frase transcrita pelo ouvido
 
@@ -981,8 +1037,8 @@ class Jarvis:
                 try:
                     self._tratar_com_tranca(frase, medida)
                 finally:
-                    # A voz ja acabou: se ficou um recap pendente, ouve a resposta.
-                    self._atualizar_escuta_do_recap()
+                    # A voz ja acabou: abre (ou fecha) a escuta sem palavra de ativacao.
+                    self._assentar_escuta()
         except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o jarvis
             self.log.linha(f"frase #{medida.numero} | ERRO no tratamento: {erro!r} | nada enviado")
             self._erro_na_bolinha()
@@ -990,7 +1046,7 @@ class Jarvis:
             self._local.registo = None
             self._local.medida = None
             self.medidas.append(medida)
-            self.painel.mudar(self._estado_de_repouso())
+            self._mostrar_repouso()
             self._concluir()
 
     def _tratar_com_tranca(self, frase: Frase, medida: MedidaDaFrase) -> None:
@@ -1005,8 +1061,10 @@ class Jarvis:
             gatilho = "tecla de falar"
         elif frase.gatilho == GATILHO_JANELA and self.confirmacao.a_espera:
             gatilho = "resposta ao recap (escuta sem palavra de ativacao)"
-        elif frase.gatilho == GATILHO_JANELA:
+        elif frase.gatilho == GATILHO_JANELA and self.janela.aberta():
             gatilho = "janela de conversa (sem palavra de ativacao)"
+        elif frase.gatilho == GATILHO_JANELA:
+            gatilho = "escuta de seguimento (sem palavra de ativacao)"
         else:
             palavra = PALAVRAS_DE_ATIVACAO.get(self.config.ouvido.lingua, "?")
             gatilho = f"palavra de ativacao '{palavra}' (score {frase.score_ativacao or 0:.2f})"
@@ -1021,7 +1079,8 @@ class Jarvis:
         registo.nota(f"primeiro sinal de vida: {medida.sinal_de_vida_ms:.0f} ms desde o fim da fala (linha A PENSAR)")
 
         if not frase.texto.strip() and not self.estado.adormecido:
-            # So a palavra de ativacao, e o jarvis ja acordou entretanto.
+            # So a palavra de ativacao, e o jarvis ja acordou entretanto (ou
+            # nada dito numa escuta sem ela): a janela de seguimento continua.
             registo.marcar(3, "so a palavra de ativacao com o jarvis acordado (nada interpretado)")
             medida.desfecho = "ignorada"
             registo.fechar("ignorada (so a palavra de ativacao)")
@@ -1044,18 +1103,27 @@ class Jarvis:
             desfecho = self.confirmacao.responder(frase.texto, dito_em=frase.inicio_da_escuta)
         elif rapida is None and self.janela.aceita(frase.inicio_da_escuta):
             desfecho = self._responder_na_conversa(frase, registo, medida)
+        elif rapida is None and self._ruido_no_seguimento(frase):
+            # Hesitacoes ou cortesia soltas na janela de seguimento: nada dito,
+            # e a janela continua ate ao prazo que ja tinha.
+            medida.intencao = INTENCAO_CORTESIA if so_cortesia(frase.texto) else "ruido"
+            registo.marcar(3, "escuta de seguimento: so hesitacoes ou cortesia (nada interpretado, nada dito)")
+            desfecho = Desfecho("ignorado", "ruido na janela de seguimento")
         elif rapida is None and self.confirmacao.e_correcao_sem_pedido(frase.texto):
             # "nao, muda X para Y" sem nada a espera nao vira um ditado novo.
             registo.marcar(3, "correcao sem nenhum pedido pendente (nada interpretado)")
+            self._consumir_seguimento()
             desfecho = self.confirmacao.correcao_sem_pedido()
         elif rapida is None and so_cortesia(frase.texto):
             # "Excellent.", "Yeah." soltos: nada a pedir, nunca vao ao LLM nem
             # ao Claude, e nao cortam uma resposta que ainda esteja a caminho.
             medida.intencao = INTENCAO_CORTESIA
             registo.marcar(3, "so cortesia fora de um recap ou de uma conversa (nada interpretado)")
+            self._consumir_seguimento()
             desfecho = self._decidir(Interpretacao(frase.texto, INTENCAO_CORTESIA, None, "", "regra", "so cortesia"))
         else:
             self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
+            self._consumir_seguimento()
             # Um pedido novo: a resposta de uma pergunta anterior ja nao se diz.
             self._cancelar_pergunta("pedido novo")
             if self.confirmacao.a_espera and rapida == "dormir":
@@ -1114,7 +1182,7 @@ class Jarvis:
         if conversa.e_para_sair(frase.texto, self.lingua):
             medida.intencao = "sair_da_conversa"
             registo.marcar(3, f"conversa com o {estado.projeto}: sair (nada enviado)")
-            self._dizer(self._texto("conversa_fim"))
+            self._dizer(self._texto("conversa_fim"), abre_seguimento=False)
             return Desfecho("cancelado", "saiu da conversa")
         nomes = tuple(projeto.nome for projeto in self.config.projetos)
         interpretacao = conversa.resposta_literal(frase.texto, estado.projeto, nomes, lingua=self.lingua)
@@ -1136,9 +1204,10 @@ class Jarvis:
 
     def _abrir_conversa(self, projeto: str) -> None:
         """A resposta do Claude acabou numa pergunta: ouve a resposta sem palavra de ativacao."""
+        self.seguimento.fechar()  # nunca duas janelas: a da conversa ganha
+        self._falou_resposta = False
         self.janela.abrir(projeto)
-        abrir = getattr(self.ouvido, "abrir_escuta", None)
-        sem_ativacao = bool(abrir(self.janela.limite_s)) if abrir is not None else False
+        sem_ativacao = self._abrir_sem_ativacao(self.janela.limite_s, ESCUTA_CONVERSA)
         self.log.linha(
             f"conversa | o {projeto} fez uma pergunta: janela de {self.janela.limite_s:.0f} s "
             + ("a ouvir sem palavra de ativacao" if sem_ativacao else "so com a tecla de falar")
@@ -1146,28 +1215,103 @@ class Jarvis:
         )
 
     def _fechar_escuta(self) -> None:
+        """Fecha a escuta sem palavra de ativacao no ouvido, sem som (ela pode reabrir logo)."""
         self._a_ouvir_o_recap = False
         fechar = getattr(self.ouvido, "fechar_escuta", None)
         if fechar is not None:
             fechar()
 
-    # -- resposta ao recap sem palavra de ativacao
+    # -- escuta sem palavra de ativacao: recap, conversa e seguimento
 
-    def _atualizar_escuta_do_recap(self) -> None:
-        """Com um recap pendente, ouve a resposta sem palavra de ativacao; sem ele, deixa de ouvir.
-
-        Chamar so com a voz calada (depois de `_dizer` voltar): a escuta dura
-        o que falta do prazo, que conta desde o fim da fala do recap.
-        """
-        restante = self.confirmacao.prazo_restante()
-        if restante is None or self.estado.adormecido:
-            if self._a_ouvir_o_recap:
-                self._fechar_escuta()
+    def _som(self, tipo: str) -> None:
+        if self._sons is None:
             return
-        if restante <= 0:
-            return  # o prazo ja passou: `verificar_tempo` cancela
+        try:
+            self._sons(tipo)
+        except Exception as erro:  # noqa: BLE001 - um som falhado nunca para o jarvis
+            self.log.linha(f"som | '{tipo}' falhou: {erro!r}")
+
+    def _abrir_sem_ativacao(self, limite_s: float, para: str) -> bool:
+        """Pede ao ouvido uma escuta sem palavra de ativacao; toca "abrir" se abre de novo.
+
+        Reabrir a mesma escuta depois de ruido (sem a voz ter falado entretanto)
+        nao toca nada. Devolve False sem VAD: ai so ha a tecla de falar.
+        """
         abrir = getattr(self.ouvido, "abrir_escuta", None)
-        sem_ativacao = bool(abrir(restante, para=ESCUTA_RECAP)) if abrir is not None else False
+        if abrir is None or not abrir(limite_s, para=para):
+            return False
+        nova = self._escuta_de is None or self._voz_desde_a_escuta
+        self._escuta_de = para
+        self._voz_desde_a_escuta = False
+        self._escuta_fechou = False
+        if nova:
+            self._som("abrir")
+        return True
+
+    def _terminar_escuta(self, motivo: str) -> None:
+        """A escuta sem palavra de ativacao acaba sem continuar: fecha e toca "fechar"."""
+        self.seguimento.fechar()
+        self._fechar_escuta()
+        para, self._escuta_de = self._escuta_de, None
+        self._voz_desde_a_escuta = False
+        if para is None:
+            return
+        self._escuta_fechou = True
+        self.log.linha(f"escuta | sem palavra de ativacao fechada ({motivo}); diz hey jarvis ou usa a tecla")
+        self._som("fechar")
+
+    def _consumir_seguimento(self) -> None:
+        """Um pedido tomado gasta a janela de seguimento (a resposta dele pode abrir outra)."""
+        if self.seguimento.fechar() is not None:
+            self._fechar_escuta()
+
+    def _ruido_no_seguimento(self, frase: Frase) -> bool:
+        """So hesitacoes ou so cortesia, ditas na janela de seguimento."""
+        if frase.gatilho != GATILHO_JANELA or not self.seguimento.aceita(frase.inicio_da_escuta):
+            return False
+        return not conversa.limpar_resposta(frase.texto, self.lingua) or so_cortesia(frase.texto)
+
+    def _assentar_escuta(self, *, seguimento: bool = True) -> None:
+        """Depois de a voz acabar: abre a escuta que tem prioridade, ou fecha-a.
+
+        Recap pendente > pergunta do Claude (conversa) > seguimento depois de
+        uma resposta falada. A dormir nao ha escuta nenhuma. Chamar so com a
+        voz calada (depois de `_dizer` voltar); `seguimento=False` quando a
+        ultima fala nao pede continuacao (o recap cancelado por falta de
+        resposta).
+        """
+        falou, self._falou_resposta = self._falou_resposta, False
+        if self.estado.adormecido:
+            self._terminar_escuta("a dormir")
+            return
+        restante = self.confirmacao.prazo_restante()
+        if restante is not None:
+            self.seguimento.fechar()
+            if restante > 0:  # senao o prazo ja passou: `verificar_tempo` cancela
+                self._ouvir_o_recap(restante)
+            return
+        estado = self.janela.atual
+        if estado is not None:
+            self.seguimento.fechar()
+            restante = estado.prazo - self.relogio()
+            if restante > 0 and getattr(self.ouvido, "escuta_aberta", None) != ESCUTA_CONVERSA:
+                self._abrir_sem_ativacao(restante, ESCUTA_CONVERSA)
+            return
+        if falou and seguimento and not self.estado.mudo and self.com_voz:
+            self.seguimento.abrir("")
+            if self._abrir_sem_ativacao(self.seguimento.limite_s, ESCUTA_SEGUIMENTO):
+                self.log.linha(
+                    f"seguimento | a ouvir sem palavra de ativacao ({self.seguimento.limite_s:.0f} s)"
+                )
+                return
+            self.seguimento.fechar()  # sem VAD: so a tecla e a palavra de ativacao
+        elif self.seguimento.aberta() and self._reabrir_seguimento():
+            return
+        self._terminar_escuta("nada a continuar")
+
+    def _ouvir_o_recap(self, restante: float) -> None:
+        """Com um recap pendente, ouve a resposta sem palavra de ativacao durante o que falta do prazo."""
+        sem_ativacao = self._abrir_sem_ativacao(restante, ESCUTA_RECAP)
         self._a_ouvir_o_recap = sem_ativacao
         if sem_ativacao:
             self.log.linha(f"confirmacao | a ouvir a resposta ao recap sem palavra de ativacao ({restante:.0f} s)")
@@ -1186,8 +1330,26 @@ class Jarvis:
         restante = self.confirmacao.prazo_restante()
         if restante is None or restante <= 0:
             return
-        if self.ouvido.abrir_escuta(restante, para=ESCUTA_RECAP):
+        if self._abrir_sem_ativacao(restante, ESCUTA_RECAP):
             self.log.linha(f"confirmacao | de novo a ouvir a resposta ao recap ({restante:.0f} s)")
+
+    def _reabrir_seguimento(self) -> bool:
+        """A janela de seguimento continua (ruido ignorado): ouve ate ao prazo ORIGINAL, sem som.
+
+        Devolve False se o prazo ja passou ou se o ouvido nao abre.
+        """
+        estado = self.seguimento.atual
+        if estado is None or self.estado.adormecido:
+            return False
+        restante = estado.prazo - self.relogio()
+        if restante <= 0:
+            return False
+        if getattr(self.ouvido, "escuta_aberta", None) == ESCUTA_SEGUIMENTO:
+            return True
+        if not self._abrir_sem_ativacao(restante, ESCUTA_SEGUIMENTO):
+            return False
+        self.log.linha(f"seguimento | de novo a ouvir sem palavra de ativacao ({restante:.1f} s ate ao prazo)")
+        return True
 
     def _alguem_a_responder(self) -> bool:
         """O utilizador comecou a dizer uma frase, ou ha uma a caminho do texto ou por tratar.
@@ -1220,12 +1382,17 @@ class Jarvis:
         if not self._tranca.acquire(blocking=False):
             return OCUPADO
         try:
-            if self._alguem_a_falar() or self.confirmacao.a_espera or self.janela.aberta():
+            if (
+                self._alguem_a_falar()
+                or self.confirmacao.a_espera
+                or self.janela.aberta()
+                or self.seguimento.aberta()
+            ):
                 return OCUPADO
             self._local.registo = None
             self._local.medida = None
-            self._dizer(aviso.texto)
-            self.painel.mudar(self._estado_de_repouso())
+            self._dizer(aviso.texto, abre_seguimento=False)
+            self._mostrar_repouso()
             return FALADO
         finally:
             self._tranca.release()
@@ -1262,13 +1429,18 @@ class Jarvis:
 
     def _avisar_demora(self) -> None:
         """O modelo do interprete esta a carregar: "um momento", uma vez, na thread da frase."""
-        self._dizer(self._texto("um_momento"), aviso=True)
+        self._dizer(self._texto("um_momento"), aviso=True, abre_seguimento=False)
 
-    def _dizer(self, texto: str, *, aviso: bool = False) -> voz.ResultadoFala | None:
+    def _dizer(
+        self, texto: str, *, aviso: bool = False, abre_seguimento: bool = True
+    ) -> voz.ResultadoFala | None:
         """Fala (ou mostra) uma resposta do jarvis, e regista quando comecou a soar.
 
         Um `aviso` (o "um momento" enquanto o modelo carrega) so fica numa
         nota: nao e a decisao nem a resposta da frase, nem mexe nas etapas.
+        Uma resposta que chega a tocar abre a janela de seguimento quando a
+        voz acaba (`_assentar_escuta`), salvo com `abre_seguimento=False` ou
+        num aviso.
         """
         falado = " ".join((texto or "").split())
         if not falado:
@@ -1299,12 +1471,19 @@ class Jarvis:
             razao = "modo calado" if self.estado.mudo else "voz desligada"
             marcar(f"{razao}; resposta so no ecra: {falado!r}")
             return None
-        if self._a_ouvir_o_recap:
-            # Nunca ouvir a propria voz como resposta ao recap.
+        if self._a_ouvir_o_recap or self._escuta_de is not None:
+            # Nunca ouvir a propria voz: fecha sem som e reabre quando ela acaba.
             self._fechar_escuta()
+        self.seguimento.fechar()
+        silencios = self._silencios
         with self._tranca_da_voz:
             self.painel.mudar(A_FALAR)
             resultado = self._falar(falado)
+        if getattr(resultado, "falou", False):
+            self._voz_desde_a_escuta = True
+            # Interrompida por um cala-te ou um clique na bolinha: nao continua.
+            if abre_seguimento and not aviso and silencios == self._silencios:
+                self._falou_resposta = True
         primeiro_audio = getattr(resultado, "primeiro_audio", None)
         if primeiro_audio is not None and registo is not None and registo.fim_da_fala is not None and not aviso:
             ms = (primeiro_audio - registo.fim_da_fala) * 1000
@@ -1421,8 +1600,8 @@ class Jarvis:
             ):
                 self._abrir_conversa(projeto)
             else:
-                self._atualizar_escuta_do_recap()
-            self.painel.mudar(self._estado_de_repouso())
+                self._assentar_escuta()
+            self._mostrar_repouso()
 
     # -- perguntas gerais (Claude Code com pesquisa na web)
 
@@ -1449,7 +1628,8 @@ class Jarvis:
             f"limite {self.perguntas.config.limite_s:g} s): {consulta.pergunta!r}"
         )
         fio.start()
-        self._dizer(self._texto("a_verificar"))
+        # "Let me check." nao abre a janela: a resposta, quando chegar, abre.
+        self._dizer(self._texto("a_verificar"), abre_seguimento=False)
         return consulta
 
     def _consultar(self, consulta: Consulta) -> None:
@@ -1489,8 +1669,8 @@ class Jarvis:
             self._local.registo = None
             self._local.medida = None
             self._dizer(falar)
-            self._atualizar_escuta_do_recap()
-            self.painel.mudar(self._estado_de_repouso())
+            self._assentar_escuta()
+            self._mostrar_repouso()
 
     def _cancelar_pergunta(self, motivo: str) -> None:
         """A pergunta em curso deixa de ser dita e o processo dela e morto."""
@@ -1520,19 +1700,25 @@ class Jarvis:
             # Uma resposta a meio de ser dita ou transcrita ainda conta: o prazo espera por ela.
             desfecho = None if self._alguem_a_responder() else self.confirmacao.verificar_tempo()
             if desfecho is not None:
-                self._fechar_escuta()
                 self.log.linha(f"confirmacao | {desfecho.estado}: {desfecho.motivo}")
-                self.painel.mudar(self._estado_de_repouso())
+                # O aviso de que cancelou nao abre a janela de seguimento.
+                self._assentar_escuta(seguimento=False)
+                self._mostrar_repouso()
             else:
                 self._reabrir_escuta_do_recap()
             fechada = self.janela.fechar_se_expirou(alguem_a_falar=self._alguem_a_falar())
             if fechada is not None:
-                self._fechar_escuta()
                 self.log.linha(
                     f"conversa | janela do {fechada.projeto} fechada: {self.janela.limite_s:.0f} s sem resposta; "
                     "nada enviado"
                 )
-                self.painel.mudar(self._estado_de_repouso())
+                self._terminar_escuta("conversa sem resposta")
+                self._mostrar_repouso()
+            if self.seguimento.fechar_se_expirou(alguem_a_falar=self._alguem_a_responder()) is not None:
+                self._terminar_escuta(f"{self.seguimento.limite_s:.0f} s sem pedido")
+                self._mostrar_repouso()
+            elif self.seguimento.aberta() and not self._alguem_a_responder():
+                self._reabrir_seguimento()
         finally:
             self._tranca.release()
 
@@ -1739,6 +1925,11 @@ def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
     else:
         log.bruto(f"   a resposta ao recap diz-se com a tecla de falar, dentro de {prazo}")
     log.bruto('   pergunta do Claude: 8 s para responder sem palavra de ativacao; "sai da conversa" fecha')
+    seguimento = f"{jarvis.config.escuta.seguimento_s:g} s"
+    log.bruto(
+        f"   depois de o jarvis falar: {seguimento} para continuar sem palavra de ativacao;"
+        f" o som e a bolinha ({A_OUVIR_TE}) dizem quando esta a ouvir"
+    )
     log.bruto("   Ctrl+C ou fechar esta janela cala a voz e desliga o microfone")
     log.bruto("=" * LARGURA_DA_SEPARACAO)
 
@@ -1926,6 +2117,7 @@ def _arrancar_e_correr(
         perguntas=perguntas,
         com_voz=com_voz,
         painel=Painel(log.linha, titulo=not modo_ficheiro),
+        sons=construir_sons(config, modo_ficheiro=modo_ficheiro, com_som=args.com_som),
     )
     jarvis.canal = construir_canal(config, log, ao_evento=jarvis.avisos.receber)
     sem_bolinha = modo_ficheiro or args.sem_bolinha or bool(os.environ.get(VARIAVEL_SEM_BOLINHA))

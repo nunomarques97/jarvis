@@ -8,7 +8,7 @@ A local voice assistant for Windows. You hold a key (or say the wake word), spea
 .venv\Scripts\python -m jarvis
 ```
 
-This starts the resident process. It warms up the speech recognition, the voice and the local language model in parallel and prints `JARVIS PRONTO em <n> s` when it is ready (the target is 30 seconds or less), together with the free GPU memory before and after. A status line shows what jarvis is doing at every moment: `A OUVIR` (listening), `A PENSAR` (thinking), `À ESPERA DE CONFIRMAÇÃO` (waiting for your yes), `A FALAR` (speaking) and `A DORMIR` (asleep). The same state is shown in the window title.
+This starts the resident process. It warms up the speech recognition, the voice and the local language model in parallel and prints `JARVIS PRONTO em <n> s` when it is ready (the target is 30 seconds or less), together with the free GPU memory before and after. A status line shows what jarvis is doing at every moment: `A OUVIR` (listening), `A PENSAR` (thinking), `À ESPERA DE CONFIRMAÇÃO` (waiting for your yes), `A OUVIR-TE` (listening without the wake word, with the seconds left), `A FALAR` (speaking) and `A DORMIR` (asleep). The same state is shown in the window title.
 
 To start it with a double click, create the shortcut once:
 
@@ -68,6 +68,8 @@ A question that is not about a project or a local command ("what's the temperatu
 
 **Hands-free conversation.** When Claude's reply ends with a question you heard, jarvis listens for 8 seconds without the wake word (the key works too). Your answer keeps your words, without hesitations ("uh", "um") or an address to jarvis ("Jarvis, answer no, not right now" sends "No, not right now."). A short answer of up to 5 words ("Yes.", "the first one") is sent at once and jarvis says "Sent." / "Enviado."; a longer one goes into a quick recap, for example "Reply to Claude in atlas: keep the newer file and delete the older one. Send it?", and is sent only after your "yes". This window is the only place anything is sent without a recap, and a money or trading request is refused there too. Saying "sai da conversa" / "exit the conversation", or 8 seconds of silence, closes the window without sending anything.
 
+**Follow-up without the wake word.** After jarvis speaks a reply, you have 8 seconds to continue without saying "hey jarvis", counted from the moment the voice actually stops (so jarvis never hears itself). What you say then is handled like any other request: same interpreter, same recap and yes before anything is sent. A soft short sound tells you jarvis is listening, the orb shows it is listening and the status line shows `A OUVIR-TE | sem palavra de ativacao, N s`; a different sound tells you it stopped listening. Silence, noise, an "uh" or only courtesy words inside the window are ignored and neither use up nor extend it. After a recap you still have the 30 seconds to answer, and after a question from Claude the conversation window above applies; there is never more than one window at a time. Asleep, no window opens. The key and "hey jarvis" always work. Change the seconds with `seguimento_s` in the optional `[escuta]` table of `config.toml` (see `config.exemplo.toml`) and turn the sounds off with `sons = false` in the same table (`volume` sets how loud they are). With `--wav` the sounds only play with `--com-som`.
+
 **Spoken notices.** The sessions jarvis opens start with `--settings .jarvis/sessoes/<project>/settings.json`, which adds two Claude Code hooks (see `config/hooks-jarvis.exemplo.json`): `Stop`, and `Notification` for `idle_prompt` and `permission_prompt`. The hook sends jarvis only the kind of event, over the same authenticated local connection as the channel, never the message or the transcript. jarvis then says "atlas acabou" / "atlas is done" or "atlas está à espera de ti" / "atlas is waiting for you". With `[forja]` configured it also checks the FORJA run of each project every 30 seconds and says when a run finishes, fails or gets blocked. Notices wait their turn: never over your voice, another reply or a pending recap; at most one per session per minute; "cala-te" drops them and, while asleep, they only go to the log.
 
 ## The status orb
@@ -77,7 +79,7 @@ While jarvis runs with the microphone, a small borderless window stays on top of
 | Orb | Meaning |
 | --- | --- |
 | Small slate dot, breathing slowly | Waiting for the wake word or the key |
-| Blue disc with a ring, growing with your microphone level | Listening to you (also during a conversation) |
+| Blue disc with a ring, growing with your microphone level | Listening to you (also during a conversation and in the follow-up window after jarvis speaks) |
 | Violet orb with three dots | Thinking |
 | Teal orb with three bars, moving with the voice | Speaking |
 | Amber orb with `?` | Waiting for your yes, also while it hears the answer |

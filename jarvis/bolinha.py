@@ -875,6 +875,8 @@ def _retangulo_redondo(x0: float, y0: float, x1: float, y1: float, r: float) -> 
 ESTADO_DO_PAINEL = {
     "A OUVIR": "repouso",
     "EM CONVERSA": "ouvir",
+    # Depois de o jarvis falar, a ouvir sem palavra de ativacao.
+    "A OUVIR-TE": "ouvir",
     "A PENSAR": "pensar",
     "A FALAR": "falar",
     "À ESPERA DE CONFIRMAÇÃO": "confirmar",

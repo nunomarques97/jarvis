@@ -221,7 +221,10 @@ class TestJanelaAbreComPergunta(unittest.TestCase):
         self.assertEqual(m.canal.recebidos, [("atlas", "Corrige o teste do login.")])
         self.assertTrue(m.jarvis.janela.aberta())
         self.assertEqual(m.jarvis.janela.projeto, "atlas")
-        self.assertEqual(m.jarvis.ouvido.abertas, [8.0])
+        # O canal falso responde antes de o jarvis dizer "Enviado.": a escuta
+        # aberta para a pergunta fecha enquanto essa fala soa (o jarvis nunca
+        # se ouve) e reabre quando ela acaba, com o que falta da janela.
+        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0])
         self.assertEqual(m.jarvis.painel.atual, A_CONVERSA)
         self.assertIn("janela de 8 s a ouvir sem palavra de ativacao", m.log.texto())
 
@@ -301,7 +304,9 @@ class TestRespostaNaJanela(unittest.TestCase):
         m.ouvir("sim", gatilho=GATILHO_JANELA)
         self.assertEqual(m.canal.recebidos[-1], ("atlas", "sim"))
         self.assertTrue(m.jarvis.janela.aberta(), "a resposta seguinte tambem acabou em pergunta")
-        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0])
+        # Cada pergunta abre a escuta, e cada "Enviado." do canal falso (que
+        # responde antes dele) fecha-a enquanto soa e reabre-a no fim.
+        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0, 8.0, 8.0])
 
     def test_so_hesitacoes_nao_envia_e_a_janela_continua(self) -> None:
         m = montagem_em_conversa()
@@ -535,7 +540,8 @@ class TestPerguntaDoClaudeNoCaminhoHeadless(unittest.TestCase):
             self.assertNotIn(proibido, falada)
         self.assertTrue(m.jarvis.janela.aberta())
         self.assertEqual(m.jarvis.janela.projeto, "atlas")
-        self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S])
+        # Aberta para a pergunta e reaberta depois do "Sent." (ver acima).
+        self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S, JANELA_S])
         self.assertIn("caminho=headless", m.log.texto())
 
     def test_respostas_curtas_vao_logo_e_diz_sent(self) -> None:
