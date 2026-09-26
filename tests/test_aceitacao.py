@@ -91,7 +91,7 @@ class TestGuiao(unittest.TestCase):
         self.assertFalse(POR_ID["l-01"].pergunta_inventados)
 
     def _guiao(self, linha: str) -> Path:
-        cabecalho = "| " + " | ".join(ac.COLUNAS) + " |\n|---|---|---|---|---|---|---|---|\n"
+        cabecalho = "| " + " | ".join(ac.COLUNAS) + " |\n|" + "---|" * len(ac.COLUNAS) + "\n"
         pasta = tempfile.TemporaryDirectory()
         self.addCleanup(pasta.cleanup)
         caminho = Path(pasta.name) / "guiao.md"
@@ -99,18 +99,55 @@ class TestGuiao(unittest.TestCase):
         return caminho
 
     def test_formato_invalido_e_recusado_com_a_linha(self) -> None:
+        # (razao esperada na mensagem, linha): cada caso falha pela razao do nome, nao pela contagem de colunas.
         casos = {
-            "marcador desconhecido": "| a-01 | a | x <meu-projeto> | tell <projeto-1> | diz ao <projeto-1> | ditar_prompt | <projeto-1> | confirmar |",
-            "fluxo desconhecido": "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | ditar_prompt | <projeto-1> | talvez |",
-            "intencao fora da lista": "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | comprar | <projeto-1> | confirmar |",
-            "projeto sem exemplo": "| a-01 | a | x | tell claude | diz ao <projeto-1> | ditar_prompt | <projeto-1> | confirmar |",
-            "id de outro caso": "| b-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | ditar_prompt | <projeto-1> | confirmar |",
-            "fluxo projeto com projeto": "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | ditar_prompt | <projeto-1> | projeto |",
+            "marcador desconhecido": (
+                "so se aceitam os marcadores",
+                "| a-01 | a | x <meu-projeto> | tell <projeto-1> | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | confirmar |",
+            ),
+            "marcador desconhecido no que deve acontecer": (
+                "so se aceitam os marcadores",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | Sent to <projeto-N> | ditar_prompt | <projeto-1> | confirmar |",
+            ),
+            "fluxo desconhecido": (
+                "fluxo 'talvez'",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | talvez |",
+            ),
+            "intencao fora da lista": (
+                "intencao 'comprar'",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | y | comprar | <projeto-1> | confirmar |",
+            ),
+            "projeto sem exemplo": (
+                "tem de aparecer nos dois exemplos",
+                "| a-01 | a | x | tell claude | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | confirmar |",
+            ),
+            "id de outro caso": (
+                "o id nao bate com o caso",
+                "| b-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | confirmar |",
+            ),
+            "fluxo projeto com projeto": (
+                "o fluxo 'projeto' e um ditado sem projeto",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | projeto |",
+            ),
+            "o que deve acontecer vazio": (
+                "celula vazia em ['o que deve acontecer']",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> |  | ditar_prompt | <projeto-1> | confirmar |",
+            ),
+            "colunas a menos (formato antigo)": (
+                "8 colunas, esperava 9",
+                "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | ditar_prompt | <projeto-1> | confirmar |",
+            ),
         }
-        for nome, linha in casos.items():
+        for nome, (razao, linha) in casos.items():
             with self.subTest(nome), self.assertRaises(ac.ErroDoGuiao) as contexto:
                 ac.ler_guiao(self._guiao(linha))
             self.assertIn("guiao.md:3", str(contexto.exception))
+            self.assertIn(razao, str(contexto.exception))
+
+    def test_uma_linha_valida_com_as_nove_colunas_e_lida(self) -> None:
+        linha = "| a-01 | a | x | tell <projeto-1> | diz ao <projeto-1> | y | ditar_prompt | <projeto-1> | confirmar |"
+        (tarefa,) = ac.ler_guiao(self._guiao(linha))
+        self.assertEqual((tarefa.acontecer, tarefa.fluxo, tarefa.projeto), ("y", "confirmar", "<projeto-1>"))
 
     def test_projeto_teste_tem_de_estar_na_configuracao(self) -> None:
         self.assertEqual(
@@ -793,6 +830,243 @@ class TestSessaoGuiada(unittest.TestCase):
         texto = "\n".join(linhas)
         self.assertIn("diz ao exemplo-um", texto)
         self.assertNotIn("<projeto-1>", texto)
+
+
+# --- O que o Sponsor ve no ecra ------------------------------------------------------
+
+ROTULOS = (ac.ROTULO_DIZER, ac.ROTULO_RESPONDER, ac.ROTULO_ACONTECER)
+FIM_DO_DITADO = {"en": "Don't change anything.", "pt": "Não mudes nada."}
+
+
+def _ecra_de_todas_as_tarefas(lingua: str) -> dict[str, list[str]]:
+    """O que correr_sessao escreve para cada tarefa do guiao (todas saltadas com p), por id."""
+    linhas: list[str] = []
+    sessao = ac.Sessao(lingua=lingua, projetos=dict(PROJETOS))
+    with tempfile.TemporaryDirectory() as pasta, contextlib.redirect_stdout(io.StringIO()):
+        ac.correr_sessao(
+            sessao, TAREFAS, Path(pasta) / "sessao.json", tecla=_teclas(["p"] * len(TAREFAS)),
+            escrever=linhas.append, agora=_relogio(),
+        )
+    blocos: dict[str, list[str]] = {}
+    atual: list[str] | None = None
+    for linha in linhas:
+        cabecalho = re.match(r"^\[\d+/\d+\] ([a-z]-\d{2}) ", linha)
+        if cabecalho:
+            atual = blocos.setdefault(cabecalho.group(1), [])
+        elif atual is not None:
+            atual.append(linha)
+    return blocos
+
+
+def _valor(bloco: list[str], rotulo: str) -> str:
+    (linha,) = [l for l in bloco if l.strip().startswith(rotulo)]
+    return linha.strip()[len(rotulo):].strip()
+
+
+class TestEcraDasTarefas(unittest.TestCase):
+    def test_cada_tarefa_tem_as_tres_linhas_preenchidas_e_sem_marcadores(self) -> None:
+        for lingua in ac.LINGUAS:
+            blocos = _ecra_de_todas_as_tarefas(lingua)
+            self.assertEqual(sorted(blocos), sorted(t.id for t in TAREFAS))
+            for tarefa in TAREFAS:
+                with self.subTest(lingua=lingua, tarefa=tarefa.id):
+                    bloco = blocos[tarefa.id]
+                    for rotulo in ROTULOS:
+                        self.assertTrue(_valor(bloco, rotulo), f"{rotulo} vazia")
+                    self.assertEqual(
+                        _valor(bloco, ac.ROTULO_DIZER),
+                        '"' + ac.trocar_marcadores(tarefa.exemplos[lingua], PROJETOS) + '"',
+                    )
+                    for linha in bloco:
+                        self.assertNotRegex(linha, r"<[^>]*>", "marcador por trocar")
+
+    def test_cancelar_diz_abort_e_os_fluxos_que_enviam_dizem_yes(self) -> None:
+        for lingua in ac.LINGUAS:
+            blocos = _ecra_de_todas_as_tarefas(lingua)
+            for tarefa in TAREFAS:
+                resposta = _valor(blocos[tarefa.id], ac.ROTULO_RESPONDER)
+                with self.subTest(lingua=lingua, tarefa=tarefa.id, fluxo=tarefa.fluxo):
+                    if tarefa.fluxo == "cancelar":
+                        self.assertIn("ABORT", resposta)
+                        self.assertNotIn("YES", resposta)
+                    elif tarefa.fluxo in ("confirmar", "corrigir", "projeto", "conversa"):
+                        self.assertIn("YES", resposta)
+                        self.assertNotIn("ABORT", resposta)
+                    else:
+                        self.assertIn("nada", resposta)
+                        self.assertNotIn("YES", resposta)
+        self.assertTrue(any(t.fluxo == "cancelar" for t in TAREFAS))
+
+    def test_as_respostas_sao_as_palavras_que_o_jarvis_aceita(self) -> None:
+        self.assertEqual(set(ac.RESPOSTAS_DO_FLUXO), set(ac.FLUXOS))
+        for lingua in ac.LINGUAS:
+            self.assertIn("cancel", ac.RESPOSTAS_DO_FLUXO["cancelar"][lingua])
+            self.assertIn('"no, change X to Y"', ac.RESPOSTAS_DO_FLUXO["corrigir"][lingua])
+            self.assertIn('"add ..."', ac.RESPOSTAS_DO_FLUXO["corrigir"][lingua])
+        self.assertIn('"sim"', ac.RESPOSTAS_DO_FLUXO["confirmar"]["pt"])
+        self.assertIn('"aborta"', ac.RESPOSTAS_DO_FLUXO["cancelar"]["pt"])
+
+    def test_as_tarefas_do_run_dizem_que_mexem_num_run_forja_real(self) -> None:
+        blocos = _ecra_de_todas_as_tarefas("pt")
+        ids = [t.id for t in TAREFAS if t.caso == "c"]
+        self.assertEqual(ids, ["c-01", "c-02", "c-03", "c-04"])
+        for id_ in ids:
+            with self.subTest(id_):
+                self.assertTrue(
+                    any("a sério um run FORJA curto" in l or "a sério o run FORJA curto" in l for l in blocos[id_])
+                )
+                self.assertIn("exemplo-tres", "\n".join(blocos[id_]))
+
+    def test_os_ditados_e_o_lancamento_so_leem(self) -> None:
+        from jarvis.forja_voz import validar_objetivo
+
+        for tarefa in TAREFAS:
+            if tarefa.intencao not in ("ditar_prompt", "lancar_run"):
+                continue
+            for lingua, fim in FIM_DO_DITADO.items():
+                with self.subTest(tarefa=tarefa.id, lingua=lingua):
+                    self.assertTrue(tarefa.exemplos[lingua].endswith(fim), tarefa.exemplos[lingua])
+        lancamentos = [t for t in TAREFAS if t.intencao == "lancar_run"]
+        self.assertTrue(lancamentos)
+        for tarefa in lancamentos:
+            for lingua, ligacao in (("en", " to "), ("pt", " para ")):
+                objetivo = tarefa.exemplos[lingua].split(tarefa.projeto + ligacao, 1)[1]
+                self.assertEqual(validar_objetivo(objetivo), objetivo)
+                self.assertTrue(objetivo.endswith(FIM_DO_DITADO[lingua]))
+
+    def test_o_que_deve_acontecer_nos_ditados_que_enviam(self) -> None:
+        for tarefa in TAREFAS:
+            if tarefa.intencao != "ditar_prompt" or tarefa.fluxo not in ("confirmar", "projeto", "conversa"):
+                continue
+            with self.subTest(tarefa.id):
+                for trecho in ('"Send it?"', '"Envio?"', '"Sent to <projeto-', "janela do Claude Code"):
+                    self.assertIn(trecho, tarefa.acontecer)
+        (cancelar,) = [t for t in TAREFAS if t.fluxo == "cancelar"]
+        self.assertIn("não envia nada", cancelar.acontecer)
+
+    def test_as_perguntas_do_fim_tem_ajuda(self) -> None:
+        linhas: list[str] = []
+        teclas = _teclas(["", "", "s", "n", "q"])
+        sessao = ac.Sessao(lingua="pt", projetos=dict(PROJETOS))
+        with tempfile.TemporaryDirectory() as pasta, contextlib.redirect_stdout(io.StringIO()):
+            ac.correr_sessao(
+                sessao, [POR_ID["a-01"], POR_ID["l-01"]], Path(pasta) / "sessao.json", tecla=teclas,
+                escrever=linhas.append, agora=_relogio(),
+            )
+            guardada = ac.ler_sessao(Path(pasta) / "sessao.json")
+        texto = "\n".join(linhas)
+        self.assertIn("Inventou = o texto enviado tinha algum pedido que NÃO disseste.", texto)
+        self.assertIn(ac.AJUDA_FEZ, texto)
+        self.assertIn(ac.PERGUNTA_INVENTOU, " ".join(teclas.perguntas))
+        # As teclas e o registo nao mudam: s = fez, n = nao inventou.
+        self.assertEqual([(r.id, r.fez_o_pedido, r.inventou) for r in guardada.tarefas], [("a-01", True, False)])
+
+
+class TestEcraInicial(unittest.TestCase):
+    def test_diz_o_que_o_sponsor_precisa_antes_da_primeira_tarefa(self) -> None:
+        for lingua in ac.LINGUAS:
+            texto = "\n".join(ac.texto_do_ecra_inicial(lingua, PROJETOS))
+            with self.subTest(lingua):
+                for trecho in (
+                    "só UM jarvis",
+                    "Shift da direita",
+                    '"hey jarvis"',
+                    "diz-te exatamente o que responder",
+                    "YES envia a sério para o Claude Code do projeto",
+                    "abre-se uma janela do Claude Code com um aviso",
+                    "aceita o aviso e deixa a janela aberta",
+                    "Nunca feches essa janela",
+                    "pedidos que só leem",
+                    "exemplo-um",
+                    FIM_DO_DITADO[lingua],
+                ):
+                    self.assertIn(trecho, texto)
+                self.assertNotRegex(texto, r"<[^>]*>")
+
+    def test_enter_segue_e_q_sai(self) -> None:
+        linhas: list[str] = []
+        teclas = _teclas([""])
+        self.assertTrue(ac.mostrar_ecra_inicial("en", PROJETOS, tecla=teclas, escrever=linhas.append))
+        self.assertIn("Enter", teclas.perguntas[0])
+        self.assertIn("janela do Claude Code", "\n".join(linhas))
+        self.assertFalse(ac.mostrar_ecra_inicial("en", PROJETOS, tecla=_teclas(["q"]), escrever=lambda _t: None))
+
+    def _main(self, argv, tecla_do_ecra):
+        """Corre main() sem jarvis, sem config.toml real e sem escrever evidencia; devolve as chamadas."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(pasta.cleanup)
+        chamadas: list[str] = []
+        guardada = Path(pasta.name) / "sessao-20260925-100000.json"
+        ac.guardar_sessao(ac.Sessao(lingua="pt", projetos=dict(PROJETOS)), guardada)
+
+        def ecra(lingua, projetos, **_):
+            chamadas.append(f"ecra:{lingua}:{sorted(projetos.values())}")
+            return tecla_do_ecra == ""
+
+        def sessao(*_a, **_k):
+            chamadas.append("sessao")
+            return True
+
+        config = SimpleNamespace(
+            projetos=[SimpleNamespace(nome=n) for n in ("exemplo-um", "exemplo-dois", "exemplo-tres")],
+            ouvido=SimpleNamespace(lingua="pt"),
+        )
+        avaliacao = SimpleNamespace(estado=ac.ESTADO_PENDENTE, falhas=[])
+        with contextlib.ExitStack() as pilha:
+            for nome, valor in (
+                ("mostrar_ecra_inicial", ecra),
+                ("correr_sessao", sessao),
+                ("jarvis_a_correr", lambda _l: True),
+                ("_log_de_hoje", lambda: []),
+                ("ultima_sessao", lambda: guardada),
+                ("carregar_config", lambda _c: config),
+                ("relatorio", lambda *_a, **_k: avaliacao),
+                ("PASTA_SESSOES", Path(pasta.name)),
+            ):
+                pilha.enter_context(mock.patch.object(ac, nome, valor))
+            pilha.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            codigo = ac.main(argv)
+        return codigo, chamadas
+
+    def test_main_mostra_o_ecra_antes_da_primeira_tarefa(self) -> None:
+        for argv in (["--continuar"], ["--projeto-teste", "exemplo-tres"]):
+            with self.subTest(argv):
+                codigo, chamadas = self._main(argv, "")
+                self.assertEqual(codigo, 0)
+                self.assertEqual(len(chamadas), 2)
+                self.assertTrue(chamadas[0].startswith("ecra:pt:"))
+                self.assertEqual(chamadas[1], "sessao")
+
+    def test_q_no_ecra_inicial_nao_comeca_as_tarefas(self) -> None:
+        codigo, chamadas = self._main(["--continuar"], "q")
+        self.assertEqual(codigo, 0)
+        self.assertEqual([c.split(":")[0] for c in chamadas], ["ecra"])
+
+
+class TestGuiaoEmTexto(unittest.TestCase):
+    def test_antes_de_comecar_diz_o_mesmo_que_o_ecra(self) -> None:
+        texto = ac.GUIAO.read_text(encoding="utf-8")
+        antes = texto[texto.index("## Antes de começar"):texto.index("## Como se mede")]
+        for trecho in (
+            "só UM jarvis",
+            "Shift da direita",
+            '"hey jarvis"',
+            "YES",
+            "ABORT",
+            "janela do Claude Code com um aviso",
+            "deixa a janela aberta",
+            "pedidos que só leem",
+            "O QUE DIZER",
+            "NO FIM RESPONDE",
+            "O QUE DEVE ACONTECER",
+        ):
+            self.assertIn(trecho, antes)
+        fluxos = texto[texto.index("Fluxos"):texto.index("| id |")]
+        for trecho in ("ABORT", "YES", "Don't change anything.", "Não mudes nada."):
+            self.assertIn(trecho, fluxos)
 
 
 # --- Linha de comandos --------------------------------------------------------------

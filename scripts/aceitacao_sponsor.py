@@ -104,7 +104,9 @@ MARCADORES = ("<projeto-1>", "<projeto-2>", "<projeto-teste>")
 MARCADOR_TESTE = "<projeto-teste>"
 SEM_PROJETO = "—"
 LINGUAS = ("en", "pt")
-COLUNAS = ("id", "caso", "tarefa", "exemplo (en)", "exemplo (pt)", "intenção", "projeto", "fluxo")
+COLUNAS = (
+    "id", "caso", "tarefa", "exemplo (en)", "exemplo (pt)", "o que deve acontecer", "intenção", "projeto", "fluxo",
+)
 PADRAO_ID = re.compile(r"^(a|b|c|d|l)-\d{2}$")
 PADRAO_MARCADOR = re.compile(r"<[^>]*>")
 
@@ -152,6 +154,81 @@ PASSO_DO_SPONSOR = (
 )
 
 
+#: O que o Sponsor responde no fim de cada fluxo: as palavras que o jarvis
+#: aceita hoje. Vem daqui e nunca do guiao, para o guiao nao as contradizer.
+RESPOSTAS_DO_FLUXO = {
+    "imediato": {
+        "en": "nada, o jarvis responde sozinho",
+        "pt": "nada, o jarvis responde sozinho",
+    },
+    "confirmar": {
+        "en": 'YES (envia ou faz a sério)',
+        "pt": 'YES ("sim") — envia ou faz a sério',
+    },
+    "cancelar": {
+        "en": 'ABORT (ou "cancel") — nada é enviado',
+        "pt": 'ABORT ("aborta"; "cancel" ou "cancela" também servem) — nada é enviado',
+    },
+    "corrigir": {
+        "en": '"no, change X to Y" (ou "add ...") e depois YES',
+        "pt": '"no, change X to Y" ("não, muda X para Y") ou "add ..." ("acrescenta ..."), e depois YES ("sim")',
+    },
+    "projeto": {
+        "en": "o nome do projeto e depois YES",
+        "pt": 'o nome do projeto e depois YES ("sim")',
+    },
+    "conversa": {
+        "en": 'YES; quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis") e depois YES',
+        "pt": 'YES ("sim"); quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis") '
+        'e depois YES ("sim")',
+    },
+}
+
+#: Uma frase para as tarefas que mexem num run FORJA verdadeiro.
+AVISOS_DO_RUN = {
+    "lancar_run": f"Esta tarefa lança a sério um run FORJA curto no {MARCADOR_TESTE}; o objetivo só lê, "
+    "e a tarefa seguinte para-o.",
+    "parar_run": f"Esta tarefa para a sério o run FORJA curto do {MARCADOR_TESTE}.",
+    "retomar_run": f"Esta tarefa retoma a sério o run FORJA curto do {MARCADOR_TESTE}; "
+    "a tarefa seguinte para-o outra vez.",
+}
+
+SEPARADOR = "=" * 72
+ROTULO_DIZER = "O QUE DIZER:"
+ROTULO_RESPONDER = "NO FIM RESPONDE:"
+ROTULO_ACONTECER = "O QUE DEVE ACONTECER:"
+
+#: As perguntas do fim de cada tarefa, cada uma com uma frase de ajuda.
+PERGUNTA_FEZ = "O jarvis fez o que diz O QUE DEVE ACONTECER?"
+AJUDA_FEZ = "Ajuda: s = sim, fez isso; n = não (fez outra coisa, não percebeu, ou não respondeu)."
+PERGUNTA_INVENTOU = "O jarvis inventou algum pedido?"
+AJUDA_INVENTOU = (
+    "Ajuda: Inventou = o texto enviado tinha algum pedido que NÃO disseste. "
+    "s = sim, inventou; n = não, só tinha o que disseste."
+)
+
+#: O ecra antes da primeira tarefa, em portugues simples.
+ECRA_INICIAL = (
+    "ANTES DE COMEÇAR — lê isto uma vez (1 minuto)",
+    "",
+    "1. Tem só UM jarvis aberto. Se houver outra janela do jarvis, fecha-a primeiro.",
+    '2. Para falar com o jarvis: carrega no Shift da direita enquanto falas, ou começa a frase com "hey jarvis".',
+    "3. No fim de cada tarefa, este ecrã diz-te exatamente o que responder ao jarvis (linha NO FIM RESPONDE).",
+    '   YES envia; ABORT cancela e nada é enviado; "no, change X to Y" corrige o texto antes de enviar.',
+    "4. YES envia a sério para o Claude Code do projeto. Na primeira vez que isso acontece num projeto,",
+    "   abre-se uma janela do Claude Code com um aviso: aceita o aviso e deixa a janela aberta.",
+    "   Nunca feches essa janela: é por ela que o jarvis fala com o Claude Code.",
+    "5. Usa pedidos que só leem, para não mexer nos projetos. Por exemplo:",
+    "   {exemplo}",
+    "   As frases da linha O QUE DIZER já são assim.",
+)
+
+EXEMPLO_DO_ECRA_INICIAL = {
+    "en": "\"tell <projeto-1> to list the files in the docs folder. Don't change anything.\"",
+    "pt": "\"diz ao <projeto-1> para listar os ficheiros da pasta docs. Não mudes nada.\"",
+}
+
+
 class ErroDoGuiao(Exception):
     """O guiao nao cumpre o formato; a mensagem diz a linha e o problema."""
 
@@ -169,6 +246,8 @@ class Tarefa:
     caso: str
     tarefa: str
     exemplos: dict
+    #: Uma frase com o que o jarvis deve fazer quando a tarefa corre bem.
+    acontecer: str
     intencao: str
     #: O marcador do projeto esperado, ou None quando o jarvis nao deve escolher projeto.
     projeto: str | None
@@ -210,7 +289,7 @@ def ler_guiao(caminho: Path = GUIAO) -> list[Tarefa]:
             continue
         if len(celulas) != len(COLUNAS):
             raise ErroDoGuiao(f"{Path(caminho).name}:{numero}: {len(celulas)} colunas, esperava {len(COLUNAS)}")
-        id_, caso, tarefa, exemplo_en, exemplo_pt, intencao, projeto, fluxo = celulas
+        id_, caso, tarefa, exemplo_en, exemplo_pt, acontecer, intencao, projeto, fluxo = celulas
         onde = f"{Path(caminho).name}:{numero} ({id_})"
         if not PADRAO_ID.match(id_):
             raise ErroDoGuiao(f"{onde}: id tem de ser a-NN, b-NN, c-NN, d-NN ou l-NN")
@@ -225,7 +304,10 @@ def ler_guiao(caminho: Path = GUIAO) -> list[Tarefa]:
             raise ErroDoGuiao(f"{onde}: intencao '{intencao}' fora da lista fechada do interprete")
         if fluxo not in FLUXOS:
             raise ErroDoGuiao(f"{onde}: fluxo '{fluxo}' fora de {FLUXOS}")
-        for texto_com_marcadores in (tarefa, exemplo_en, exemplo_pt):
+        vazias = [coluna for coluna, celula in zip(COLUNAS, celulas) if not celula]
+        if vazias:
+            raise ErroDoGuiao(f"{onde}: celula vazia em {vazias}")
+        for texto_com_marcadores in (tarefa, exemplo_en, exemplo_pt, acontecer):
             for marcador in PADRAO_MARCADOR.findall(texto_com_marcadores):
                 if marcador not in MARCADORES:
                     raise ErroDoGuiao(f"{onde}: so se aceitam os marcadores {MARCADORES}, nao '{marcador}'")
@@ -240,7 +322,7 @@ def ler_guiao(caminho: Path = GUIAO) -> list[Tarefa]:
         if fluxo == "projeto" and projeto_esperado is not None:
             raise ErroDoGuiao(f"{onde}: o fluxo 'projeto' e um ditado sem projeto ('{SEM_PROJETO}')")
         tarefas.append(
-            Tarefa(id_, caso, tarefa, {"en": exemplo_en, "pt": exemplo_pt}, intencao, projeto_esperado, fluxo)
+            Tarefa(id_, caso, tarefa, {"en": exemplo_en, "pt": exemplo_pt}, acontecer, intencao, projeto_esperado, fluxo)
         )
     if not cabecalho_visto:
         raise ErroDoGuiao(f"{Path(caminho).name}: tabela do guiao nao encontrada")
@@ -1214,6 +1296,42 @@ def tecla_do_teclado(pergunta: str, validas: Sequence[str]) -> str:
             return carater
 
 
+def texto_do_ecra_inicial(lingua: str, projetos: dict[str, str]) -> list[str]:
+    """As linhas do ecra antes da primeira tarefa, com o exemplo na lingua da sessao."""
+    exemplo = trocar_marcadores(EXEMPLO_DO_ECRA_INICIAL[lingua], projetos)
+    return ["", SEPARADOR, *(linha.format(exemplo=exemplo) for linha in ECRA_INICIAL), SEPARADOR]
+
+
+def mostrar_ecra_inicial(
+    lingua: str,
+    projetos: dict[str, str],
+    *,
+    tecla: Callable[[str, Sequence[str]], str] = tecla_do_teclado,
+    escrever: Callable[[str], object] = print,
+) -> bool:
+    """Mostra o ecra inicial e espera pelo Enter. False quando o Sponsor sai com q."""
+    for linha in texto_do_ecra_inicial(lingua, projetos):
+        escrever(linha)
+    return tecla("Enter para seguir para a primeira tarefa (q sai):", (ENTER, "q")) == ENTER
+
+
+def linhas_da_tarefa(tarefa: Tarefa, lingua: str, projetos: dict[str, str]) -> list[str]:
+    """O que o ecra mostra de uma tarefa: o pedido e as tres linhas em destaque."""
+    linhas = [f"   {trocar_marcadores(tarefa.tarefa, projetos)}"]
+    aviso = AVISOS_DO_RUN.get(tarefa.intencao)
+    if aviso:
+        linhas.append(f"   {trocar_marcadores(aviso, projetos)}")
+    largura = max(len(ROTULO_DIZER), len(ROTULO_RESPONDER), len(ROTULO_ACONTECER))
+    linhas += [
+        f"   {SEPARADOR}",
+        f"   {ROTULO_DIZER:<{largura}} \"{trocar_marcadores(tarefa.exemplos[lingua], projetos)}\"",
+        f"   {ROTULO_RESPONDER:<{largura}} {RESPOSTAS_DO_FLUXO[tarefa.fluxo][lingua]}",
+        f"   {ROTULO_ACONTECER:<{largura}} {trocar_marcadores(tarefa.acontecer, projetos)}",
+        f"   {SEPARADOR}",
+    ]
+    return linhas
+
+
 def correr_sessao(
     sessao: Sessao,
     tarefas: Sequence[Tarefa],
@@ -1235,10 +1353,10 @@ def correr_sessao(
             continue
         escrever("")
         escrever(f"[{indice}/{len(tarefas)}] {tarefa.id} — caso ({tarefa.caso})")
-        escrever(f"   {trocar_marcadores(tarefa.tarefa, sessao.projetos)}")
-        escrever(f"   exemplo: \"{trocar_marcadores(tarefa.exemplos[sessao.lingua], sessao.projetos)}\"")
+        for linha in linhas_da_tarefa(tarefa, sessao.lingua, sessao.projetos):
+            escrever(linha)
         while True:
-            escolha = tecla("   Enter para começar (p salta, q guarda e sai):", (ENTER, "p", "q"))
+            escolha = tecla("   Enter para começar esta tarefa (p salta esta tarefa, q guarda e sai):", (ENTER, "p", "q"))
             if escolha == "q":
                 guardar_sessao(sessao, caminho)
                 return False
@@ -1247,8 +1365,10 @@ def correr_sessao(
                 guardar_sessao(sessao, caminho)
                 break
             inicio = agora_iso(agora())
-            escrever("   Depois do recap, responde logo, sem \"hey jarvis\" nem tecla.")
-            escolha = tecla("   Faz a tarefa no jarvis. Enter quando ele acabar (q sai sem contar esta):", (ENTER, "q"))
+            escrever("   Agora fala com o jarvis (Shift da direita ou \"hey jarvis\") e diz a frase de O QUE DIZER.")
+            if tarefa.fluxo != "imediato":
+                escrever("   Quando ele acabar de ler o texto, responde logo o que diz NO FIM RESPONDE, sem tecla.")
+            escolha = tecla("   Enter quando o jarvis acabar (q sai sem contar esta tarefa):", (ENTER, "q"))
             if escolha == "q":
                 guardar_sessao(sessao, caminho)
                 return False
@@ -1260,11 +1380,11 @@ def correr_sessao(
                 if tecla("   r repete a tarefa, Enter segue assim:", ("r", ENTER)) == "r":
                     continue
             registo = RegistoDaTarefa(tarefa.id, FEITA, inicio=inicio, fim=fim)
-            registo.fez_o_pedido = tecla("   O jarvis fez o que pediste? (s/n)", ("s", "n")) == "s"
+            escrever(f"   {AJUDA_FEZ}")
+            registo.fez_o_pedido = tecla(f"   {PERGUNTA_FEZ} (s/n)", ("s", "n")) == "s"
             if tarefa.pergunta_inventados:
-                registo.inventou = (
-                    tecla("   O que foi enviado tinha algum pedido que NÃO fizeste? (s/n)", ("s", "n")) == "s"
-                )
+                escrever(f"   {AJUDA_INVENTOU}")
+                registo.inventou = tecla(f"   {PERGUNTA_INVENTOU} (s/n)", ("s", "n")) == "s"
             sessao.tarefas.append(registo)
             guardar_sessao(sessao, caminho)
             break
@@ -1390,6 +1510,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Sessao de aceitacao | guiao: {len(tarefas)} tarefas | lingua dos exemplos: {sessao.lingua}")
     print(f"Registo da sessao: {caminho_para_mostrar(caminho)} (pasta ignorada pelo Git)")
+    if not mostrar_ecra_inicial(sessao.lingua, sessao.projetos):
+        guardar_sessao(sessao, caminho)
+        print("\nSessao guardada. Para continuar: .venv\\Scripts\\python scripts/aceitacao_sponsor.py --continuar")
+        return 0
     acabou = correr_sessao(sessao, tarefas, caminho, frases_na_janela=frases_na_janela)
     if not acabou:
         print("\nSessao guardada. Para continuar: .venv\\Scripts\\python scripts/aceitacao_sponsor.py --continuar")
