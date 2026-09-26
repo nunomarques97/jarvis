@@ -439,6 +439,44 @@ class TestConfirmacaoNoProcesso(unittest.TestCase):
         self.assertEqual(m.canal.recebidos, [("atlas", "Fix the login test.")])
         self.assertEqual(m.falados[-1], "Sent to atlas.")
 
+    def test_horas_com_recap_pendente_sao_respondidas_e_o_pedido_fica(self) -> None:
+        m = Montagem([resposta_llm("ditar_prompt", "atlas", "Add tests to the configuration module.")], lingua="en")
+        m.ouvir("in atlas add tests to the configuration module")
+        recap = m.jarvis.confirmacao.recap
+        m.avancar(15)
+        m.ouvir("hey jarvis, what time is it?", gatilho=GATILHO_ATIVACAO)
+        self.assertEqual(m.locais, [("horas", None, "horas")])
+        self.assertEqual(m.falados[-1], "São 15 horas e 30 minutos.")
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertIs(m.jarvis.confirmacao.recap, recap)
+        self.assertEqual(len(m.llm.pedidos), 1, "as horas nao passam pelo LLM")
+        self.assertEqual(m.jarvis.painel.atual, A_ESPERA)
+        m.avancar(15)
+        m.jarvis.verificar_tempo()
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "o prazo recomecou depois das horas")
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Add tests to the configuration module.")])
+
+    def test_cancelar_mal_ouvido_cancela_sem_enviar(self) -> None:
+        m = Montagem([resposta_llm("ditar_prompt", "atlas", "Fix the login test.")], lingua="en")
+        m.ouvir("in atlas fix the login test")
+        m.avancar()
+        m.ouvir("Uh castle.")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.falados[-1], "Cancelled, nothing was sent.")
+
+    def test_sim_pouco_claro_nao_envia_e_so_o_sim_claro_envia(self) -> None:
+        m = Montagem([resposta_llm("ditar_prompt", "atlas", "Fix the login test.")], lingua="en")
+        m.ouvir("in atlas fix the login test")
+        m.avancar()
+        m.ouvir("yet")
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        m.avancar()
+        m.ouvir("Uh, yes.")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Fix the login test.")])
+
 
 # --- Nomes mal ouvidos e correcao sem pedido ------------------------------------------
 

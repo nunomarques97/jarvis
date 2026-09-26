@@ -18,8 +18,13 @@ Com um pedido pendente, cada resposta do utilizador e uma de:
     exatamente o que foi mostrado, e so esse;
   - "nao, muda X para Y" / "acrescenta ...": o interprete reescreve o pedido
     mantendo o resto, e o jarvis volta a recapitular;
-  - "cancela" (ou "nao" sozinho): cancela sem enviar;
+  - "cancela" (ou "nao" sozinho): cancela sem enviar; um "cancel" mal
+    ouvido ("Uh castle.") tambem conta, mas um "sim" tem de ser claro;
+  - "que horas sao" / "what time is it" (a frase inteira, na lista branca
+    do router): o jarvis diz as horas e o pedido continua pendente;
   - outra coisa: o jarvis volta a perguntar; a terceira vez cancela.
+
+As hesitacoes (uh, um, hum, ...) e a pontuacao nao contam nas respostas.
 
 Sem resposta dentro do prazo (20 s por omissao, `[interprete].confirmacao_s`
 no config.toml) o pedido e cancelado sem enviar. Uma resposta que chega
@@ -59,7 +64,7 @@ from jarvis.interprete import (
     projetos_mencionados,
     sem_palavra_de_ativacao,
 )
-from jarvis.router import _normalizar
+from jarvis.router import _normalizar, encaminhar
 
 #: No maximo este numero de palavras do prompt e dito em voz alta; um prompt
 #: mais longo e resumido na voz e mostrado inteiro na consola.
@@ -125,28 +130,128 @@ _VERBOS_DE_ACRESCENTO = frozenset(
 )
 _SIM_MAS_NO_INICIO = re.compile(r"^\W*(?:sim|yes)\W+(?:mas|but)\W+", re.IGNORECASE)
 
+#: Hesitacoes que o STT transcreve ("Uh, yes.", "hum, cancela"), ja
+#: normalizadas. So saem do inicio e do fim da frase: no meio "um" e uma
+#: palavra em portugues ("muda um teste").
+_HESITACOES = frozenset(
+    {"uh", "uhh", "uhm", "um", "umm", "hum", "hmm", "hm", "mm", "eh", "ehm", "er", "erm", "ah", "ahm", "ha", "han"}
+)
+_HESITACAO_NO_INICIO = re.compile(
+    r"^\W*(?:" + "|".join(sorted(_HESITACOES | {"hã", "hãn"}, key=len, reverse=True)) + r")\b\W*",
+    re.IGNORECASE,
+)
 
-def _palavras(texto: str) -> list[str]:
+#: Formas de cancelar aceites por aproximacao ("Uh castle.", "cancer", "can
+#: sell"). Cancelar nunca tem efeito, por isso pode ser tolerante; enviar
+#: nunca e aproximado.
+_FRASES_DE_CANCELAR_APROXIMADAS = ("cancel", "cancel it", "cancela", "cancelar", "cancele", "cancelo", "cancela isso")
+#: Uma frase mais comprida do que isto nunca e um cancelar mal ouvido.
+_PALAVRAS_DO_CANCELAR_APROXIMADO = 3
+#: Diferencas maximas entre os esqueletos de consoantes (Levenshtein).
+_DISTANCIA_DO_CANCELAR_APROXIMADO = 1
+
+
+def _sem_hesitacoes(palavras: list[str], *, no_fim: bool) -> list[str]:
+    """Tira as hesitacoes do inicio (e do fim, se pedido), nunca esvaziando a frase."""
+    inicio, fim = 0, len(palavras)
+    while inicio < fim and palavras[inicio] in _HESITACOES:
+        inicio += 1
+    while no_fim and fim > inicio and palavras[fim - 1] in _HESITACOES:
+        fim -= 1
+    return palavras[inicio:fim] if inicio < fim else palavras
+
+
+def _texto_sem_hesitacoes(texto: str) -> str:
+    """O texto original sem as hesitacoes do inicio, nunca esvaziado."""
+    restante = texto
+    while True:
+        seguinte = _HESITACAO_NO_INICIO.sub("", restante, count=1)
+        if seguinte == restante or not _normalizar(seguinte):
+            return restante
+        restante = seguinte
+
+
+def _palavras(texto: str, *, hesitacoes_no_fim: bool = False) -> list[str]:
+    """As palavras normalizadas, sem hesitacoes no inicio nem cortesia no fim.
+
+    As hesitacoes do fim so saem a pedido, ao decidir enviar ou cancelar: numa
+    correcao o "um" final e uma palavra ("muda o dois para um").
+    """
     palavras = _normalizar(sem_palavra_de_ativacao(limpar_texto(texto))).split()
+    palavras = _sem_hesitacoes(palavras, no_fim=hesitacoes_no_fim)
     for cortesia in _CORTESIAS_NO_FIM:
         partes = cortesia.split()
         if len(palavras) > len(partes) and palavras[-len(partes) :] == partes:
-            palavras = palavras[: -len(partes)]
+            palavras = _sem_hesitacoes(palavras[: -len(partes)], no_fim=hesitacoes_no_fim)
     return palavras
+
+
+def _esqueleto(palavras: list[str] | tuple[str, ...]) -> str:
+    """Esqueleto fonetico simples: as consoantes como se ouvem, sem vogais.
+
+    "castle" -> "ksl", "cancel" / "can sell" -> "knsl", "cancer" -> "knsr".
+    """
+    texto = "".join(palavras)
+    texto = texto.replace("ph", "f").replace("ck", "k")
+    texto = texto.replace("stl", "sl")  # "castle": o t nao se ouve
+    texto = re.sub(r"c(?=[eiy])", "s", texto)
+    texto = texto.replace("c", "k").replace("q", "k").replace("z", "s")
+    texto = re.sub(r"(.)\1+", r"\1", texto)
+    return texto[:1] + re.sub(r"[aeiouyhw]", "", texto[1:])
+
+
+def _distancia(a: str, b: str) -> int:
+    """Distancia de Levenshtein entre dois textos curtos."""
+    anterior = list(range(len(b) + 1))
+    for i, letra_a in enumerate(a, 1):
+        atual = [i]
+        for j, letra_b in enumerate(b, 1):
+            atual.append(min(anterior[j] + 1, atual[j - 1] + 1, anterior[j - 1] + (letra_a != letra_b)))
+        anterior = atual
+    return anterior[-1]
+
+
+_ESQUELETOS_DE_CANCELAR = frozenset(_esqueleto(frase.split()) for frase in _FRASES_DE_CANCELAR_APROXIMADAS)
+
+
+def _parece_cancelar(palavras: list[str]) -> bool:
+    """A frase curta soa a "cancel"/"cancela". Deterministico."""
+    if not palavras or len(palavras) > _PALAVRAS_DO_CANCELAR_APROXIMADO:
+        return False
+    esqueleto = _esqueleto(palavras)
+    if len(esqueleto) < 3:
+        return False
+    return any(_distancia(esqueleto, alvo) <= _DISTANCIA_DO_CANCELAR_APROXIMADO for alvo in _ESQUELETOS_DE_CANCELAR)
 
 
 def classificar_resposta(texto: str | None) -> tuple[TipoDeResposta, str]:
     """(tipo, texto da edicao) de uma resposta ao recap. Deterministico.
 
-    So uma frase que e toda ela um "sim"/"envia" confirma: "sim, mas muda X"
-    e uma correcao, "acrescenta que e urgente" nunca envia.
+    As hesitacoes (uh, um, hum, ...) e a pontuacao nao contam. So uma frase
+    que e toda ela um "sim"/"envia" confirma, sem aproximacao nenhuma: "sim,
+    mas muda X" e uma correcao, "acrescenta que e urgente" nunca envia.
+    Cancelar aceita um "cancel" mal ouvido ("Uh castle."), mas so depois de
+    se ver que a frase nao confirma, nao corrige nem acrescenta.
     """
-    limpo = sem_palavra_de_ativacao(limpar_texto(texto or ""))
-    palavras = _palavras(limpo)
+    tipo, edicao, _aproximado = _classificar(texto)
+    return tipo, edicao
+
+
+def _classificar(texto: str | None) -> tuple[TipoDeResposta, str, bool]:
+    """(tipo, texto da edicao, cancelar por aproximacao)."""
+    limpo = _texto_sem_hesitacoes(sem_palavra_de_ativacao(limpar_texto(texto or "")))
+    palavras = _palavras(limpo, hesitacoes_no_fim=True)
     if not palavras:
-        return "outro", ""
+        return "outro", "", False
     if " ".join(palavras) in FRASES_DE_CONFIRMAR:
-        return "confirmar", ""
+        return "confirmar", "", False
+    tipo, edicao = _classificar_sem_confirmar(limpo, palavras)
+    if tipo == "outro" and _parece_cancelar(palavras):
+        return "cancelar", "", True
+    return tipo, edicao, False
+
+
+def _classificar_sem_confirmar(limpo: str, palavras: list[str]) -> tuple[TipoDeResposta, str]:
     if palavras[0] in {"sim", "yes"} and len(palavras) > 2 and palavras[1] in {"mas", "but"}:
         palavras = palavras[2:]
         limpo = _SIM_MAS_NO_INICIO.sub("", limpo, count=1)
@@ -497,17 +602,23 @@ class Confirmacao:
             elif dito_em is not None and dito_em < self._apresentado_em:
                 return Desfecho("ignorado", "resposta dita antes do recap", recap=self._recap)
             else:
-                tipo, edicao = classificar_resposta(texto)
                 recap = self._recap
                 assert recap is not None
                 pendente = self._pendente
-                if tipo == "confirmar" and not recap.falta_projeto:
+                horas = self._horas_pedidas(texto)
+                tipo, edicao, aproximado = _classificar(texto)
+                projeto_dito = recap.falta_projeto and self._projeto_dito(texto) is not None
+                if horas is not None:
+                    # So le as horas: responde e o pedido continua a espera.
+                    self._ocupado = True
+                    acao = "horas"
+                elif tipo == "confirmar" and not recap.falta_projeto:
                     self._limpar()
                     acao = "executar"
-                elif tipo == "cancelar":
+                elif tipo == "cancelar" and not (aproximado and projeto_dito):
                     self._limpar()
                     acao = "cancelar"
-                elif recap.falta_projeto and self._projeto_dito(texto) is not None:
+                elif projeto_dito:
                     # "no orbita" e a resposta a "qual projeto", nao um "no".
                     self._ocupado = True
                     acao = "projeto"
@@ -525,6 +636,8 @@ class Confirmacao:
 
         if acao == "expirar":
             return self._expirar()
+        if acao == "horas":
+            return self._horas_com_pedido_pendente(pendente, horas)
         if acao == "executar":
             return self._correr(recap.pedido, recap, "confirmado")
         if acao == "cancelar":
@@ -542,6 +655,28 @@ class Confirmacao:
             projeto = self._projeto_dito(texto)
             return self._propor(replace(pendente, projeto=projeto, pergunta=None))
         return self._aplicar_correcao(pendente, recap, edicao, tipo)
+
+    def _horas_pedidas(self, texto: str | None) -> str | None:
+        """"horas" ou "data" se a frase inteira e esse pedido na lista branca do router."""
+        frase = _texto_sem_hesitacoes(sem_palavra_de_ativacao(limpar_texto(texto or "")))
+        try:
+            encaminhado = encaminhar(frase, self.interprete.config)
+        except Exception:  # noqa: BLE001 - na duvida, e uma resposta ao recap
+            return None
+        if encaminhado.tipo != "local" or encaminhado.nome_acao != "horas_e_data":
+            return None
+        return "data" if encaminhado.argumento == "data" else "horas"
+
+    def _horas_com_pedido_pendente(self, pendente: Interpretacao, detalhe: str) -> Desfecho:
+        """Diz as horas ou a data; o pedido pendente fica e o prazo recomeca."""
+        self._mostrar("confirmacao | horas pedidas com um pedido a espera; o pedido continua pendente")
+        try:
+            return self._correr(Pedido("horas", None, "", detalhe), None, "horas com um pedido pendente")
+        finally:
+            with self._trinco:
+                if self._pendente is pendente:
+                    self._ocupado = False
+                    self._prazo = self._relogio() + self.limite_s
 
     def e_correcao_sem_pedido(self, texto: str | None) -> bool:
         """A frase e claramente uma correcao e nao ha nenhum pedido a espera."""

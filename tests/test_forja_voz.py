@@ -480,16 +480,16 @@ class TestPeloJarvis(_Base):
     def test_lancar_so_depois_do_sim_e_cancelar_nao_lanca(self) -> None:
         self.cenario()
         m = self.montar([resposta_llm("lancar_run", "atlas", OBJETIVO), resposta_llm("lancar_run", "atlas", OBJETIVO)])
-        m.ouvir("lança um run no atlas para migrar os testes")
+        m.ouvir("lança um run no atlas para migrar os testes para pytest e manter tudo verde")
         self.assertEqual(self.lancados, [])
         m.avancar()
         m.ouvir("cancela")
         self.assertEqual(self.lancados, [])
-        m.ouvir("lança um run no atlas para migrar os testes")
+        m.ouvir("lança um run no atlas para migrar os testes para pytest e manter tudo verde")
         m.avancar()
         m.ouvir("sim")
         self.assertEqual(len(self.lancados), 1)
-        self.assertEqual(self.lancados[0][0][-1], OBJETIVO)
+        self.assertEqual(self.lancados[0][0][-1], OBJETIVO + ".")
         self.assertEqual(m.falados[-1], "Lancei o run no atlas. Pergunta-me pelo estado quando quiseres.")
 
     def test_parar_e_retomar_tambem_pedem_confirmacao(self) -> None:

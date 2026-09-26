@@ -167,7 +167,7 @@ class TestEsquemaEListaFechada(unittest.TestCase):
         modelo, mensagens = cliente.pedidos[0]
         self.assertEqual(modelo, "qwen3:8b")
         self.assertEqual(mensagens[0]["role"], "system")
-        self.assertEqual(mensagens[1], {"role": "user", "content": "no atlas corrige o login"})
+        self.assertEqual(mensagens[-1], {"role": "user", "content": "no atlas corrige o login"})
         self.assertEqual(resultado.texto, "Hey Jarvis, no atlas corrige o login")
         self.assertEqual((resultado.intencao, resultado.projeto, resultado.prompt), ("ditar_prompt", "atlas", "Corrige o login."))
         self.assertEqual(resultado.origem, "llm")
@@ -185,8 +185,8 @@ class TestEsquemaEListaFechada(unittest.TestCase):
     def test_caracteres_de_controlo_nunca_chegam_ao_prompt(self) -> None:
         interprete, cliente = _interprete([_llm("ditar_prompt", "atlas", "linha um\r\nlinha dois\x00")])
         resultado = interprete.interpretar("no atlas\r\n faz\x1b isto")
-        self.assertEqual(cliente.pedidos[0][1][1]["content"], "no atlas faz isto")
-        self.assertEqual(resultado.prompt, "linha um linha dois")
+        self.assertEqual(cliente.pedidos[0][1][-1]["content"], "no atlas faz isto")
+        self.assertEqual(resultado.prompt, "Linha um linha dois.")
 
 
 # --- Projeto nunca adivinhado -------------------------------------------------------
@@ -531,7 +531,8 @@ class TestNomesMalOuvidos(unittest.TestCase):
                 interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", prompt)])
                 resultado = interprete.interpretar("tell CryptoRather to add test to the configuration module.")
                 self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
-                self.assertEqual(resultado.prompt, prompt)
+                # O endereco ao projeto, certo ou mal ouvido, sai do prompt.
+                self.assertEqual(resultado.prompt, "Add tests to the configuration module.")
 
     def test_prompt_reescrito_financeiro_com_o_nome_mal_ouvido_e_recusado(self) -> None:
         interprete, cliente = _interprete_com_cripto(
@@ -970,7 +971,8 @@ class TestPromptReescrito(unittest.TestCase):
         inventado = "Corrige o login. " + "Depois escreve testes, faz commit e push para o main. " * 3
         interprete, _ = _interprete([_llm("ditar_prompt", "atlas", inventado)])
         resultado = interprete.interpretar("no atlas corrige o login")
-        self.assertEqual(resultado.prompt, "no atlas corrige o login")
+        # Fica o texto literal, sem o endereco ao projeto e em forma de frase.
+        self.assertEqual(resultado.prompt, "Corrige o login.")
         self.assertIn("muito mais longo", resultado.motivo)
 
     def test_prompt_vazio_fica_o_texto_literal(self) -> None:
@@ -1009,6 +1011,237 @@ class TestPromptReescrito(unittest.TestCase):
         self.assertFalse(interprete.interpretar("põe o atlas no editor").pode_dispensar_confirmacao)
         self.assertFalse(interprete.interpretar("para o run do atlas").pode_dispensar_confirmacao)
         self.assertTrue(interprete.interpretar("cala-te").pode_dispensar_confirmacao)
+
+
+# --- Ditado limpo: sem endereco ao projeto, sem pedidos acrescentados ---------------------
+
+
+class TestDitadoLimpo(unittest.TestCase):
+    def test_endereco_ao_projeto_sai_com_o_nome_certo_ou_mal_ouvido(self) -> None:
+        casos = {
+            "tell crypto-radar to add tests to the configuration module": "add tests to the configuration module",
+            "Tell CryptoRader to attest to the configuration module.": "attest to the configuration module.",
+            "tell CryptoRather to add tests": "add tests",
+            "tell Crypto Rather to add tests": "add tests",
+            "please tell crypto radar to add tests": "add tests",
+            "uh, tell crypto-radar to add tests": "add tests",
+        }
+        for texto, esperado in casos.items():
+            with self.subTest(texto=texto):
+                obtido = interprete_mod.sem_endereco_ao_projeto(texto, "crypto-radar", NOMES_COM_CRIPTO)
+                self.assertEqual(obtido, esperado)
+
+    def test_formas_ask_in_for_project_e_em_portugues(self) -> None:
+        casos = {
+            "ask atlas to fix the login": "fix the login",
+            "Ask Atlas to fix the login.": "fix the login.",
+            "in atlas, fix the login": "fix the login",
+            "In atlas fix the login": "fix the login",
+            "for project atlas fix the login": "fix the login",
+            "atlas: fix the login": "fix the login",
+            "fix the login in atlas": "fix the login",
+            "fix the login for project atlas.": "fix the login.",
+            "diz ao atlas para corrigir o login": "corrigir o login",
+            "pede ao atlas que corrija o login": "corrija o login",
+            "no atlas, corrige o login": "corrige o login",
+            "no atlas corrige o login": "corrige o login",
+            "corrige o login no atlas": "corrige o login",
+        }
+        for texto, esperado in casos.items():
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_endereco_ao_projeto(texto, "atlas", NOMES), esperado)
+
+    def test_projeto_dito_dentro_do_pedido_fica(self) -> None:
+        casos = {
+            ("tell nimbus to copy the config from atlas", "nimbus"): "copy the config from atlas",
+            ("copy the atlas config into this repo", "nimbus"): "copy the atlas config into this repo",
+            ("fix the chart like in atlas", "atlas"): "fix the chart like in atlas",
+            ("corrige o gráfico como no atlas", "atlas"): "corrige o gráfico como no atlas",
+            ("compare the atlas login with the orbita one", "atlas"): "compare the atlas login with the orbita one",
+            # Endereco a outro projeto que nao o escolhido: nao se mexe.
+            ("tell orbita to fix the login", "atlas"): "tell orbita to fix the login",
+        }
+        for (texto, projeto), esperado in casos.items():
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_endereco_ao_projeto(texto, projeto, NOMES), esperado)
+
+    def test_nunca_esvazia_o_prompt(self) -> None:
+        for texto in ("tell atlas", "in atlas", "no atlas", "atlas", "tell atlas to"):
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_endereco_ao_projeto(texto, "atlas", NOMES), texto)
+        self.assertEqual(
+            interprete_mod.sem_endereco_ao_projeto("tell atlas to fix it", None, NOMES), "tell atlas to fix it"
+        )
+
+    def test_forma_de_frase_nao_troca_palavras(self) -> None:
+        casos = {
+            "fix the login": "Fix the login.",
+            "Fix the login.": "Fix the login.",
+            "why is the build slow?": "Why is the build slow?",
+            "corrige o login,": "Corrige o login.",
+            "ótimo trabalho": "Ótimo trabalho.",
+        }
+        for texto, esperado in casos.items():
+            with self.subTest(texto=texto):
+                obtido = interprete_mod.em_forma_de_frase(texto)
+                self.assertEqual(obtido, esperado)
+                self.assertEqual(obtido.lower().split()[:-1], texto.lower().split()[:-1])
+
+    def test_exemplo_cryptorader_com_o_llm_simulado(self) -> None:
+        interprete, cliente = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Add tests to the configuration module.")]
+        )
+        resultado = interprete.interpretar("Tell CryptoRader to attest to the configuration module.")
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
+        self.assertEqual(resultado.prompt, "Add tests to the configuration module.")
+        self.assertNotIn("acrescenta", resultado.motivo)
+
+    def test_prompt_do_llm_com_endereco_mal_ouvido_perde_o_endereco(self) -> None:
+        interprete, _ = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Tell CryptoRader to add tests to the configuration module.")]
+        )
+        resultado = interprete.interpretar("Tell CryptoRader to attest to the configuration module.")
+        self.assertEqual(resultado.prompt, "Add tests to the configuration module.")
+        self.assertIn("endereco ao projeto", resultado.motivo)
+
+    def test_reescrita_com_pedido_acrescentado_volta_ao_texto_sem_endereco(self) -> None:
+        for acrescentado in (
+            "Add tests to the configuration module and push to main.",
+            "Add tests to the configuration module. Then commit the changes.",
+            "Add tests to the configuration module and update the docs.",
+            "Add tests to the configuration module and restart the server.",
+        ):
+            with self.subTest(prompt=acrescentado):
+                interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", acrescentado)])
+                resultado = interprete.interpretar("Tell CryptoRader to attest to the configuration module.")
+                self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "crypto-radar"))
+                self.assertEqual(resultado.prompt, "Attest to the configuration module.")
+                self.assertIn("acrescenta pedidos", resultado.motivo)
+
+    def test_reescrita_em_portugues_com_pedido_acrescentado(self) -> None:
+        interprete, _ = _interprete([_llm("ditar_prompt", "atlas", "Corrige o login e faz commit.")])
+        resultado = interprete.interpretar("diz ao atlas para corrigir o login")
+        self.assertEqual(resultado.prompt, "Corrigir o login.")
+        self.assertIn("acrescenta pedidos (commit", resultado.motivo)
+
+    def test_commit_parecido_com_uma_palavra_dita_e_recusado(self) -> None:
+        interprete, _ = _interprete([_llm("ditar_prompt", "atlas", "Fix the comment in the parser and commit.")])
+        resultado = interprete.interpretar("tell atlas to fix the comment in the parser")
+        self.assertEqual(resultado.prompt, "Fix the comment in the parser.")
+        self.assertIn("acrescenta pedidos (commit", resultado.motivo)
+
+    def test_pedidos_acrescentados(self) -> None:
+        casos = {
+            ("fix the typo", "Fix the typo and add tests."): ("add", "tests"),
+            ("fix the typo", "Fix the typo. Then commit and push."): ("commit", "push"),
+            ("fix the typo", "Fix the typo and deploy it."): ("deploy",),
+            ("fix the login", "Fix the login and update the docs."): ("update", "docs"),
+            ("fix the typo", "Fix the typo and restart the server."): ("restart",),
+            ("corrige o login", "Corrige o login e escreve testes."): ("escreve", "testes"),
+            # Um termo de pedido nao ganha par por comecar como uma palavra dita.
+            ("fix the comment in the parser", "Fix the comment in the parser and commit."): ("commit",),
+            ("fix the command parser", "Fix the command parser and commit."): ("commit",),
+            ("update the remote url", "Update the remote url and remove the old one."): ("remove",),
+            ("fix the form", "Fix the form and format the code."): ("format",),
+            ("fix the relevant check", "Fix the relevant check and release it."): ("release",),
+            # Nem por trocar a palavra dita por um termo de pedido parecido.
+            ("fix the comment", "Fix the commit."): ("commit",),
+            ("check the remote", "Remove the remote."): ("remove",),
+            # Uma oracao nova so com virgula tambem conta.
+            ("add tests to the configuration module", "Add tests to the configuration module, restart the server."): (
+                "restart",
+            ),
+        }
+        for (frase, prompt), esperado in casos.items():
+            with self.subTest(prompt=prompt):
+                self.assertEqual(interprete_mod.pedidos_acrescentados(frase, prompt), esperado)
+
+    def test_reescritas_fieis_nao_acrescentam_pedidos(self) -> None:
+        casos = (
+            ("Tell CryptoRader to attest to the configuration module.", "Add tests to the configuration module."),
+            ("tell atlas to add test to the configuration module", "Add tests to the configuration module."),
+            (
+                "in atlas the search results come back empty can you check why",
+                "Check why the search results come back empty.",
+            ),
+            ("run the tests and then fix the failing one", "Run the tests and then fix the failing one."),
+            ("uh make the button blue and bigger", "Make the button blue and bigger."),
+            ("no atlas corrige o login", "Corrige o login."),
+            ("diz ao atlas para corrigir o erro de validação", "Corrige o erro de validação."),
+            ("commit and push the fix", "Commit and push the fix."),
+        )
+        for frase, prompt in casos:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(interprete_mod.pedidos_acrescentados(frase, prompt), ())
+
+    def test_recurso_literal_sem_endereco_e_em_forma_de_frase(self) -> None:
+        # Prompt vazio do LLM: fica o texto literal, sem o endereco, com maiuscula e ponto.
+        interprete, _ = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", "")])
+        resultado = interprete.interpretar("hey jarvis, ask crypto radar to fix the login")
+        self.assertEqual(resultado.prompt, "Fix the login.")
+        self.assertIn("prompt vazio", resultado.motivo)
+        # O mesmo para um lancamento de run.
+        interprete, _ = _interprete([_llm("lancar_run", "atlas", "")])
+        resultado = interprete.interpretar("no atlas lança um run para corrigir o login")
+        self.assertEqual(resultado.prompt, "Lança um run para corrigir o login.")
+
+    def test_conversa_so_perde_o_endereco_claro_ao_projeto(self) -> None:
+        interprete, _ = _interprete([_llm("conversa", "", "")])
+        self.assertEqual(interprete.interpretar("sim podes avançar").prompt, "sim podes avançar")
+        interprete, _ = _interprete([_llm("conversa", "atlas", "diz ao atlas que sim, podes avançar")])
+        self.assertEqual(interprete.interpretar("diz ao atlas que sim, podes avançar").prompt, "sim, podes avançar")
+
+    def test_regra_financeira_corre_sobre_o_prompt_final(self) -> None:
+        interprete, cliente = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Tell CryptoRader to buy bitcoin.")]
+        )
+        resultado = interprete.interpretar("tell CryptoRader to handle the thing we talked about")
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+
+    def test_exemplos_vao_como_turnos_so_com_projetos_ficticios(self) -> None:
+        interprete, cliente = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", "Add tests.")])
+        interprete.interpretar("tell crypto-radar to add tests")
+        mensagens = cliente.pedidos[0][1]
+        self.assertEqual(mensagens[0]["role"], "system")
+        exemplos = mensagens[1:-1]
+        self.assertEqual([m["role"] for m in exemplos], ["user", "assistant"] * (len(exemplos) // 2))
+        self.assertIn(
+            {"role": "user", "content": "tell LumenApp to attest to the configuration module"}, exemplos
+        )
+        respostas = [json.loads(m["content"]) for m in exemplos if m["role"] == "assistant"]
+        self.assertIn("Add tests to the configuration module.", [r["prompt"] for r in respostas])
+        for resposta in respostas:
+            # Cada exemplo cumpre o esquema e as proprias regras de fidelidade.
+            validar_resposta_do_llm(json.dumps(resposta), NOMES_COM_CRIPTO)
+            self.assertEqual(resposta["projeto"], "")
+        for lingua, exemplos_da_lingua in interprete_mod._EXEMPLOS_DE_PROMPT.items():
+            for frase, prompt in exemplos_da_lingua:
+                with self.subTest(lingua=lingua, frase=frase):
+                    self.assertEqual(interprete_mod.pedidos_acrescentados(frase, prompt), ())
+        texto = json.dumps(exemplos, ensure_ascii=False).lower()
+        for nome in NOMES_COM_CRIPTO:
+            self.assertNotIn(nome, texto)
+
+    def test_exemplos_na_lingua_da_sessao(self) -> None:
+        for lingua in ("pt", "en"):
+            with self.subTest(lingua=lingua):
+                interprete, cliente = _interprete([_llm("ditar_prompt", "atlas", "Corrige o login.")], lingua=lingua)
+                interprete.interpretar("no atlas corrige o login")
+                perguntas = [m["content"] for m in cliente.pedidos[0][1][1:-1] if m["role"] == "user"]
+                esperadas = [frase for frase, _ in interprete_mod._EXEMPLOS_DE_PROMPT[lingua]]
+                self.assertEqual(perguntas, esperadas)
+
+    def test_aquecer_manda_o_mesmo_prefixo_que_as_frases(self) -> None:
+        interprete, cliente = _interprete([_llm("horas"), _llm("ditar_prompt", "atlas", "Corrige o login.")])
+        interprete.aquecer(lambda: None)
+        interprete.interpretar("no atlas corrige o login")
+        self.assertEqual(len(cliente.pedidos), 2)
+        aquecimento, frase = cliente.pedidos[0][1], cliente.pedidos[-1][1]
+        self.assertEqual(aquecimento[-1], {"role": "user", "content": "que horas sao"})
+        self.assertEqual(aquecimento[:-1], frase[:-1])
+        self.assertEqual(frase[-1], {"role": "user", "content": "no atlas corrige o login"})
 
 
 # --- Golden set -----------------------------------------------------------------------------
