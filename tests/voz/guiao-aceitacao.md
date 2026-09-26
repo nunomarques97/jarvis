@@ -23,9 +23,14 @@ nunca contam. Sem sessão, a evidência fica "PENDENTE — passo do Sponsor".
    run de teste (árvore limpa, nenhum run ativo). Sem `--projeto-teste`, as
    tarefas do caso (c) são saltadas.
 3. Para cada tarefa: Enter para começar, faz a tarefa na janela do jarvis
-   (tecla de falar ou "hey jarvis"), Enter quando o jarvis acabar. Depois
-   responde com `s` ou `n` às perguntas. `p` salta a tarefa; `q` guarda e sai
-   (`--continuar` retoma onde ficou).
+   (o pedido começa com a tecla de falar ou "hey jarvis"), Enter quando o
+   jarvis acabar. Depois responde com `s` ou `n` às perguntas. `p` salta a
+   tarefa; `q` guarda e sai (`--continuar` retoma onde ficou).
+4. A resposta ao recap ("sim", "não, muda X para Y", "cancela") diz-se logo
+   depois de o jarvis acabar de o ler, sem "hey jarvis" nem tecla: a linha de
+   estado mostra `À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA`. Tens
+   `[interprete] confirmacao_s` segundos (30 por omissão), a contar do fim do
+   recap. A tecla e "hey jarvis" também funcionam.
 
 Não faças mais nada com o jarvis durante a sessão: tudo o que ele ouvir dentro
 da janela de uma tarefa conta para essa tarefa.

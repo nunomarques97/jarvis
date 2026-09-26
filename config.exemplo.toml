@@ -45,13 +45,14 @@ limiar_ativacao = 0.6
 # limite_s: espera maxima pelo LLM (no maximo 5); acima disso a frase fica
 #   "desconhecido" e o texto literal so segue para confirmacao.
 # confirmacao_s: quanto tempo o jarvis espera pelo "sim" depois de dizer o que
-#   percebeu (entre 3 e 120); sem resposta, o pedido e cancelado sem envio.
+#   percebeu (entre 3 e 120; conta a partir do fim da fala do recap); sem
+#   resposta, o pedido e cancelado sem envio.
 [interprete]
 url = "http://127.0.0.1:11434"
 modelo = "qwen3:8b"
 modelo_alternativo = "qwen3:4b"
 limite_s = 5.0
-confirmacao_s = 20.0
+confirmacao_s = 30.0
 
 # Opcional: runs FORJA por voz ("como esta o run do X", "le o relatorio",
 # lancar, retomar e parar). Sem esta tabela o jarvis so ve as sessoes do

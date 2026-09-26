@@ -26,7 +26,7 @@ from jarvis import conversa
 from jarvis.app import A_CONVERSA, A_OUVIR
 from jarvis.conversa import JANELA_S, JanelaDeConversa, acaba_em_pergunta, e_para_sair, pede_resposta, resposta_literal
 from jarvis.interprete import INTENCAO_RECUSADA
-from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Ouvido
+from jarvis.ouvido import ESCUTA_CONVERSA, GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Ouvido
 from jarvis.resposta_falada import resumo_falado
 from tests.test_app import DITADO, CanalFalso, Montagem, RelogioFalso
 from tests.test_ouvido import SILENCIO, MotorFalso, TeclaFixa, VadFalso, chunk, chunks_em
@@ -40,15 +40,20 @@ VOZ = 0x33
 
 
 class OuvidoFalso:
-    """Regista as janelas pedidas; `ocupado` diz se alguem esta a falar."""
+    """Regista as janelas pedidas; `ocupado` diz se alguem esta a falar.
+
+    `abertas` so tem as janelas de conversa; as escutas da resposta ao recap
+    ficam em `do_recap`.
+    """
 
     def __init__(self) -> None:
         self.abertas: list[float] = []
+        self.do_recap: list[float] = []
         self.fechadas = 0
         self.ocupado = False
 
-    def abrir_escuta(self, limite_s: float) -> bool:
-        self.abertas.append(limite_s)
+    def abrir_escuta(self, limite_s: float, *, para: str = ESCUTA_CONVERSA) -> bool:
+        (self.abertas if para == ESCUTA_CONVERSA else self.do_recap).append(limite_s)
         return True
 
     def fechar_escuta(self) -> None:

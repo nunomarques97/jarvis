@@ -28,7 +28,7 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     modelo = "qwen3:8b"
     modelo_alternativo = "qwen3:4b"
     limite_s = 5.0                # acima disto a frase fica "desconhecido"
-    confirmacao_s = 20.0          # espera pelo "sim"; depois cancela sem enviar
+    confirmacao_s = 30.0          # espera pelo "sim"; depois cancela sem enviar
 
     [forja]                       # opcional; sem ela nao ha runs FORJA por voz
     caminho = "D:/caminho/para/forja"         # instalacao (tem bin/forja.mjs)
@@ -109,9 +109,9 @@ HOSTS_LOCAIS = ("127.0.0.1", "localhost", "::1")
 #: como "desconhecido" (so para confirmacao); o config pode baixar, nunca subir.
 LIMITE_DO_INTERPRETE_S = 5.0
 
-#: Quanto tempo o jarvis espera pelo "sim" depois de recapitular um pedido.
+#: Quanto tempo o jarvis espera pelo "sim" depois de acabar de dizer o recap.
 #: Sem resposta dentro deste tempo o pedido e cancelado sem ser enviado.
-ESPERA_DA_CONFIRMACAO_S = 20.0
+ESPERA_DA_CONFIRMACAO_S = 30.0
 ESPERA_DA_CONFIRMACAO_MINIMA_S = 3.0
 ESPERA_DA_CONFIRMACAO_MAXIMA_S = 120.0
 

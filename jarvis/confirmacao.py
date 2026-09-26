@@ -14,8 +14,9 @@ Recebe a `Interpretacao` de uma frase e decide:
 
 Com um pedido pendente, cada resposta do utilizador e uma de:
 
-  - "sim" / "envia" (ou "yes" / "send"): executa o pedido do ultimo recap,
-    exatamente o que foi mostrado, e so esse;
+  - "sim" / "envia" / "manda" / "confirma" (ou "yes" / "yeah" / "send it" /
+    "go ahead" / "do it", ver `FRASES_DE_CONFIRMAR`): executa o pedido do
+    ultimo recap, exatamente o que foi mostrado, e so esse;
   - "nao, muda X para Y" / "acrescenta ...": o interprete reescreve o pedido
     mantendo o resto, e o jarvis volta a recapitular;
   - "cancela" (ou "nao" sozinho): cancela sem enviar; um "cancel" mal
@@ -24,10 +25,14 @@ Com um pedido pendente, cada resposta do utilizador e uma de:
     do router): o jarvis diz as horas e o pedido continua pendente;
   - outra coisa: o jarvis volta a perguntar; a terceira vez cancela.
 
-As hesitacoes (uh, um, hum, ...) e a pontuacao nao contam nas respostas.
+As hesitacoes (uh, um, hum, ...) e a pontuacao nao contam nas respostas; uma
+resposta que so tem isso (ruido) e ignorada e nao gasta o prazo.
 
-Sem resposta dentro do prazo (20 s por omissao, `[interprete].confirmacao_s`
-no config.toml) o pedido e cancelado sem enviar. Uma resposta que chega
+Sem resposta dentro do prazo (30 s por omissao, `[interprete].confirmacao_s`
+no config.toml) o pedido e cancelado sem enviar. O prazo conta a partir do
+fim da fala do recap (ou da pergunta repetida), nao de quando o recap foi
+gerado; uma resposta que comecou a ser dita antes do fim do prazo conta,
+mesmo que chegue depois dele. Uma resposta que chega
 enquanto o recap ainda esta a ser preparado, ou que foi dita antes dele, e
 ignorada: um "sim" so confirma o recap que o utilizador ja ouviu.
 
@@ -102,13 +107,27 @@ FRASES_DE_CONFIRMAR = frozenset(
         "envia sim",
         "sim envia isso",
         "envia isso",
+        "manda",
+        "confirma",
         "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
         "send",
         "send it",
         "yes send",
         "yes send it",
+        "go",
+        "go ahead",
+        "confirm",
+        "do it",
+        "ok send it",
+        "okay send it",  # como o STT escreve "ok send it"
     }
 )
+#: Um "sim" no inicio de "sim, mas muda X": o resto e a correcao.
+_SINS = ("sim", "yes", "yeah", "yep", "yup")
 _CORTESIAS_NO_FIM = ("por favor", "please")
 _NEGACOES = frozenset({"nao", "no", "nope"})
 _PALAVRAS_DE_CANCELAR = frozenset(
@@ -128,7 +147,7 @@ _VERBOS_DE_ACRESCENTO = frozenset(
     {"acrescenta", "acrescentar", "acrescente", "adiciona", "adicionar", "adicione", "junta",
      "juntar", "junte", "add", "append"}
 )
-_SIM_MAS_NO_INICIO = re.compile(r"^\W*(?:sim|yes)\W+(?:mas|but)\W+", re.IGNORECASE)
+_SIM_MAS_NO_INICIO = re.compile(r"^\W*(?:" + "|".join(_SINS) + r")\W+(?:mas|but)\W+", re.IGNORECASE)
 
 #: Hesitacoes que o STT transcreve ("Uh, yes.", "hum, cancela"), ja
 #: normalizadas. So saem do inicio e do fim da frase: no meio "um" e uma
@@ -184,6 +203,12 @@ def _palavras(texto: str, *, hesitacoes_no_fim: bool = False) -> list[str]:
         if len(palavras) > len(partes) and palavras[-len(partes) :] == partes:
             palavras = _sem_hesitacoes(palavras[: -len(partes)], no_fim=hesitacoes_no_fim)
     return palavras
+
+
+def e_resposta_vazia(texto: str | None) -> bool:
+    """A frase nao diz nada: vazia, so pontuacao ou so hesitacoes ("Uh.")."""
+    palavras = _normalizar(sem_palavra_de_ativacao(limpar_texto(texto or ""))).split()
+    return all(palavra in _HESITACOES for palavra in palavras)
 
 
 def _esqueleto(palavras: list[str] | tuple[str, ...]) -> str:
@@ -252,7 +277,7 @@ def _classificar(texto: str | None) -> tuple[TipoDeResposta, str, bool]:
 
 
 def _classificar_sem_confirmar(limpo: str, palavras: list[str]) -> tuple[TipoDeResposta, str]:
-    if palavras[0] in {"sim", "yes"} and len(palavras) > 2 and palavras[1] in {"mas", "but"}:
+    if palavras[0] in _SINS and len(palavras) > 2 and palavras[1] in {"mas", "but"}:
         palavras = palavras[2:]
         limpo = _SIM_MAS_NO_INICIO.sub("", limpo, count=1)
     negada = False
@@ -590,17 +615,26 @@ class Confirmacao:
     # -- resposta do utilizador
 
     def responder(self, texto: str | None, *, dito_em: float | None = None) -> Desfecho:
-        """Trata a resposta ao recap. `dito_em`: quando a fala comecou."""
+        """Trata a resposta ao recap. `dito_em`: quando a fala comecou.
+
+        Uma resposta que comecou a ser dita antes do fim do prazo conta,
+        mesmo que chegue depois dele. Uma resposta vazia (ruido, so pontuacao
+        ou so hesitacoes) e ignorada: nao diz nada, nao conta como tentativa
+        e nao mexe no prazo.
+        """
         acao: str
         with self._trinco:
             if self._pendente is None:
                 return Desfecho("sem_pedido", "nao ha nenhum pedido por confirmar")
             if self._ocupado:
                 return Desfecho("ignorado", "o recap ainda esta a ser preparado")
-            if self._relogio() >= self._prazo:
+            dita_a_tempo = dito_em is not None and dito_em < self._prazo
+            if self._relogio() >= self._prazo and not dita_a_tempo:
                 acao = "expirar"
             elif dito_em is not None and dito_em < self._apresentado_em:
                 return Desfecho("ignorado", "resposta dita antes do recap", recap=self._recap)
+            elif e_resposta_vazia(texto):
+                return Desfecho("ignorado", "resposta vazia", recap=self._recap)
             else:
                 recap = self._recap
                 assert recap is not None
@@ -631,7 +665,8 @@ class Confirmacao:
                         self._limpar()
                         acao = "desistir"
                     else:
-                        self._prazo = self._relogio() + self.limite_s
+                        # O prazo novo so conta depois de a pergunta ser dita.
+                        self._ocupado = True
                         acao = "de_novo"
 
         if acao == "expirar":
@@ -649,7 +684,13 @@ class Confirmacao:
             self._falar(self._texto("cancelado"))
             return Desfecho("cancelado", f"{TENTATIVAS} respostas sem confirmar nem corrigir", recap=recap)
         if acao == "de_novo":
-            self._falar(recap.pergunta if recap.falta_projeto else self._texto("de_novo"))
+            try:
+                self._falar(recap.pergunta if recap.falta_projeto else self._texto("de_novo"))
+            finally:
+                with self._trinco:
+                    if self._pendente is pendente:
+                        self._ocupado = False
+                        self._prazo = self._relogio() + self.limite_s
             return Desfecho("pendente", "resposta nao percebida", recap=recap)
         if acao == "projeto":
             projeto = self._projeto_dito(texto)
@@ -764,7 +805,8 @@ class Confirmacao:
         """Trata a frase e, se ficar pendente, ouve ate confirmar, cancelar ou expirar.
 
         `ouvir(limite_s)` devolve o texto da proxima resposta, ou None se nada
-        foi dito dentro de `limite_s`: None fecha o pedido como expirado.
+        foi dito dentro de `limite_s`: None fecha o pedido como expirado. Um
+        texto vazio (ruido) e ignorado e continua a ouvir ate ao prazo.
         """
         desfecho = self.iniciar(interpretacao)
         while self.a_espera:
@@ -772,8 +814,10 @@ class Confirmacao:
             if restante is None:
                 break
             texto = ouvir(restante) if restante > 0 else None
-            if texto is None or not texto.strip():
+            if texto is None:
                 desfecho = self._expirar()
                 continue
-            desfecho = self.responder(texto)
+            resposta = self.responder(texto)
+            if resposta.estado != "ignorado":
+                desfecho = resposta
         return desfecho

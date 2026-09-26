@@ -8,7 +8,8 @@ Guia uma sessao de cerca de 15 minutos com o jarvis a correr noutra janela
 prompt, (b) ouvir o estado e o relatorio, (c) lancar, parar e retomar um run
 FORJA, (d) a conversa maos-livres, mais os comandos locais.
 
-Para cada tarefa: Enter para comecar, a tarefa e feita na janela do jarvis,
+Para cada tarefa: Enter para comecar, a tarefa e feita na janela do jarvis
+(a resposta ao recap diz-se logo, sem "hey jarvis" nem tecla),
 Enter quando ele acabar; depois o Sponsor responde por tecla (s/n) se o jarvis
 fez o que ele pediu e, nos ditados e lancamentos, se o que foi enviado tinha
 algum pedido que ele nao fez. `p` salta a tarefa e `q` guarda e sai
@@ -957,6 +958,7 @@ def correr_sessao(
                 guardar_sessao(sessao, caminho)
                 break
             inicio = agora_iso(agora())
+            escrever("   Depois do recap, responde logo, sem \"hey jarvis\" nem tecla.")
             escolha = tecla("   Faz a tarefa no jarvis. Enter quando ele acabar (q sai sem contar esta):", (ENTER, "q"))
             if escolha == "q":
                 guardar_sessao(sessao, caminho)

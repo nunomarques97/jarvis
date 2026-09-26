@@ -42,16 +42,16 @@ Ctrl+C, closing the window or saying "cala-te" / "be quiet" silences the voice a
 
 ## Confirming, correcting, cancelling
 
-Everything that has an effect (sending a prompt to Claude Code, opening the editor or a folder) is first recapped out loud and on screen, for example "Para o atlas: Corrige o teste do login. Envio?". Then you answer:
+Everything that has an effect (sending a prompt to Claude Code, opening the editor or a folder) is first recapped out loud and on screen, for example "Para o atlas: Corrige o teste do login. Envio?". Then you answer straight away, without the wake word: as soon as the recap finishes being spoken, jarvis listens for your reply until the end of speech and the status line shows `À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA`. The key and the wake word also work. Without voice activity detection (`--sem-ativacao`) only the key does.
 
 | You say (pt) | You say (en) | What happens |
 |---|---|---|
-| "sim", "envia" | "yes", "send it" | the recapped prompt is sent, exactly as shown |
+| "sim", "envia", "manda", "confirma" | "yes", "yeah", "yep", "sure", "send it", "go ahead", "do it", "confirm" | the recapped prompt is sent, exactly as shown |
 | "não, muda testes para documentação" | "no, change tests to documentation" | jarvis corrects the prompt and recaps again |
 | "acrescenta que é urgente" | "add that it is urgent" | jarvis adds it and recaps again |
 | "cancela" | "cancel" | nothing is sent |
 
-With no answer within `[interprete] confirmacao_s` seconds (20 by default) the request is cancelled without sending anything. Telling the time or date, "cala-te" (be quiet), "dorme" (go to sleep) and "acorda" (wake up) run straight away, because they only read or silence.
+Only those whole answers send; anything close but different ("yes but ...", "go to atlas") is never taken as a yes. With no answer within `[interprete] confirmacao_s` seconds (30 by default, counted from the moment the recap finishes being spoken) the request is cancelled without sending anything. Noise or an "uh" on its own does not count as an answer. Telling the time or date, "cala-te" (be quiet), "dorme" (go to sleep) and "acorda" (wake up) run straight away, because they only read or silence.
 
 The first prompt to a project opens that project's Claude Code session in a new window, with the jarvis channel attached; accept Claude Code's notice in that window once and the prompt follows. If the channel cannot be used, the prompt goes to a headless session in the project folder, and the command to resume that session is shown on screen. Nothing is written into your projects or into `~/.claude`: the files jarvis generates stay in `.jarvis/`, ignored by Git.
 

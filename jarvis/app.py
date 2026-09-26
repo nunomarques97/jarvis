@@ -38,6 +38,12 @@ utilizador (hooks do Claude Code, pelo IPC do canal), ou um run FORJA terminou
 ou bloqueou (sondagem de `core status`). Cada aviso e uma frase fixa com o
 nome do projeto, dita quando o jarvis esta livre, nunca por cima de ninguem.
 
+Depois de o recap ser dito (e de cada recap corrigido ou pergunta repetida),
+o jarvis abre no ouvido uma escuta sem palavra de ativacao ate ao fim do prazo
+da confirmacao: a frase seguinte e a resposta ao recap. So abre depois de a
+voz acabar, para o jarvis nao se ouvir a si proprio; ruido que fecha a escuta
+volta a abri-la no ciclo de `verificar_tempo`.
+
 A consola mostra sempre o estado atual numa linha propria (A OUVIR, A PENSAR,
 A ESPERA DE CONFIRMACAO, A FALAR, A DORMIR) e cada frase escreve o seu
 registo com timestamps e a latencia de cada etapa, na consola e em
@@ -92,6 +98,7 @@ from jarvis.interprete import Interpretacao, Interprete, medir_vram
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
+    ESCUTA_RECAP,
     GATILHO_JANELA,
     GATILHO_TECLA,
     PALAVRAS_DE_ATIVACAO,
@@ -149,6 +156,7 @@ LARGURA_DA_SEPARACAO = 78
 A_OUVIR = "A OUVIR"
 A_PENSAR = "A PENSAR"
 A_ESPERA = "À ESPERA DE CONFIRMAÇÃO"
+A_ESPERA_A_OUVIR = "À ESPERA DE CONFIRMAÇÃO — A OUVIR A RESPOSTA"
 A_FALAR = "A FALAR"
 A_DORMIR = "A DORMIR"
 A_CONVERSA = "EM CONVERSA"
@@ -689,6 +697,9 @@ class Jarvis:
         self._local = threading.local()
         self._fila: queue.Queue | None = None
         self._fio: threading.Thread | None = None
+        #: O ouvido tem (ou teve ha pouco) uma escuta sem palavra de ativacao
+        #: aberta para a resposta ao recap pendente.
+        self._a_ouvir_o_recap = False
 
     # -- textos
 
@@ -737,7 +748,7 @@ class Jarvis:
         if self.estado.adormecido:
             return A_DORMIR
         if self.confirmacao.a_espera:
-            return A_ESPERA
+            return A_ESPERA_A_OUVIR if self._a_ouvir_o_recap else A_ESPERA
         return A_CONVERSA if self.janela.aberta() else A_OUVIR
 
     # -- entrada: uma frase transcrita pelo ouvido
@@ -802,7 +813,11 @@ class Jarvis:
     def _tratar(self, frase: Frase, medida: MedidaDaFrase) -> None:
         try:
             with self._tranca:
-                self._tratar_com_tranca(frase, medida)
+                try:
+                    self._tratar_com_tranca(frase, medida)
+                finally:
+                    # A voz ja acabou: se ficou um recap pendente, ouve a resposta.
+                    self._atualizar_escuta_do_recap()
         except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o jarvis
             self.log.linha(f"frase #{medida.numero} | ERRO no tratamento: {erro!r} | nada enviado")
         finally:
@@ -822,6 +837,8 @@ class Jarvis:
         self._local.medida = medida
         if frase.gatilho == GATILHO_TECLA:
             gatilho = "tecla de falar"
+        elif frase.gatilho == GATILHO_JANELA and self.confirmacao.a_espera:
+            gatilho = "resposta ao recap (escuta sem palavra de ativacao)"
         elif frase.gatilho == GATILHO_JANELA:
             gatilho = "janela de conversa (sem palavra de ativacao)"
         else:
@@ -906,9 +923,57 @@ class Jarvis:
         )
 
     def _fechar_escuta(self) -> None:
+        self._a_ouvir_o_recap = False
         fechar = getattr(self.ouvido, "fechar_escuta", None)
         if fechar is not None:
             fechar()
+
+    # -- resposta ao recap sem palavra de ativacao
+
+    def _atualizar_escuta_do_recap(self) -> None:
+        """Com um recap pendente, ouve a resposta sem palavra de ativacao; sem ele, deixa de ouvir.
+
+        Chamar so com a voz calada (depois de `_dizer` voltar): a escuta dura
+        o que falta do prazo, que conta desde o fim da fala do recap.
+        """
+        restante = self.confirmacao.prazo_restante()
+        if restante is None or self.estado.adormecido:
+            if self._a_ouvir_o_recap:
+                self._fechar_escuta()
+            return
+        if restante <= 0:
+            return  # o prazo ja passou: `verificar_tempo` cancela
+        abrir = getattr(self.ouvido, "abrir_escuta", None)
+        sem_ativacao = bool(abrir(restante, para=ESCUTA_RECAP)) if abrir is not None else False
+        self._a_ouvir_o_recap = sem_ativacao
+        if sem_ativacao:
+            self.log.linha(f"confirmacao | a ouvir a resposta ao recap sem palavra de ativacao ({restante:.0f} s)")
+        else:
+            self.log.linha(
+                f"confirmacao | resposta ao recap so com a tecla de falar ({restante:.0f} s): "
+                "sem VAD nao ha escuta sem palavra de ativacao"
+            )
+
+    def _reabrir_escuta_do_recap(self) -> None:
+        """A escuta do recap acabou sem frase (ruido descartado): volta a ouvir ate ao prazo."""
+        if not self._a_ouvir_o_recap or not self.confirmacao.a_espera or self.estado.adormecido:
+            return
+        if getattr(self.ouvido, "escuta_aberta", ESCUTA_RECAP) is not None or self._alguem_a_responder():
+            return
+        restante = self.confirmacao.prazo_restante()
+        if restante is None or restante <= 0:
+            return
+        if self.ouvido.abrir_escuta(restante, para=ESCUTA_RECAP):
+            self.log.linha(f"confirmacao | de novo a ouvir a resposta ao recap ({restante:.0f} s)")
+
+    def _alguem_a_responder(self) -> bool:
+        """O utilizador comecou a dizer uma frase, ou ha uma a caminho do texto ou por tratar.
+
+        Uma escuta sem palavra de ativacao ainda sem fala nao conta.
+        """
+        ouvido = self.ouvido
+        ocupado = getattr(ouvido, "a_ouvir_alguem", getattr(ouvido, "ocupado", False))
+        return bool(ocupado) or not self.ocioso()
 
     def _fechar_conversa(self, motivo: str) -> None:
         estado = self.janela.fechar()
@@ -998,6 +1063,9 @@ class Jarvis:
             razao = "modo calado" if self.estado.mudo else "voz desligada"
             marcar(f"{razao}; resposta so no ecra: {falado!r}")
             return None
+        if self._a_ouvir_o_recap:
+            # Nunca ouvir a propria voz como resposta ao recap.
+            self._fechar_escuta()
         with self._tranca_da_voz:
             self.painel.mudar(A_FALAR)
             resultado = self._falar(falado)
@@ -1105,6 +1173,8 @@ class Jarvis:
                 and not self.estado.adormecido
             ):
                 self._abrir_conversa(projeto)
+            else:
+                self._atualizar_escuta_do_recap()
             self.painel.mudar(self._estado_de_repouso())
 
     # -- prazo da confirmacao e silencio
@@ -1116,10 +1186,14 @@ class Jarvis:
         try:
             self._local.registo = None
             self._local.medida = None
-            desfecho = self.confirmacao.verificar_tempo()
+            # Uma resposta a meio de ser dita ou transcrita ainda conta: o prazo espera por ela.
+            desfecho = None if self._alguem_a_responder() else self.confirmacao.verificar_tempo()
             if desfecho is not None:
+                self._fechar_escuta()
                 self.log.linha(f"confirmacao | {desfecho.estado}: {desfecho.motivo}")
                 self.painel.mudar(self._estado_de_repouso())
+            else:
+                self._reabrir_escuta_do_recap()
             fechada = self.janela.fechar_se_expirou(alguem_a_falar=self._alguem_a_falar())
             if fechada is not None:
                 self._fechar_escuta()
@@ -1316,6 +1390,11 @@ def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
     else:
         log.bruto("   maos-livres desligadas: so a tecla de falar")
     log.bruto('   depois do recap: "sim" envia, "nao, muda X para Y" corrige, "cancela" cancela')
+    prazo = f"{jarvis.confirmacao.limite_s:g} s"
+    if getattr(ouvido, "vad", None) is not None:
+        log.bruto(f"   a resposta ao recap diz-se logo, sem palavra de ativacao, dentro de {prazo}")
+    else:
+        log.bruto(f"   a resposta ao recap diz-se com a tecla de falar, dentro de {prazo}")
     log.bruto('   pergunta do Claude: 8 s para responder sem palavra de ativacao; "sai da conversa" fecha')
     log.bruto("   Ctrl+C ou fechar esta janela cala a voz e desliga o microfone")
     log.bruto("=" * LARGURA_DA_SEPARACAO)

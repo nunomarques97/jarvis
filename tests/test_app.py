@@ -804,6 +804,7 @@ class TestArranque(unittest.TestCase):
         texto = m.log.texto()
         self.assertIn("JARVIS PRONTO em", texto)
         self.assertIn('"sim" envia, "nao, muda X para Y" corrige, "cancela" cancela', texto)
+        self.assertIn("a resposta ao recap diz-se com a tecla de falar, dentro de 30 s", texto, "ficheiros: sem VAD")
         self.assertEqual(m.falados, ["São 15 horas e 30 minutos."])
 
     def test_sem_modelo_da_palavra_de_ativacao_fica_so_a_tecla(self) -> None:

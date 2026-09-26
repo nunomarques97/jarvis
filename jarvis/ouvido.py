@@ -10,10 +10,13 @@ um unico callback, por dois gatilhos:
   maos-livres      a palavra de ativacao (openWakeWord) abre a escuta; o fim
                    da fala decide-o o VAD (webrtcvad) depois de um silencio.
 
-Janela de escuta: `abrir_escuta(segundos)` abre uma escuta como a das
-maos-livres, mas sem palavra de ativacao (a conversa com o Claude, quando ele
-faz uma pergunta). Se ninguem comecar a falar dentro do prazo, fecha sozinha.
-So existe com VAD; sem ele, fica a tecla de falar.
+Janela de escuta: `abrir_escuta(segundos, para=...)` abre uma escuta como a
+das maos-livres, mas sem palavra de ativacao: a resposta a um recap pendente
+(`ESCUTA_RECAP`) ou a conversa com o Claude, quando ele faz uma pergunta
+(`ESCUTA_CONVERSA`). Se ninguem comecar a falar dentro do prazo, fecha
+sozinha. So existe com VAD; sem ele, fica a tecla de falar. A espera de fala
+so guarda os ultimos 300 ms de audio, e a resposta ao recap deita fora o
+primeiro meio segundo, onde ainda pode soar o fim da voz do jarvis.
 
 Palavra de ativacao da lingua do config ([ouvido].lingua): "hey jarvis" em
 ingles (modelo pre-treinado do openWakeWord) e "boas jarvis" em portugues
@@ -92,6 +95,15 @@ ESPERA_PELA_FALA_S = 5.0
 SURDEZ_APOS_ATIVACAO_S = 0.25
 #: Chunks seguidos com voz para a fala contar como comecada (90 ms).
 CHUNKS_PARA_COMECAR_A_FALA = 3
+#: Janela sem palavra de ativacao a espera de fala: so os ultimos chunks ficam
+#: guardados (300 ms antes do inicio da fala), nunca o silencio todo da espera.
+#: Assim o teto da frase conta desde o inicio da fala e nao desde a abertura.
+CHUNKS_ANTES_DA_FALA = 10
+#: A resposta ao recap abre quando a voz do jarvis devolve o controlo, mas o fim
+#: do recap ("Send it?") ainda pode estar no buffer da placa de som e do
+#: microfone. O audio deste intervalo e deitado fora: nem conta para o VAD nem
+#: entra na frase.
+GUARDA_APOS_A_VOZ_S = 0.5
 #: Silencio que fecha a frase das maos-livres.
 SILENCIO_FINAL_S = 0.6
 #: 0 (menos agressivo) a 3 (mais agressivo a chamar ruido ao que nao e voz).
@@ -181,8 +193,13 @@ MAXIMO_DO_WAV_MEDIDO_S = 5.0
 
 GATILHO_TECLA = "tecla"
 GATILHO_ATIVACAO = "ativacao"
-#: Escuta aberta pelo jarvis (janela de conversa), sem palavra de ativacao.
+#: Escuta aberta pelo jarvis (resposta ao recap ou conversa), sem palavra de ativacao.
 GATILHO_JANELA = "janela"
+
+#: Para que e a janela de escuta sem palavra de ativacao.
+ESCUTA_CONVERSA = "conversa"
+ESCUTA_RECAP = "recap"
+_NOMES_DAS_ESCUTAS = {ESCUTA_CONVERSA: "janela de conversa", ESCUTA_RECAP: "resposta ao recap"}
 
 
 @dataclass(frozen=True)
@@ -609,8 +626,18 @@ class Ouvido:
         self._gatilho = GATILHO_ATIVACAO
         self._espera_pela_fala_s = ESPERA_PELA_FALA_S
         self._surdez_s = SURDEZ_APOS_ATIVACAO_S
-        #: Prazo (no relogio) de uma janela de escuta pedida e ainda por abrir.
+        #: Audio desde a ativacao ou a abertura da janela, com ou sem buffer.
+        self._aguardado_s = 0.0
+        #: Inicio de uma janela cujo audio e deitado fora (ver GUARDA_APOS_A_VOZ_S).
+        self._guarda_s = 0.0
+        #: Prazo (no relogio) de uma janela de escuta pedida e ainda por abrir,
+        #: e para que e (`ESCUTA_RECAP` ou `ESCUTA_CONVERSA`).
         self._janela_ate: float | None = None
+        self._janela_para = ESCUTA_CONVERSA
+        #: Para que e a janela aberta agora (a espera de fala ou ja com ela).
+        self._escuta = ESCUTA_CONVERSA
+        # Pedir, fechar e abrir a janela vem de threads diferentes.
+        self._trinco_da_janela = threading.Lock()
         self._a_transcrever = False
         self._fechar_janela = False
         self._fila: queue.Queue[_FraseCaptada | None] = queue.Queue(maxsize=FRASES_EM_ESPERA)
@@ -652,21 +679,48 @@ class Ouvido:
             or not self._fila.empty()
         )
 
-    def abrir_escuta(self, limite_s: float) -> bool:
+    @property
+    def a_ouvir_alguem(self) -> bool:
+        """Ha uma frase a ser dita ou a caminho do texto.
+
+        Ao contrario de `ocupado`, uma janela sem palavra de ativacao ainda a
+        espera de fala nao conta: ali ninguem comecou a falar.
+        """
+        a_espera_de_fala = self._estado == "ativado" and self._gatilho == GATILHO_JANELA
+        return (
+            (self._estado != "repouso" and not a_espera_de_fala)
+            or self._a_transcrever
+            or not self._fila.empty()
+        )
+
+    @property
+    def escuta_aberta(self) -> str | None:
+        """Para que e a janela sem palavra de ativacao pedida ou a espera de fala, ou None."""
+        with self._trinco_da_janela:
+            if self._janela_ate is not None:
+                return self._janela_para
+            if self._estado == "ativado" and self._gatilho == GATILHO_JANELA and not self._fechar_janela:
+                return self._escuta
+            return None
+
+    def abrir_escuta(self, limite_s: float, *, para: str = ESCUTA_CONVERSA) -> bool:
         """Pede uma escuta sem palavra de ativacao, aberta no proximo chunk em repouso.
 
         Devolve False sem VAD (sem VAD nao ha como saber o fim da fala).
         """
         if self.vad is None or limite_s <= 0:
             return False
-        self._janela_ate = self.relogio() + limite_s
+        with self._trinco_da_janela:
+            self._janela_para = para
+            self._janela_ate = self.relogio() + limite_s
         return True
 
     def fechar_escuta(self) -> None:
         """Cancela uma janela pedida ou aberta que ainda nao tem fala."""
-        self._janela_ate = None
-        if self._estado == "ativado" and self._gatilho == GATILHO_JANELA:
-            self._fechar_janela = True
+        with self._trinco_da_janela:
+            self._janela_ate = None
+            if self._estado == "ativado" and self._gatilho == GATILHO_JANELA:
+                self._fechar_janela = True
 
     def _descartar(self, motivo: str) -> None:
         self.descartadas += 1
@@ -682,7 +736,11 @@ class Ouvido:
         self._gatilho = GATILHO_ATIVACAO
         self._espera_pela_fala_s = ESPERA_PELA_FALA_S
         self._surdez_s = SURDEZ_APOS_ATIVACAO_S
-        self._fechar_janela = False
+        self._aguardado_s = 0.0
+        self._guarda_s = 0.0
+        with self._trinco_da_janela:
+            self._fechar_janela = False
+        self._escuta = ESCUTA_CONVERSA
         if self.detetor is not None:
             self.detetor.reiniciar()
 
@@ -717,7 +775,9 @@ class Ouvido:
             # Em repouso nao ha nada a limpar: reiniciar o detetor aqui (dezenas
             # de ms) so atrasava o sinal de inicio. Ao soltar ele e reiniciado.
             if self._estado != "repouso":
-                self._descartar("a tecla foi premida a meio de uma escuta por palavra de ativacao")
+                # Uma janela sem palavra de ativacao ainda sem fala nao perde nada.
+                if not (self._estado == "ativado" and self._gatilho == GATILHO_JANELA):
+                    self._descartar("a tecla foi premida a meio de uma escuta por palavra de ativacao")
                 self._voltar_ao_repouso()
             self._estado = "tecla"
             self._inicio = agora
@@ -751,16 +811,26 @@ class Ouvido:
             return
 
         if self._estado == "repouso" and self._janela_ate is not None:
-            restante, self._janela_ate = self._janela_ate - agora, None
-            if restante > 0 and self.vad is not None:
-                self._estado = "ativado"
-                self._gatilho = GATILHO_JANELA
-                self._espera_pela_fala_s = restante
-                self._surdez_s = 0.0
-                self._inicio = agora
-                self._buffer = []
-                self._score = None
-                self._sinal("inicio", f"janela de conversa ({restante:.0f} s, sem palavra de ativacao)", agora)
+            with self._trinco_da_janela:
+                janela_ate, self._janela_ate = self._janela_ate, None
+                aberta = janela_ate is not None and janela_ate > agora and self.vad is not None
+                if aberta:
+                    self._estado = "ativado"
+                    self._gatilho = GATILHO_JANELA
+                    self._escuta = self._janela_para
+                    self._espera_pela_fala_s = janela_ate - agora
+                    self._surdez_s = 0.0
+                    self._guarda_s = GUARDA_APOS_A_VOZ_S if self._escuta == ESCUTA_RECAP else 0.0
+                    self._aguardado_s = 0.0
+                    self._inicio = agora
+                    self._buffer = []
+                    self._score = None
+            if aberta:
+                self._sinal(
+                    "inicio",
+                    f"{_NOMES_DAS_ESCUTAS[self._escuta]} ({self._espera_pela_fala_s:.0f} s, sem palavra de ativacao)",
+                    agora,
+                )
                 return
 
         if self.detetor is None and self._estado == "repouso":
@@ -770,38 +840,51 @@ class Ouvido:
             score = self.detetor.processar(chunk)
             if score >= self.limiar_de_ativacao:
                 self._estado = "ativado"
+                self._aguardado_s = 0.0
                 self._inicio = agora
                 self._buffer = []
                 self._score = score
                 self._sinal("inicio", f"palavra de ativacao (score {score:.2f})", agora)
             return
 
-        # Escuta aberta pela palavra de ativacao: o VAD decide o fim.
-        self._buffer.append(chunk)
-        decorrido = self._duracao_do_buffer()
-        fala = self.vad.e_fala(chunk)
+        # Escuta aberta pela palavra de ativacao ou pela janela: o VAD decide o fim.
         if self._estado == "ativado":
             janela = self._gatilho == GATILHO_JANELA
+            nome = _NOMES_DAS_ESCUTAS[self._escuta]
             if janela and self._fechar_janela:
-                self._sinal("fim", "janela de conversa fechada", agora)
+                self._sinal("fim", f"{nome} fechada", agora)
                 self._voltar_ao_repouso()
                 return
-            if fala and decorrido > self._surdez_s:
+            self._aguardado_s += DURACAO_DO_CHUNK_S
+            if self._aguardado_s <= self._guarda_s:
+                fala = False  # ainda pode ser a voz do jarvis: fora do VAD e da frase
+            else:
+                self._buffer.append(chunk)
+                if janela and len(self._buffer) > CHUNKS_ANTES_DA_FALA:
+                    del self._buffer[0]
+                fala = self.vad.e_fala(chunk)
+            if fala and self._aguardado_s > self._surdez_s:
                 self._voz_seguida += 1
             else:
                 self._voz_seguida = 0
             if self._voz_seguida >= CHUNKS_PARA_COMECAR_A_FALA:
                 self._estado = "a_falar"
                 self._silencio_s = 0.0
-            elif decorrido >= self._espera_pela_fala_s:
                 if janela:
-                    self._sinal("fim", f"janela de conversa sem fala em {self._espera_pela_fala_s:.0f} s", agora)
-                    self._descartar("janela de conversa sem resposta")
+                    # A frase comeca no primeiro chunk com voz, nao na abertura da janela.
+                    self._inicio = agora - self._voz_seguida * DURACAO_DO_CHUNK_S
+            elif self._aguardado_s >= self._espera_pela_fala_s:
+                if janela:
+                    self._sinal("fim", f"{nome} sem fala em {self._espera_pela_fala_s:.0f} s", agora)
+                    self._descartar(f"{nome} sem resposta")
                 else:
                     self._sinal("fim", f"sem fala {ESPERA_PELA_FALA_S:.0f} s depois da ativacao", agora)
                     self._descartar("palavra de ativacao seguida de silencio")
                 self._voltar_ao_repouso()
             return
+        self._buffer.append(chunk)
+        decorrido = self._duracao_do_buffer()
+        fala = self.vad.e_fala(chunk)
         self._silencio_s = 0.0 if fala else self._silencio_s + DURACAO_DO_CHUNK_S
         if self._silencio_s >= SILENCIO_FINAL_S or decorrido >= MAXIMO_DA_FRASE_S:
             motivo = "fim da fala (VAD)" if self._silencio_s >= SILENCIO_FINAL_S else "frase no maximo"

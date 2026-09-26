@@ -210,7 +210,7 @@ class TestPoliticaDeConfirmacao(Base):
                     self.assertEqual(desfecho.estado, "pendente")
                     self.assertEqual(self.canal.recebidos, [])
                     self.assertEqual(len(self.falas), 1)
-                    for talvez in ("ok", "claro", "sure", "podes", "hum", "sim sim sim", "yes maybe"):
+                    for talvez in ("ok", "claro", "surely", "podes", "hum", "sim sim sim", "yes maybe"):
                         confirmacao.responder(talvez)
                         if not confirmacao.a_espera:
                             break
@@ -295,7 +295,7 @@ class TestPoliticaDeConfirmacao(Base):
             with self.subTest(frase=frase):
                 self.assertEqual(classificar_resposta(frase)[0], "confirmar")
         for frase in (
-            "", "simples", "sim mas", "assim", "envia ao orbita", "yes and no", "okay", "claro", "sure",
+            "", "simples", "sim mas", "assim", "envia ao orbita", "yes and no", "okay", "claro", "surely",
             "acrescenta que sim", "muda sim para nao", "send it to orbita", "sim sim sim", "yesterday",
             "não envies", "yes but change tests to docs",
         ):
@@ -527,11 +527,13 @@ class TestCancelarEPrazo(Base):
                 self.assertEqual(self.canal.recebidos, [])
                 self.assertIn("não enviei nada", self.falas[-1])
 
-    def test_prazo_por_omissao_e_20_s_e_expira_sem_enviar(self) -> None:
-        self.assertEqual(ESPERA_DA_CONFIRMACAO_S, 20.0)
+    def test_prazo_por_omissao_e_30_s_e_expira_sem_enviar(self) -> None:
+        self.assertEqual(ESPERA_DA_CONFIRMACAO_S, 30.0)
+        self.assertEqual(ConfigInterprete().confirmacao_s, 30.0)
         confirmacao = self.montar()
+        self.assertEqual(confirmacao.limite_s, 30.0)
         confirmacao.iniciar(self.pedido("lancar_run"))
-        self.relogio.avancar(19.9)
+        self.relogio.avancar(29.9)
         self.assertIsNone(confirmacao.verificar_tempo())
         self.relogio.avancar(0.1)
         self.assertEqual(confirmacao.verificar_tempo().estado, "expirado")
@@ -541,7 +543,7 @@ class TestCancelarEPrazo(Base):
     def test_sim_depois_do_prazo_nao_envia_mesmo_sem_verificar_tempo(self) -> None:
         confirmacao = self.montar()
         confirmacao.iniciar(self.pedido("ditar_prompt"))
-        self.relogio.avancar(20.0)
+        self.relogio.avancar(30.0)
         self.assertEqual(confirmacao.responder("sim").estado, "expirado")
         self.assertEqual(self.canal.recebidos, [])
 
@@ -739,8 +741,8 @@ class TestRespostasMalOuvidas(Base):
 
     def test_enviar_so_com_sim_claro(self) -> None:
         for frase in (
-            "yet", "yeah no", "guess", "yes sir change it", "jess", "yes yes", "yess", "yeah", "yep", "yes uh send it",
-            "says", "send in", "sin", "uh", "confirm", "sent it", "yes cancel",
+            "yet", "yeah no", "guess", "yes sir change it", "jess", "yes yes", "yess", "yeahh", "yes uh send it",
+            "says", "send in", "sin", "uh", "confirmed", "sent it", "yes cancel",
         ):
             with self.subTest(frase=frase):
                 self.assertNotEqual(classificar_resposta(frase)[0], "confirmar")
@@ -813,6 +815,208 @@ class TestRespostasMalOuvidas(Base):
 
 
 # --- Recap: fala curta, ecra completo, texto exato ----------------------------
+
+
+class TestRespostasClarasDeConfirmar(Base):
+    lingua = "en"
+
+    def test_cada_frase_da_lista_envia_depois_de_tirar_hesitacoes_e_pontuacao(self) -> None:
+        for frase in (
+            "yes", "yeah", "yep", "yup", "sure", "send", "send it", "go", "go ahead", "confirm", "do it",
+            "ok send it", "okay send it", "sim", "envia", "manda", "confirma",
+            "Yeah.", "Uh, yep.", "Go ahead.", "OK, send it.", "Okay, send it.", "Manda.", "Confirma.",
+            "Hmm, sure!", "Do it.", "Yup...", "hey jarvis, go ahead",
+        ):
+            with self.subTest(frase=frase):
+                self.assertEqual(classificar_resposta(frase), ("confirmar", ""))
+
+    def test_quase_confirmacoes_nunca_enviam(self) -> None:
+        for frase in (
+            "yeah but change X", "yes but ...", "go to atlas", "yellow", "surely not", "send it to atlas and",
+            "yeah sure", "go go", "ok", "okay", "do it later", "manda ao orbita", "confirma depois", "goat",
+            "yeah, no", "sure thing", "send it now to atlas",
+        ):
+            with self.subTest(frase=frase):
+                self.assertNotEqual(classificar_resposta(frase)[0], "confirmar")
+
+    def test_cancelar_continua_tolerante_e_corrigir_continua_a_corrigir(self) -> None:
+        for frase, tipo in (
+            ("Uh cancel.", "cancelar"),
+            ("Uh castle.", "cancelar"),
+            ("no, change X to Y", "corrigir"),
+            ("yeah but change tests to docs", "corrigir"),
+        ):
+            with self.subTest(frase=frase):
+                self.assertEqual(classificar_resposta(frase)[0], tipo)
+        self.assertEqual(classificar_resposta("yeah but change tests to docs")[1], "change tests to docs")
+
+    def test_yeah_ao_recap_envia_uma_vez_exatamente_o_recap(self) -> None:
+        confirmacao = self.montar()
+        recap = confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Add tests to the login module.")).recap
+        self.assertEqual(confirmacao.responder("Yeah.").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [recap.pedido])
+        self.assertEqual(confirmacao.responder("Yeah.").estado, "sem_pedido")
+        self.assertEqual(len(self.canal.recebidos), 1)
+
+
+class TestPrazoDepoisDaFala(Base):
+    """O prazo conta a partir do fim da voz, nao de quando o recap foi gerado."""
+
+    lingua = "en"
+    DURACAO_DA_FALA_S = 5.0
+
+    def montar_com_fala_lenta(self, **ajustes) -> Confirmacao:
+        confirmacao = self.montar(**ajustes)
+        self.fins_da_fala: list[float] = []
+
+        def falar(texto: str) -> None:
+            self.falas.append(texto)
+            self.relogio.avancar(self.DURACAO_DA_FALA_S)
+            self.fins_da_fala.append(self.relogio())
+
+        confirmacao._falar = falar
+        return confirmacao
+
+    def test_prazo_do_recap_comeca_no_fim_da_voz_e_usa_confirmacao_s(self) -> None:
+        confirmacao = self.montar_com_fala_lenta(confirmacao_s=12.0)
+        gerado_em = self.relogio()
+        confirmacao.iniciar(self.pedido("ditar_prompt"))
+        fim_da_fala = self.fins_da_fala[-1]
+        self.assertEqual(fim_da_fala, gerado_em + self.DURACAO_DA_FALA_S)
+        self.assertEqual(confirmacao._prazo, fim_da_fala + 12.0)
+        self.assertEqual(confirmacao.prazo_restante(), 12.0)
+        self.relogio.avancar(11.9)
+        self.assertIsNone(confirmacao.verificar_tempo())
+        self.relogio.avancar(0.1)
+        self.assertEqual(confirmacao.verificar_tempo().estado, "expirado")
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertFalse(confirmacao.a_espera)
+
+    def test_prazo_da_pergunta_repetida_comeca_no_fim_da_voz(self) -> None:
+        confirmacao = self.montar_com_fala_lenta()
+        self.assertEqual(confirmacao.limite_s, 30.0)
+        confirmacao.iniciar(self.pedido("ditar_prompt"))
+        self.relogio.avancar(20.0)
+        desfecho = confirmacao.responder("maybe")
+        self.assertEqual((desfecho.estado, desfecho.motivo), ("pendente", "resposta nao percebida"))
+        self.assertEqual(self.falas[-1], "Say yes to send, change, add or cancel.")
+        fim_da_fala = self.fins_da_fala[-1]
+        self.assertEqual(confirmacao._prazo, fim_da_fala + 30.0)
+        self.assertEqual(confirmacao.prazo_restante(), 30.0)
+        self.relogio.avancar(29.9)
+        self.assertIsNone(confirmacao.verificar_tempo())
+        self.relogio.avancar(0.1)
+        self.assertEqual(confirmacao.verificar_tempo().estado, "expirado")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_durante_a_pergunta_repetida_nada_conta_nem_expira(self) -> None:
+        confirmacao = self.montar_com_fala_lenta(confirmacao_s=4.0)
+        confirmacao.iniciar(self.pedido("ditar_prompt"))
+        durante: list[tuple[str | None, float | None]] = []
+        falar = confirmacao._falar
+
+        def falar_e_espreitar(texto: str) -> None:
+            falar(texto)
+            # A voz demorou mais do que o prazo: o pedido nao expira a meio.
+            durante.append((getattr(confirmacao.verificar_tempo(), "estado", None), confirmacao.prazo_restante()))
+            durante.append((confirmacao.responder("yes").estado, None))
+
+        confirmacao._falar = falar_e_espreitar
+        confirmacao.responder("maybe")
+        self.assertEqual(durante, [(None, 4.0), ("ignorado", None)])
+        self.assertTrue(confirmacao.a_espera)
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_silencio_ate_ao_prazo_cancela_sem_enviar_e_diz_porque(self) -> None:
+        confirmacao = self.montar_com_fala_lenta()
+        confirmacao.iniciar(self.pedido("lancar_run"))
+        self.relogio.avancar(30.0)
+        desfecho = confirmacao.verificar_tempo()
+        self.assertEqual(desfecho.estado, "expirado")
+        self.assertEqual(self.falas[-1], "No answer, so I cancelled. Nothing was sent.")
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertEqual(confirmacao.responder("yes").estado, "sem_pedido")
+
+    def test_resposta_comecada_antes_do_prazo_conta_mesmo_que_chegue_depois(self) -> None:
+        confirmacao = self.montar_com_fala_lenta(confirmacao_s=10.0)
+        recap = confirmacao.iniciar(self.pedido("ditar_prompt")).recap
+        self.relogio.avancar(9.5)
+        dito_em = self.relogio()
+        self.relogio.avancar(2.0)  # acabou de falar e foi transcrita depois do prazo
+        desfecho = confirmacao.responder("Yeah.", dito_em=dito_em)
+        self.assertEqual(desfecho.estado, "executado")
+        self.assertEqual(self.canal.recebidos, [recap.pedido])
+
+    def test_resposta_comecada_antes_do_prazo_tambem_cancela_ou_pergunta_de_novo(self) -> None:
+        for frase, estado in (("Uh cancel.", "cancelado"), ("maybe", "pendente")):
+            with self.subTest(frase=frase):
+                confirmacao = self.montar_com_fala_lenta(confirmacao_s=10.0)
+                confirmacao.iniciar(self.pedido("ditar_prompt"))
+                self.relogio.avancar(9.9)
+                dito_em = self.relogio()
+                self.relogio.avancar(1.0)
+                self.assertEqual(confirmacao.responder(frase, dito_em=dito_em).estado, estado)
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_resposta_comecada_depois_do_prazo_expira(self) -> None:
+        for dito_depois in (0.0, 0.5):
+            with self.subTest(dito_depois=dito_depois):
+                confirmacao = self.montar_com_fala_lenta(confirmacao_s=10.0)
+                confirmacao.iniciar(self.pedido("ditar_prompt"))
+                self.relogio.avancar(10.0 + dito_depois)
+                dito_em = self.relogio()
+                self.relogio.avancar(1.0)
+                self.assertEqual(confirmacao.responder("yes", dito_em=dito_em).estado, "expirado")
+                self.assertEqual(self.canal.recebidos, [])
+
+
+class TestRespostaVaziaEIgnorada(Base):
+    lingua = "en"
+    VAZIAS = ("", "   ", ".", "...", "?!", "Uh.", "uh", "Hmm...", "Um, uh.", None)
+
+    def test_ruido_nao_envia_nao_fala_nao_conta_e_nao_mexe_no_prazo(self) -> None:
+        for texto in self.VAZIAS:
+            with self.subTest(texto=texto):
+                confirmacao = self.montar()
+                confirmacao.iniciar(self.pedido("ditar_prompt"))
+                self.relogio.avancar(7.0)
+                falas = list(self.falas)
+                prazo = confirmacao._prazo
+                desfecho = confirmacao.responder(texto)
+                self.assertEqual((desfecho.estado, desfecho.motivo), ("ignorado", "resposta vazia"))
+                self.assertIsNotNone(desfecho.recap)
+                self.assertEqual(self.falas, falas, "o ruido nao faz o jarvis falar")
+                self.assertEqual(confirmacao._prazo, prazo)
+                self.assertEqual(confirmacao._falhas, 0)
+                self.assertTrue(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_ruido_repetido_nao_gasta_as_tentativas_e_um_sim_depois_envia(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("ditar_prompt"))
+        for _ in range(TENTATIVAS - 1):
+            self.assertEqual(confirmacao.responder("maybe").estado, "pendente")
+        for texto in self.VAZIAS:
+            self.assertEqual(confirmacao.responder(texto).estado, "ignorado")
+        self.assertEqual(confirmacao.responder("Yeah.").estado, "executado")
+        self.assertEqual(len(self.canal.recebidos), 1)
+
+    def test_ruido_nao_impede_o_prazo_de_expirar(self) -> None:
+        confirmacao = self.montar(confirmacao_s=10.0)
+        confirmacao.iniciar(self.pedido("ditar_prompt"))
+        self.relogio.avancar(9.0)
+        self.assertEqual(confirmacao.responder("Uh.").estado, "ignorado")
+        self.relogio.avancar(1.0)
+        self.assertEqual(confirmacao.verificar_tempo().estado, "expirado")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_dialogo_com_ruido_pelo_meio_continua_a_ouvir(self) -> None:
+        confirmacao = self.montar()
+        ouvido = OuvidoFalso(self.relogio, [("Uh.", 2.0), (".", 3.0), ("Yeah.", 4.0)])
+        desfecho = confirmacao.dialogar(self.pedido("abrir_pasta", "orbita"), ouvido)
+        self.assertEqual(desfecho.estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("abrir_pasta", "orbita", "")])
+        self.assertEqual(len(self.falas), 1, "so o recap foi dito; o ruido nao teve resposta")
 
 
 class TestRecap(Base):
@@ -922,7 +1126,7 @@ class TestDialogoCompleto(Base):
         self.assertEqual(ouvido.respostas, [("sim", 1.0)], "depois de cancelar ja nao ouve")
 
     def test_dialogo_sem_resposta_expira_e_nunca_envia(self) -> None:
-        for respostas in ([], [(None, 0)], [("sim", 25.0)]):
+        for respostas in ([], [(None, 0)], [("sim", 35.0)]):
             with self.subTest(respostas=respostas):
                 confirmacao = self.montar([_llm("lancar_run", "orbita", "Migra os testes.")])
                 ouvido = OuvidoFalso(self.relogio, respostas)
@@ -938,9 +1142,15 @@ class TestDialogoCompleto(Base):
         self.assertEqual(desfecho.estado, "executado")
         self.assertEqual(self.canal.recebidos, [Pedido("abrir_editor", "atlas", "")])
 
-    def test_confirmacoes_aceites_sao_so_sim_e_envia(self) -> None:
+    def test_confirmacoes_aceites_sao_so_as_da_lista_fechada(self) -> None:
         palavras = {palavra for frase in FRASES_DE_CONFIRMAR for palavra in frase.split()}
-        self.assertEqual(palavras, {"sim", "envia", "isso", "yes", "send", "it"})
+        self.assertEqual(
+            palavras,
+            {
+                "sim", "envia", "isso", "manda", "confirma", "yes", "yeah", "yep", "yup", "sure", "send", "it",
+                "go", "ahead", "confirm", "do", "ok", "okay",
+            },
+        )
 
 
 if __name__ == "__main__":
