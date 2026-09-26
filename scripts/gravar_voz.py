@@ -29,6 +29,17 @@ fica ao lado, renomeado `<id>.invalida-<data>.wav`, quando a frase e regravada
 A pasta de destino (`--pasta`) tem de ficar dentro de `recordings/` deste
 repositorio; qualquer caminho fora e recusado antes de gravar seja o que for.
 
+TREINO (`--treino`): grava `tests/voz/guiao-treino-<lingua>.md`, as frases
+para adaptar o reconhecimento ao sotaque do Sponsor, para uma pasta propria
+(`recordings/treino-<lingua>/`), separada das gravacoes de avaliacao: o que
+serve para adaptar nunca pode entrar no conjunto de teste. Comeca por um
+PILOTO com as primeiras frases: cada uma tem de ter fala real (tramas de fala
+do webrtcvad e nivel RMS dessas tramas acima de um minimo; um pico diferente
+de zero nao chega). Um piloto em silencio ou quase silencio para logo, aponta
+para `--verificar` e nao pede mais frases; um piloto bom para e pede
+confirmacao ao Sponsor antes do resto. A confirmacao fica no manifesto; depois
+dela cada captura continua a ter de ter fala, ou a frase repete-se.
+
 SILENCIOSO POR OMISSAO: o gravador so abre o microfone. Um bip curto antes de
 cada gravacao so toca com `--com-som`; sem a flag nunca se abre um dispositivo
 de saida de audio.
@@ -37,6 +48,7 @@ Uso (cerca de 10 minutos por lingua):
     .venv\Scripts\python scripts/gravar_voz.py --lingua en
     .venv\Scripts\python scripts/gravar_voz.py --lingua pt
     .venv\Scripts\python scripts/gravar_voz.py --lingua pt --refazer pt-03
+    .venv\Scripts\python scripts/gravar_voz.py --lingua en --treino
     .venv\Scripts\python scripts/gravar_voz.py --verificar
     .venv\Scripts\python scripts/gravar_voz.py --autoteste
 """
@@ -44,6 +56,7 @@ Uso (cerca de 10 minutos por lingua):
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import math
@@ -68,6 +81,7 @@ from jarvis.audio_util import (  # noqa: E402
     caminho_wav_de_saida,
     escrever_wav_pcm16,
     ler_wav_pcm16,
+    nivel_rms,
     pico_pcm16,
 )
 from jarvis.config import Config  # noqa: E402
@@ -111,6 +125,11 @@ GUIOES = {
 }
 LINGUAS = tuple(GUIOES)
 
+#: Guioes de treino (adaptacao ao sotaque): frases diferentes das de avaliacao.
+GUIOES_DE_TREINO = {
+    "en": RAIZ / "tests" / "voz" / "guiao-treino-en.md",
+}
+
 #: A palavra de ativacao de cada lingua, tal como se le no guiao.
 PALAVRA_DE_ATIVACAO = {"pt": "boas jarvis", "en": "hey jarvis"}
 
@@ -146,6 +165,8 @@ INTENCOES = (
 
 COLUNAS = ("id", "caso", "frase", "intenção", "projeto", "ativação")
 PADRAO_ID = re.compile(r"^(pt|en)-\d{2}$")
+#: Os ids do treino levam um "t" ("en-t01"): nunca se confundem com os de avaliacao.
+PADRAO_ID_DE_TREINO = re.compile(r"^(pt|en)-t\d{2}$")
 PADRAO_MARCADOR = re.compile(r"<[^>]*>")
 
 
@@ -186,8 +207,11 @@ def _celulas(linha: str) -> list[str]:
     return [celula.strip() for celula in linha.strip().strip("|").split("|")]
 
 
-def ler_guiao(caminho: Path, lingua: str) -> list[FraseDoGuiao]:
-    """Le e valida a tabela do guiao. Levanta GuiaoError com a linha em falta."""
+def ler_guiao(caminho: Path, lingua: str, treino: bool = False) -> list[FraseDoGuiao]:
+    """Le e valida a tabela do guiao. Levanta GuiaoError com a linha em falta.
+
+    Com `treino`, os ids tem de ser os do guiao de treino ("en-t01").
+    """
     if lingua not in LINGUAS:
         raise GuiaoError(f"lingua '{lingua}': so {LINGUAS}")
     texto = Path(caminho).read_text(encoding="utf-8")
@@ -209,8 +233,9 @@ def ler_guiao(caminho: Path, lingua: str) -> list[FraseDoGuiao]:
             raise GuiaoError(f"{caminho.name}:{numero}: {len(celulas)} colunas, esperava {len(COLUNAS)}")
         id_, caso, frase, intencao, projeto, ativacao = celulas
         onde = f"{caminho.name}:{numero} ({id_})"
-        if not PADRAO_ID.match(id_) or not id_.startswith(f"{lingua}-"):
-            raise GuiaoError(f"{onde}: id tem de ser '{lingua}-NN'")
+        padrao, forma = (PADRAO_ID_DE_TREINO, f"{lingua}-tNN") if treino else (PADRAO_ID, f"{lingua}-NN")
+        if not padrao.match(id_) or not id_.startswith(f"{lingua}-"):
+            raise GuiaoError(f"{onde}: id tem de ser '{forma}'")
         if id_ in vistos:
             raise GuiaoError(f"{onde}: id repetido")
         vistos.add(id_)
@@ -258,6 +283,43 @@ def verificar_cobertura(frases: Sequence[FraseDoGuiao]) -> list[str]:
     return problemas
 
 
+#: Vocabulario dos comandos que o guiao de treino tem de exercitar: as palavras
+#: que o reconhecimento costuma trocar na voz do Sponsor.
+VOCABULARIO_DO_TREINO = ("add tests", "cancel", "claude", *MARCADORES_DE_PROJETO)
+#: Intencoes que o treino tem de cobrir: ditado e respostas ao recap.
+INTENCOES_DO_TREINO = ("ditar_prompt", "confirmar", "cancelar", "corrigir")
+
+
+def verificar_guiao_de_treino(
+    treino: Sequence[FraseDoGuiao], avaliacao: Sequence[FraseDoGuiao]
+) -> list[str]:
+    """Regras do guiao de treino. Devolve a lista de problemas (vazia = cumpre).
+
+    Cobre o vocabulario dos comandos e nenhuma frase repete uma do guiao de
+    avaliacao (comparadas normalizadas): o que se usa para adaptar nunca pode
+    servir para medir.
+    """
+    problemas: list[str] = []
+    textos = [f.frase.lower() for f in treino]
+    for termo in VOCABULARIO_DO_TREINO:
+        if not any(termo in texto for texto in textos):
+            problemas.append(f"nenhuma frase de treino tem '{termo}'")
+    intencoes = {f.intencao for f in treino}
+    for intencao in INTENCOES_DO_TREINO:
+        if intencao not in intencoes:
+            problemas.append(f"nenhuma frase de treino com a intencao '{intencao}'")
+    de_avaliacao = {normalizar(f.frase): f.id for f in avaliacao}
+    vistas: dict[str, str] = {}
+    for frase in treino:
+        chave = normalizar(frase.frase)
+        if chave in de_avaliacao:
+            problemas.append(f"{frase.id} repete a frase de avaliacao {de_avaliacao[chave]}")
+        if chave in vistas:
+            problemas.append(f"{frase.id} repete {vistas[chave]}")
+        vistas.setdefault(chave, frase.id)
+    return problemas
+
+
 def nomes_dos_marcadores(config: Config) -> dict[str, str]:
     """<projeto-N> -> nome do projeto N da configuracao (o 1.o repete-se se so houver um)."""
     nomes = [p.nome for p in config.projetos]
@@ -279,6 +341,9 @@ def texto_a_ler(frase: FraseDoGuiao, projetos: dict[str, str]) -> str:
 # --- Pastas e manifesto ----------------------------------------------------------
 
 NOME_PASTA_GRAVACOES = "recordings"
+#: Prefixo da pasta das gravacoes de treino ("recordings/treino-en/"), ao lado
+#: e nunca dentro da pasta de avaliacao da lingua ("recordings/en/").
+PREFIXO_PASTA_DE_TREINO = "treino-"
 NOME_MANIFESTO = "manifesto.json"
 ORIGEM_MICROFONE = "microfone"
 ORIGEM_SINTETICA = "sintetico"
@@ -305,6 +370,11 @@ def pasta_de_gravacoes(valor: str | Path | None = None, raiz: Path | None = None
             "cobre para as gravacoes e o manifesto"
         )
     return caminho
+
+
+def nome_da_subpasta(lingua: str, treino: bool = False) -> str:
+    """"en" para a avaliacao, "treino-en" para o treino."""
+    return f"{PREFIXO_PASTA_DE_TREINO}{lingua}" if treino else lingua
 
 
 def ler_manifesto(pasta_lingua: Path) -> dict:
@@ -494,6 +564,58 @@ class CapturaPyAudio:
             self._pa = None
 
 
+# --- Fala real: VAD e nivel ------------------------------------------------------
+
+#: Trama de 30 ms, um dos tamanhos que o webrtcvad aceita a 16 kHz.
+AMOSTRAS_POR_TRAMA = 480
+#: Agressividade do webrtcvad (0-3). Com 2, um "yes" curto dito pelo Sponsor
+#: ficava com menos de 0,1 s de fala; com 1 fica acima de 0,25 s e um tom puro
+#: continua abaixo do minimo.
+AGRESSIVIDADE_DO_VAD = 1
+#: Fala minima numa captura: menos do que isto nao e uma frase dita.
+FALA_MINIMA_S = 0.2
+#: RMS minimo das tramas com fala. O ruido de fundo de uma sala fica abaixo de
+#: 0,005 (ver verificar_microfone.descrever_sinal); a fala perto do microfone
+#: fica bem acima de 0,01.
+NIVEL_MINIMO_DA_FALA = 0.01
+
+
+@dataclass(frozen=True)
+class AnaliseDaFala:
+    #: Segundos das tramas que o VAD marcou como fala.
+    fala_s: float
+    #: RMS em [0, 1] das tramas com fala (de toda a captura se nao houver nenhuma).
+    nivel: float
+
+    def motivo(self) -> str | None:
+        """Porque a captura nao tem fala real, ou None se tem."""
+        if self.nivel < NIVEL_MINIMO_DA_FALA:
+            return f"quase silencio (nivel RMS {self.nivel:.4f}, minimo {NIVEL_MINIMO_DA_FALA})"
+        if self.fala_s < FALA_MINIMA_S:
+            return f"sem fala reconhecivel (so {self.fala_s:.2f} s de fala, minimo {FALA_MINIMA_S} s)"
+        return None
+
+
+def _vad_por_omissao() -> Callable[[bytes], bool]:
+    """webrtcvad (ja no venv); sem ele, uma trama e fala se o RMS passa o minimo."""
+    try:
+        import webrtcvad
+    except ImportError:
+        return lambda trama: nivel_rms(trama) >= NIVEL_MINIMO_DA_FALA
+    vad = webrtcvad.Vad(AGRESSIVIDADE_DO_VAD)
+    return lambda trama: vad.is_speech(trama, TAXA_AMOSTRAGEM_PADRAO)
+
+
+def analisar_fala(pcm: bytes, e_fala: Callable[[bytes], bool] | None = None) -> AnaliseDaFala:
+    """Quanta fala real tem uma captura PCM16 mono a 16 kHz, e a que nivel."""
+    e_fala = _vad_por_omissao() if e_fala is None else e_fala
+    tamanho = AMOSTRAS_POR_TRAMA * 2
+    tramas = [pcm[i : i + tamanho] for i in range(0, len(pcm) - tamanho + 1, tamanho)]
+    com_fala = [trama for trama in tramas if e_fala(trama)]
+    nivel = nivel_rms(b"".join(com_fala) if com_fala else pcm)
+    return AnaliseDaFala(len(com_fala) * AMOSTRAS_POR_TRAMA / TAXA_AMOSTRAGEM_PADRAO, nivel)
+
+
 def bip() -> None:
     """Bip curto no altifalante. So e chamado com --com-som."""
     import winsound
@@ -511,6 +633,21 @@ class ResumoDaGravacao:
     invalidas: dict[str, str] = field(default_factory=dict)
     #: Capturas recusadas nesta sessao (a frase repetiu-se).
     recusadas: int = 0
+    #: So no treino: "sem_fala", "por_confirmar", "aprovado" (nesta sessao) ou
+    #: "ja_aprovado" (numa sessao anterior); None fora do treino.
+    piloto: str | None = None
+
+
+#: Frases do inicio do guiao de treino que formam o piloto.
+FRASES_DO_PILOTO = 3
+#: Respostas que aprovam o piloto e deixam gravar o resto.
+RESPOSTAS_QUE_APROVAM = ("sim", "yes")
+COMANDO_VERIFICAR = r".venv\Scripts\python scripts/gravar_voz.py --verificar"
+
+
+def piloto_aprovado(manifesto: dict) -> bool:
+    piloto = manifesto.get("piloto")
+    return isinstance(piloto, dict) and piloto.get("aprovado") is True
 
 
 def gravar_guiao(
@@ -526,14 +663,22 @@ def gravar_guiao(
     maximo_s: float = SEGUNDOS_MAXIMOS_POR_FRASE,
     raiz: Path | None = None,
     guiao: Path | None = None,
+    treino: bool = False,
+    piloto: int = FRASES_DO_PILOTO,
+    analisar: Callable[[bytes], AnaliseDaFala] = analisar_fala,
 ) -> ResumoDaGravacao:
-    """Grava, frase a frase, as que faltam. O manifesto e escrito a cada frase."""
+    """Grava, frase a frase, as que faltam. O manifesto e escrito a cada frase.
+
+    Com `treino`, grava para `recordings/treino-<lingua>/`, exige fala real em
+    cada captura e, enquanto o piloto nao estiver aprovado no manifesto, grava
+    so as `piloto` primeiras frases e para a pedir confirmacao.
+    """
     raiz = (RAIZ if raiz is None else Path(raiz)).resolve()
-    pasta_lingua = pasta / lingua
+    pasta_lingua = pasta / nome_da_subpasta(lingua, treino)
     manifesto = ler_manifesto(pasta_lingua)
     manifesto.setdefault("versao", 1)
     manifesto["lingua"] = lingua
-    guiao = GUIOES[lingua] if guiao is None else guiao
+    guiao = (GUIOES_DE_TREINO if treino else GUIOES)[lingua] if guiao is None else guiao
     manifesto["guiao"] = Path(guiao).name
     manifesto["projetos"] = dict(projetos)
     manifesto.setdefault("gravacoes", {})
@@ -549,25 +694,54 @@ def gravar_guiao(
         for id_, motivo in invalidas.items():
             print(f"    {id_}: {motivo}")
     pendentes = [f for f in frases if f.id not in existentes]
+    em_piloto = treino and not piloto_aprovado(manifesto)
+    if treino and not em_piloto:
+        resumo.piloto = "ja_aprovado"
     if not pendentes:
-        print(f"Nada a gravar: as {len(frases)} frases de '{lingua}' ja estao gravadas.")
+        print(f"Nada a gravar: as {len(frases)} frases de '{pasta_lingua.name}' ja estao gravadas.")
         return resumo
     print(f"{len(existentes)} de {len(frases)} ja gravadas; faltam {len(pendentes)}.")
-    captura.abrir()
-    print(f"Microfone: {captura.descricao}")
-    try:
+    aberta = False
+
+    def abrir() -> None:
+        nonlocal aberta
+        if not aberta:
+            captura.abrir()
+            aberta = True
+            print(f"Microfone: {captura.descricao}")
+
+    def parar_o_piloto(motivo: str) -> None:
+        resumo.piloto = "sem_fala"
+        print(f"    PILOTO PARADO: {motivo}.")
+        print("    Esta frase nao foi gravada e as restantes nao sao pedidas.")
+        print(f"    Verifica o microfone: {COMANDO_VERIFICAR}")
+        print("    Depois corre o mesmo comando outra vez: o piloto recomeca onde parou.")
+
+    def percorrer(lista: Sequence[FraseDoGuiao], no_piloto: bool) -> bool:
+        """Grava `lista`; False se a sessao parou (q, ou piloto sem fala)."""
+        if lista:
+            abrir()
         indice = 0
-        while indice < len(pendentes):
-            frase = pendentes[indice]
+        while indice < len(lista):
+            frase = lista[indice]
             posicao = frases.index(frase) + 1
             print()
-            print(f"[{posicao}/{len(frases)}] {frase.id} (caso {frase.caso})")
+            etiqueta = f"piloto, caso {frase.caso}" if no_piloto else f"caso {frase.caso}"
+            print(f"[{posicao}/{len(frases)}] {frase.id} ({etiqueta})")
             print(f"    LE:  {texto_a_ler(frase, projetos)}")
-            resposta = entrada("    Enter para gravar, s para saltar, q para sair: ").strip().lower()
+            pergunta = (
+                "    Enter para gravar, q para sair: "
+                if no_piloto
+                else "    Enter para gravar, s para saltar, q para sair: "
+            )
+            resposta = entrada(pergunta).strip().lower()
             if resposta == "q":
                 resumo.interrompido = True
-                break
+                return False
             if resposta == "s":
+                if no_piloto:
+                    print("    As frases do piloto nao se saltam: provam que o microfone ouve a tua voz.")
+                    continue
                 resumo.saltadas.append(frase.id)
                 indice += 1
                 continue
@@ -594,6 +768,9 @@ def gravar_guiao(
             duracao = (len(pcm) // 2) / TAXA_AMOSTRAGEM_PADRAO
             if pico_pcm16(pcm) == 0:
                 resumo.recusadas += 1
+                if no_piloto:
+                    parar_o_piloto("SEM SINAL (todas as amostras a zero: microfone em mudo ou sem permissao)")
+                    return False
                 print("    SEM SINAL (microfone em mudo ou sem permissao); a frase repete-se.")
                 continue
             if duracao < SEGUNDOS_MINIMOS_POR_FRASE:
@@ -603,6 +780,16 @@ def gravar_guiao(
             if defeito:
                 resumo.recusadas += 1
                 print(f"    AVISO: captura recusada ({defeito}); a frase repete-se.")
+                print("    Se voltar a acontecer: q para sair e correr gravar_voz.py --verificar.")
+                continue
+            analise = analisar(pcm) if treino else None
+            sem_fala = analise.motivo() if analise is not None else None
+            if sem_fala:
+                resumo.recusadas += 1
+                if no_piloto:
+                    parar_o_piloto(sem_fala)
+                    return False
+                print(f"    AVISO: captura recusada ({sem_fala}); a frase repete-se.")
                 print("    Se voltar a acontecer: q para sair e correr gravar_voz.py --verificar.")
                 continue
             ficheiro = f"{frase.id}.wav"
@@ -617,6 +804,9 @@ def gravar_guiao(
                 "tempo_real_s": round(feita.segundos_reais, 3),
                 "gravado_em": datetime.now().isoformat(timespec="seconds"),
             }
+            if analise is not None:
+                registo["fala_s"] = round(analise.fala_s, 2)
+                registo["nivel_da_fala"] = round(analise.nivel, 4)
             if caminho.is_file():
                 # Regravar (frase invalida ou --refazer) nunca apaga o WAV antigo.
                 etiqueta = "invalida" if frase.id in invalidas else "anterior"
@@ -627,8 +817,63 @@ def gravar_guiao(
             resumo.gravadas.append(frase.id)
             print(f"    gravada: {duracao:.1f} s")
             indice += 1
+        return True
+
+    def aprovar_o_piloto(ids: Sequence[str], restantes: int) -> bool:
+        """Volta a medir a fala dos WAV do piloto e pede a confirmacao do Sponsor."""
+        print()
+        print(f"PILOTO ({len(ids)} frases):")
+        falhadas: list[str] = []
+        for id_ in ids:
+            registo = manifesto["gravacoes"].get(id_, {})
+            try:
+                pcm, _taxa, _canais = ler_wav_pcm16(pasta_lingua / str(registo.get("ficheiro", "")))
+            except (OSError, ValueError, EOFError):
+                pcm = b""
+            analise = analisar(pcm)
+            motivo = analise.motivo()
+            print(
+                f"    {id_}: {(len(pcm) // 2) / TAXA_AMOSTRAGEM_PADRAO:.1f} s, fala {analise.fala_s:.1f} s, "
+                f"nivel {analise.nivel:.3f} -> {motivo or 'ok'}"
+            )
+            if motivo:
+                falhadas.append(id_)
+        if falhadas:
+            resumo.piloto = "sem_fala"
+            print(f"O piloto nao passa. Verifica o microfone: {COMANDO_VERIFICAR}")
+            print(f"Depois grava de novo essas frases com --refazer {','.join(falhadas)}.")
+            return False
+        print(f"Ouve os ficheiros {', '.join(i + '.wav' for i in ids)} em {NOME_PASTA_GRAVACOES}/{pasta_lingua.name}/.")
+        resposta = entrada(
+            f"Se se ouve bem a tua voz, escreve sim para gravar as restantes {restantes} frases "
+            "(outra coisa para parar aqui): "
+        ).strip().lower()
+        if resposta not in RESPOSTAS_QUE_APROVAM:
+            resumo.piloto = "por_confirmar"
+            print("Parado depois do piloto: nada mais foi gravado. Corre o mesmo comando quando quiseres continuar.")
+            return False
+        manifesto["piloto"] = {
+            "aprovado": True,
+            "ids": list(ids),
+            "aprovado_em": datetime.now().isoformat(timespec="seconds"),
+        }
+        escrever_manifesto(pasta_lingua, manifesto)
+        resumo.piloto = "aprovado"
+        return True
+
+    try:
+        if em_piloto:
+            ids_do_piloto = [f.id for f in frases[: max(1, piloto)]]
+            do_piloto = [f for f in pendentes if f.id in ids_do_piloto]
+            if not percorrer(do_piloto, no_piloto=True):
+                return resumo
+            pendentes = [f for f in pendentes if f.id not in ids_do_piloto]
+            if not aprovar_o_piloto(ids_do_piloto, len(pendentes)):
+                return resumo
+        percorrer(pendentes, no_piloto=False)
     finally:
-        captura.fechar()
+        if aberta:
+            captura.fechar()
     return resumo
 
 
@@ -676,6 +921,12 @@ def construir_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lingua", choices=LINGUAS, help="lingua do guiao a gravar")
     parser.add_argument("--pasta", default=None, help="pasta dentro de recordings/ (por omissao recordings/)")
     parser.add_argument("--refazer", default="", help="ids a gravar de novo, separados por virgula (ex.: pt-03,pt-17)")
+    parser.add_argument(
+        "--treino",
+        action="store_true",
+        help=f"grava o guiao de treino (adaptacao ao sotaque) para {NOME_PASTA_GRAVACOES}/{PREFIXO_PASTA_DE_TREINO}<lingua>/, "
+        f"comecando por um piloto de {FRASES_DO_PILOTO} frases",
+    )
     parser.add_argument("--com-som", action="store_true", help="toca um bip antes de cada gravacao")
     parser.add_argument(
         "--verificar",
@@ -699,9 +950,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.lingua:
         print("erro: falta --lingua pt|en", file=sys.stderr)
         return 2
+    if args.treino and args.lingua not in GUIOES_DE_TREINO:
+        print(f"erro: nao ha guiao de treino para '{args.lingua}' (so {tuple(GUIOES_DE_TREINO)})", file=sys.stderr)
+        return 2
     try:
         pasta = pasta_de_gravacoes(args.pasta)
-        frases = ler_guiao(GUIOES[args.lingua], args.lingua)
+        if args.treino:
+            frases = ler_guiao(GUIOES_DE_TREINO[args.lingua], args.lingua, treino=True)
+        else:
+            frases = ler_guiao(GUIOES[args.lingua], args.lingua)
     except (ValueError, GuiaoError) as erro:
         print(f"erro: {erro}", file=sys.stderr)
         return 2
@@ -716,7 +973,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Configuracao: {origem}. Microfone pedido: '{config.microfone}'.")
     captura = CapturaPyAudio(config.microfone)
     try:
-        resumo = gravar_guiao(args.lingua, frases, projetos, pasta, captura, com_som=args.com_som, refazer=refazer)
+        resumo = gravar_guiao(
+            args.lingua, frases, projetos, pasta, captura, com_som=args.com_som, refazer=refazer, treino=args.treino
+        )
     except KeyboardInterrupt:
         print("\nInterrompido. O que ja foi gravado fica; volta a correr o mesmo comando para continuar.")
         return 130
@@ -729,8 +988,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"Gravadas agora: {len(resumo.gravadas)}; saltadas: {len(resumo.saltadas)}; "
         f"ja existiam: {len(resumo.ja_existiam)}; capturas recusadas: {resumo.recusadas}."
     )
-    if resumo.interrompido or resumo.saltadas:
+    if resumo.interrompido or resumo.saltadas or resumo.piloto == "por_confirmar":
         print("Para continuar mais tarde, corre o mesmo comando: retoma onde parou.")
+    if resumo.piloto == "sem_fala":
+        return 1
     return 0
 
 
@@ -744,6 +1005,29 @@ def tom_pcm16(segundos: float, frequencia: float = 220.0, amplitude: int = 8000)
         f"<{n}h",
         *(int(amplitude * math.sin(2 * math.pi * frequencia * i / TAXA_AMOSTRAGEM_PADRAO)) for i in range(n)),
     )
+
+
+@functools.lru_cache(maxsize=8)
+def fala_sintetica_pcm16(segundos: float, amplitude: int = 6000, f0: float = 120.0) -> bytes:
+    """Sinal com a forma da fala (harmonicos de f0 com formantes, silabas a 4 Hz).
+
+    Um tom puro nao passa no VAD; isto passa, sem ser voz de ninguem. So para
+    os autotestes e testes do piloto.
+    """
+    n = int(TAXA_AMOSTRAGEM_PADRAO * segundos)
+    formantes = (700.0, 1200.0, 2600.0)
+    harmonicos = [
+        (k * f0, sum(math.exp(-(((k * f0) - f) / 150.0) ** 2) for f in formantes) + 0.05)
+        for k in range(1, int(3800 / f0))
+    ]
+    total = sum(peso for _, peso in harmonicos)
+    amostras = []
+    for i in range(n):
+        t = i / TAXA_AMOSTRAGEM_PADRAO
+        envelope = 0.5 - 0.5 * math.cos(2 * math.pi * 4 * t)
+        onda = sum(peso * math.sin(2 * math.pi * freq * t) for freq, peso in harmonicos) / total
+        amostras.append(int(amplitude * envelope * onda))
+    return struct.pack(f"<{n}h", *amostras)
 
 
 class CapturaFalsa:
@@ -803,6 +1087,13 @@ def _autoteste() -> int:
     for lingua in LINGUAS:
         frases = ler_guiao(GUIOES[lingua], lingua)
         verificar(f"guiao {lingua}: cobertura minima", verificar_cobertura(frases), [])
+    for lingua, caminho in GUIOES_DE_TREINO.items():
+        treino = ler_guiao(caminho, lingua, treino=True)
+        verificar(
+            f"guiao de treino {lingua}: vocabulario e nenhuma frase de avaliacao",
+            verificar_guiao_de_treino(treino, ler_guiao(GUIOES[lingua], lingua)),
+            [],
+        )
 
     raiz = (RAIZ / "tmp" / "autoteste-gravar-voz").resolve()
     shutil.rmtree(raiz, ignore_errors=True)
@@ -887,6 +1178,21 @@ def _autoteste() -> int:
         verificar("gravacao antiga invalida volta a ser pedida", (list(resumo.invalidas), resumo.gravadas), (["pt-02"], ["pt-02"]))
         verificar("nenhum ficheiro apagado", set(antes) <= set(depois), True)
         verificar("WAV invalido guardado ao lado", any(n.startswith("pt-02.invalida-") for n in depois), True)
+        # Treino: piloto em silencio para sem pedir o resto; piloto com fala para e pede confirmacao.
+        treino = ler_guiao(GUIOES_DE_TREINO["en"], "en", treino=True)[:5]
+        with contextlib.redirect_stdout(io.StringIO()):
+            resumo = gravar_guiao(
+                "en", treino, projetos, pasta, CapturaFalsa(tom_pcm16(1.0, amplitude=40)),
+                entrada=entrada_roteirizada([""] * 10), raiz=raiz, treino=True,
+            )
+        verificar("piloto quase em silencio para", (resumo.piloto, resumo.gravadas), ("sem_fala", []))
+        with contextlib.redirect_stdout(io.StringIO()):
+            resumo = gravar_guiao(
+                "en", treino, projetos, pasta, CapturaFalsa(fala_sintetica_pcm16(1.0)),
+                entrada=entrada_roteirizada([""] * 6 + ["sim"] + [""] * 4), raiz=raiz, treino=True,
+            )
+        verificar("piloto com fala, aprovado, grava o resto", (resumo.piloto, len(resumo.gravadas)), ("aprovado", 5))
+        verificar("treino fora da pasta de avaliacao", sorted(p.name for p in pasta.iterdir()), ["pt", "treino-en"])
         # --verificar com dispositivos falsos: o caso medido passa pelo MME.
         relogio = microfone.RelogioFalso()
         saida = io.StringIO()

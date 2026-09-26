@@ -29,8 +29,10 @@ the measurement script):
   the `piper-tts` library (next section). The jarvis replies are written in
   Portuguese today, so this is the voice that speaks them. A Portuguese reply
   never reaches the English engine, even when Kokoro is installed.
-- **English (`en`):** **Kokoro-82M** (`kokoro-onnx`, English voice
-  `af_heart`), the natural English voice of the chosen product language. It
+- **English (`en`):** **Kokoro-82M** (`kokoro-onnx`, male British voice
+  `bm_fable` by default, set in the optional `[voz]` table of `config.toml`;
+  see "Choosing the English voice" below), the natural English voice of the
+  chosen product language. It
   is loaded and warmed up with one throw-away sentence; if the package or a
   model file is missing, or that first synthesis fails, Piper speaks instead
   and the start-up log line says why. The switch to `en` happens when the
@@ -38,7 +40,7 @@ the measurement script):
 
 ### Kokoro-82M (ONNX)
 
-**Status: installed and verified (English voice `af_heart`, CPU).** To install, add the package into the venv and download
+**Status: installed and verified (English voices `bm_fable` and `af_heart`, CPU).** To install, add the package into the venv and download
 the two model files into `models/kokoro/`:
 
 ```
@@ -58,6 +60,65 @@ is not Kokoro.
 |---|---|---|
 | `models/kokoro/kokoro-v1.0.onnx` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx` | `7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5` |
 | `models/kokoro/voices-v1.0.bin` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin` | `bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d` |
+
+### Choosing the English voice
+
+The English voice is a closed list in `jarvis/config.py` (`VOZES_INGLESAS`):
+`af_heart` (American, the previous voice) and the four British male voices in
+`voices-v1.0.bin`: `bm_george`, `bm_lewis`, `bm_daniel`, `bm_fable`. The `b`
+voices use the `en-gb` phonemizer and the `a` voice `en-us`. `[voz] nome` in
+`config.toml` picks one; an unknown name is a configuration error, and a voice
+missing from the voices file falls back to Piper like any other Kokoro failure.
+
+**Default: `bm_fable`.** Measured with
+`scripts/medir_latencia_voz.py --vozes --rodadas 5 --verificar --evidencia`
+(one model loaded once, every voice warmed up, the 20 fixed English sentences
+x 5 rounds per voice, voice order rotated every sentence to cancel drift, CPU,
+no sound):
+
+| voice | phonemizer | speed | p50 ms | p95 ms |
+|---|---|---|---|---|
+| `af_heart` (reference) | en-us | 1.0 | 583 | 825 |
+| `bm_george` | en-gb | 1.3 | 576 | 812 |
+| `bm_lewis` | en-gb | 1.2 | 614 | 843 |
+| `bm_daniel` | en-gb | 1.2 | 558 | 796 |
+| **`bm_fable`** | en-gb | 1.35 | **501** | **668** |
+
+Why these numbers decide it:
+
+- **Speed per voice (`VELOCIDADE_DAS_VOZES` in `jarvis/voz.py`).** Time to
+  first audio grows with the length of audio to synthesise. At speed 1.0 the
+  British voices speak more slowly than `af_heart` (about 145 to 172 words per
+  minute against 196 on the fixed sentences), and every one of them was slower
+  to first audio (an earlier 3-round run at 1.0: `af_heart` 524/705 ms p50/p95,
+  `bm_george` 655/832, `bm_lewis` 594/849, `bm_daniel` 583/772, `bm_fable`
+  646/814). Each voice now runs at the speed that matches the `af_heart`
+  pace. On the sample sentence of `scripts/amostras_voz.py` that gives
+  `af_heart` 204, `bm_george` 196, `bm_lewis` 203, `bm_daniel` 192 and
+  `bm_fable` 200 words per minute.
+- **`bm_fable` is the only British voice clearly faster than `af_heart` at
+  both p50 and p95 in every run.** It was 497/642 ms against 552/768 in a
+  3-round run of all five voices, 485/644 against 555/746 in a 5-round run of
+  three voices, and 501/668 against 583/825 in the run above.
+- **`bm_george` is a tie with `af_heart`.** It passed one run (550/743 against
+  552/768) and failed the next (556/771 against 555/746), so it cannot
+  guarantee "not slower". `bm_daniel` and `bm_lewis` are also mixed or slower.
+  In the model's own ranking
+  ([VOICES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)),
+  `bm_lewis` and `bm_daniel` get lower overall grades than `bm_fable` and
+  `bm_george`, which share the best British male grade.
+
+The latency is above the older 300/600 ms voice target for every Kokoro
+voice, `af_heart` included. That is the pre-existing cost of Kokoro on this
+CPU, and this choice does not make it worse.
+
+To hear the voices before switching, write one WAV per voice to
+`audio/amostras-voz/` (ignored by Git). Nothing plays without `--com-som`:
+
+```
+.venv\Scripts\python scripts/amostras_voz.py
+.venv\Scripts\python scripts/amostras_voz.py --com-som
+```
 
 ## Spoken reply: Piper `pt_PT-tugão-medium`
 
@@ -193,6 +254,62 @@ in PowerShell) and its source URL
 | File | Source URL | sha256 |
 |---|---|---|
 | (pending download) | — | — |
+
+### Accent adaptation (English)
+
+The Parakeet engine can be adapted to the Sponsor's Portuguese-accented
+English without a new package and without training the model
+(`jarvis/adaptacao.py`, `[adaptacao]` in `config.toml`):
+
+- **Phrase boosting.** During greedy TDT decoding, tokens that continue one of
+  jarvis' command phrases or a project name from `config.toml` get a logit
+  bonus (`bonus`, default 1.5). This is the shallow-fusion word boosting that
+  [NVIDIA NeMo documents](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/asr/asr_customization/word_boosting.html)
+  for RNN-T/TDT models, applied to onnx-asr 0.12.0 through its per-step
+  `_decode` call. If that private hook is missing or fails, transcription goes
+  on without boosting and the log says so. The boosted vocabulary is the
+  product's own vocabulary. It is never taken from test-set errors.
+- **Correction lexicon.** Whole-word "heard -> meant" rules, learned by
+  `scripts/adaptar_sotaque.py` from the training side only. A rule is kept
+  only if the heard form is never a correct word in a training phrase. It
+  must also make no training phrase worse, in edit distance or in the intent
+  the router gives, and it must improve at least one. The lexicon comes from
+  the Sponsor's voice, so it lives in `models/adaptacao/lexico-en.json`, which
+  is ignored by Git.
+
+Fine-tuning (LoRA or adapters) was not chosen. It needs a NeMo install, a few
+minutes of audio is too little for it, and the result would have to be
+exported to ONNX again.
+
+**Measurement.** `scripts/adaptar_sotaque.py --medir` splits `recordings/en/`
+deterministically (seed 1790, half for training, stratified by the script's
+case). Every recording in `recordings/treino-en/` goes to the training side
+only. The command then measures on the test side only, in one run with one
+model loaded: no adaptation, boosting only, lexicon only, and both. Boosted
+and unboosted decoding alternate order on every phrase, so their latencies
+are comparable. The goal for a variant: a lower word error rate *and* more
+preserved intents than no adaptation in the same run, with p50 latency at
+most 1.2x.
+
+Result on 2026-09-26 (Parakeet CPU, 44 evaluation recordings, 0 training
+recordings, so 22 phrases for training and 22 for testing, 8 lexicon rules
+learned):
+
+| variant | WER | preserved intent | project right | p50 |
+|---|---|---|---|---|
+| no adaptation | 24.8% | 20/22 | 14/22 | 124 ms |
+| boosting only | 21.8% | 20/22 | 16/22 | 127 ms |
+| lexicon only | 24.2% | 20/22 | 15/22 | 124 ms |
+| boosting + lexicon | 22.4% | 20/22 | 16/22 | 127 ms |
+
+Boosting lowers the word error rate and gets more project names right, with
+no noticeable latency cost. No variant preserves more intents than no
+adaptation on this test set, so **the goal is not met and `[adaptacao]` stays
+off by default**. The next step needs the Sponsor: record the training script
+(`tests/voz/guiao-treino-en.md`), pilot first, with
+`scripts/gravar_voz.py --lingua en --treino`, then run
+`scripts/adaptar_sotaque.py --medir` again. The README lists the steps under
+"Adapting to your accent".
 
 ## Wake word: openWakeWord
 

@@ -24,6 +24,7 @@ Other options:
 .venv\Scripts\python -m jarvis --sem-ativacao        # push-to-talk key only, no wake word
 .venv\Scripts\python -m jarvis --com-som             # short beep when listening starts and ends
 .venv\Scripts\python -m jarvis --sem-voz             # replies on screen only
+.venv\Scripts\python -m jarvis --sem-bolinha         # no status orb window
 .venv\Scripts\python -m jarvis --wav a.wav b.wav     # WAV files instead of the microphone
 ```
 
@@ -69,6 +70,59 @@ A question that is not about a project or a local command ("what's the temperatu
 
 **Spoken notices.** The sessions jarvis opens start with `--settings .jarvis/sessoes/<project>/settings.json`, which adds two Claude Code hooks (see `config/hooks-jarvis.exemplo.json`): `Stop`, and `Notification` for `idle_prompt` and `permission_prompt`. The hook sends jarvis only the kind of event, over the same authenticated local connection as the channel, never the message or the transcript. jarvis then says "atlas acabou" / "atlas is done" or "atlas está à espera de ti" / "atlas is waiting for you". With `[forja]` configured it also checks the FORJA run of each project every 30 seconds and says when a run finishes, fails or gets blocked. Notices wait their turn: never over your voice, another reply or a pending recap; at most one per session per minute; "cala-te" drops them and, while asleep, they only go to the log.
 
+## The status orb
+
+While jarvis runs with the microphone, a small borderless window stays on top of the other windows in a corner of the screen. It shows an orb that follows what jarvis is doing, in the style of a voice mode:
+
+| Orb | Meaning |
+| --- | --- |
+| Small slate dot, breathing slowly | Waiting for the wake word or the key |
+| Blue disc with a ring, growing with your microphone level | Listening to you (also during a conversation) |
+| Violet orb with three dots | Thinking |
+| Teal orb with three bars, moving with the voice | Speaking |
+| Amber orb with `?` | Waiting for your yes, also while it hears the answer |
+| Dim crescent moon | Asleep |
+| Red orb with `!` | Something failed (shown for a few seconds) |
+
+Below the orb, a short caption shows the phrase jarvis heard and, during the recap, the text it will send. Click the orb to silence jarvis, the same as saying "be quiet": the voice stops and jarvis keeps running. Drag it to move it; the position is saved in `.jarvis/bolinha.json` (ignored by Git). Colours follow the Windows light or dark theme, and with animation effects turned off in Windows the orb stays still. The design contract is in [docs/DESIGN.md](docs/DESIGN.md).
+
+The orb runs as a separate process, so it never slows down listening or speaking. If it cannot start or it closes, jarvis writes one line in the log and carries on without it. `--sem-bolinha` starts jarvis without it, and `--wav` never opens it.
+
+## The voice
+
+English replies are spoken by a male British Kokoro voice, `bm_fable`, by default. To hear the alternatives, write one sample WAV per voice to `audio/amostras-voz/` (ignored by Git); nothing plays unless you add `--com-som`:
+
+```
+.venv\Scripts\python scripts/amostras_voz.py --com-som
+```
+
+To switch, set `nome` in the optional `[voz]` table of `config.toml` to one of `bm_george`, `bm_lewis`, `bm_daniel`, `bm_fable` (British) or `af_heart` (American), and restart jarvis. Why `bm_fable` is the default, with the latency numbers, is in [docs/MODELOS.md](docs/MODELOS.md).
+
+## Adapting to your accent
+
+Transcription can be adapted to your voice in English. There are two parts, and both stay off until the measurement shows they help. **Boosting** favours jarvis' command phrases and your project names while the words are recognised. The **correction lexicon** learns your recurring confusions (for example "castle" for "cancel") from your training recordings. Everything learned from your voice stays in ignored folders: recordings in `recordings/`, the lexicon in `models/adaptacao/`, and the measurement in `docs/forja/evidence/`.
+
+Only your own recordings count. Nothing here uses a synthetic voice. The steps:
+
+1. **Record the pilot.** This command starts with 3 training phrases:
+   ```
+   .venv\Scripts\python scripts/gravar_voz.py --lingua en --treino
+   ```
+   Press Enter to start each phrase and Enter to stop. The training phrases go to `recordings/treino-en/`, a separate folder, so they never reach the test set.
+2. **Check the pilot.** The recorder checks that each pilot phrase contains real speech. If one is silent, it stops and points you to `scripts/gravar_voz.py --verificar` to check the microphone. If the pilot passes, play the three WAV files it names in `recordings/treino-en/`, then type `yes` if your voice sounds right.
+3. **Record the rest.** After your `yes`, the recorder asks for the remaining phrases. You can stop at any time; running the same command again resumes where you stopped.
+4. **Run the adaptation.** This learns the lexicon from the training side only:
+   ```
+   .venv\Scripts\python scripts/adaptar_sotaque.py
+   ```
+5. **Measure.** This command splits your evaluation recordings in `recordings/en/` into a training half and a test half. The split is fixed and stratified by the script's case. It learns the lexicon again from the training side and then measures on the test side only, in one run: no adaptation, boosting only, lexicon only, and both.
+   ```
+   .venv\Scripts\python scripts/adaptar_sotaque.py --medir
+   ```
+   The report in `docs/forja/evidence/` has the word error rate, the preserved intent and the p50 transcription latency. It also lists the ids of both halves and prints the `[adaptacao]` settings for the best variant. A variant counts only if it lowers the word error rate, preserves more intents than no adaptation, and keeps p50 latency within 1.2x. Copy those settings into `config.toml` and restart jarvis.
+
+The current result, and why the adaptation is off by default, is in [docs/MODELOS.md](docs/MODELOS.md).
+
 ## How it works
 
 1. **Listening**: the push-to-talk key, or openWakeWord followed by voice activity detection (webrtcvad).
@@ -76,7 +130,7 @@ A question that is not about a project or a local command ("what's the temperatu
 3. **Understanding**: a local language model in Ollama (`qwen3:8b`, falling back to `qwen3:4b` when GPU memory is short) returns the intent, the project and, for a dictation, a clear rewritten prompt. It never adds requests of its own, and a project is never guessed: it has to be named.
 4. **Confirmation**: the recap above; nothing leaves the PC before your "yes", except a general question (below).
 5. **Action**: a local action, or the prompt into the project's Claude Code session.
-6. **Spoken reply**: a resident voice that starts speaking while it is still synthesising (Kokoro for English when its model files are present, Piper `pt_PT-tugão-medium` for European Portuguese). Code, tool calls and file paths in Claude's replies are never read out; the full reply stays in the log.
+6. **Spoken reply**: a resident voice that starts speaking while it is still synthesising (Kokoro, male British voice by default, for English when its model files are present, Piper `pt_PT-tugão-medium` for European Portuguese). Code, tool calls and file paths in Claude's replies are never read out; the full reply stays in the log.
 
 Every sentence is logged with timestamps for each stage in `logs/jarvis-<date>.log` (ignored by Git), including the time from the end of your speech to the first sign of life and to the start of the spoken reply.
 
@@ -87,6 +141,10 @@ To measure the whole chain from WAV files, with a fake channel and without playi
 ```
 
 It fails if "what time is it" takes more than 1.2 s (median) or 2.0 s (95th percentile) from the end of speech to the start of the reply, if a dictation takes more than 2.5 s / 4.0 s to the start of the recap, if the first sign of life takes more than 1.0 s, or if startup takes more than 30 s. The test WAVs are made by the local voice and only measure time; recognition accuracy has to be measured with your own recordings.
+
+## Roadmap
+
+Planned work, such as talking to jarvis in European Portuguese, is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Principles
 

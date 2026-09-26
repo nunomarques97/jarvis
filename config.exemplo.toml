@@ -82,3 +82,27 @@ confirmacao_s = 30.0
 modelo = "claude-haiku-4-5"
 limite_s = 60
 localizacao = "Portugal"
+
+# Opcional: a voz das respostas em ingles (lingua = "en"). Sem esta tabela vale
+# "bm_fable", uma voz masculina britanica do Kokoro-82M. Uma de af_heart
+# (americana), bm_george, bm_lewis, bm_daniel ou bm_fable (britanicas). Para
+# as ouvir antes de escolher: .venv\Scripts\python scripts/amostras_voz.py
+# (grava um WAV por voz em audio/amostras-voz/; com --com-som toca-os).
+[voz]
+nome = "bm_fable"
+
+# Opcional: adaptacao da transcricao ao teu sotaque, so quando lingua = "en" e
+# o motor e o Parakeet. Sem esta tabela fica tudo desligado (como antes).
+# reforco: da preferencia, durante a transcricao, as frases de comando do
+#   jarvis ("Claude", "abort", "add tests", ...) e aos nomes dos projetos acima.
+# bonus: forca desse reforco (maior do que 0, no maximo 10). Forte demais pode
+#   fazer ouvir um comando ou projeto onde ele nao foi dito.
+# lexico: aplica as correcoes aprendidas das tuas gravacoes de treino, em
+#   models/adaptacao/lexico-en.json (fica fora do Git). Sem esse ficheiro a
+#   transcricao continua igual e o log diz porque.
+# Fica desligada ate a medicao mostrar que ajuda: .venv\Scripts\python
+#   scripts/adaptar_sotaque.py --medir diz que valores por aqui.
+[adaptacao]
+reforco = false
+bonus = 1.5
+lexico = false

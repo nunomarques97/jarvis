@@ -567,6 +567,15 @@ def tocar_bip(tipo: str) -> None:
 
 # --- O ouvido -----------------------------------------------------------------
 
+#: O que `ao_evento` recebe: o inicio e o fim da escuta (os sinais), uma frase
+#: captada a caminho do texto, uma escuta descartada e uma transcricao falhada.
+EVENTO_INICIO = "inicio"
+EVENTO_FIM = "fim"
+EVENTO_CAPTADA = "captada"
+EVENTO_DESCARTADA = "descartada"
+EVENTO_ERRO = "erro"
+EVENTOS_DO_OUVIDO = (EVENTO_INICIO, EVENTO_FIM, EVENTO_CAPTADA, EVENTO_DESCARTADA, EVENTO_ERRO)
+
 
 class Ouvido:
     """Maquina de estados da escuta + threads de captura e de transcricao.
@@ -593,6 +602,8 @@ class Ouvido:
         relogio: Callable[[], float] = time.perf_counter,
         nome_da_tecla: str = "tecla de falar",
         ao_ativar_sem_fala: Callable[[Frase], None] | None = None,
+        ao_evento: Callable[[str], object] | None = None,
+        ao_chunk: Callable[[bytes], object] | None = None,
     ) -> None:
         if tecla is None and detetor is None:
             raise ValueError("o ouvido precisa de pelo menos um gatilho (tecla ou palavra de ativacao)")
@@ -604,6 +615,10 @@ class Ouvido:
         #: Recebe a palavra de ativacao seguida de silencio como uma Frase de
         #: texto vazio (com o score). Sem ele, essa ativacao e descartada.
         self.ao_ativar_sem_fala = ao_ativar_sem_fala
+        #: Recebe os momentos da escuta (`EVENTOS_DO_OUVIDO`) e cada chunk lido,
+        #: para a bolinha. Tem de ser rapido; uma falha dele nunca para a escuta.
+        self.ao_evento = ao_evento
+        self.ao_chunk = ao_chunk
         self.tecla = tecla
         self.detetor = detetor
         self.vad = vad
@@ -665,9 +680,18 @@ class Ouvido:
     def estado(self) -> str:
         return self._estado
 
+    def _avisar(self, evento: str) -> None:
+        if self.ao_evento is None:
+            return
+        try:
+            self.ao_evento(evento)
+        except Exception:  # noqa: BLE001 - a bolinha e um extra, a escuta segue
+            pass
+
     def _sinal(self, tipo: str, detalhe: str, instante: float) -> None:
         seta = ">>> A OUVIR" if tipo == "inicio" else "<<< FIM DA ESCUTA"
         self.escrever(f"ouvido | {seta} | {detalhe}")
+        self._avisar(tipo)
         if self.com_som:
             try:
                 self.tocar(tipo)
@@ -731,6 +755,7 @@ class Ouvido:
     def _descartar(self, motivo: str) -> None:
         self.descartadas += 1
         self.escrever(f"ouvido | descartado: {motivo} | nada transcrito, nada enviado")
+        self._avisar(EVENTO_DESCARTADA)
 
     def _voltar_ao_repouso(self) -> None:
         self._estado = "repouso"
@@ -766,6 +791,8 @@ class Ouvido:
             self._fila.put_nowait(captada)
         except queue.Full:
             self._descartar(f"{FRASES_EM_ESPERA} frases ainda a espera de transcricao")
+            return
+        self._avisar(EVENTO_CAPTADA)
 
     def _enfileirar_so_ativacao(self, fim: float) -> None:
         captada = _FraseCaptada(b"", GATILHO_ATIVACAO, self._inicio, fim, self._score, so_ativacao=True)
@@ -915,6 +942,7 @@ class Ouvido:
             resultado = self.motor.transcrever(captada.pcm16, lingua=self.lingua)
         except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o ouvido
             self.escrever(f"ouvido | transcricao falhou ({self.motor.nome}): {erro!r}")
+            self._avisar(EVENTO_ERRO)
             return None
         pronto = self.relogio()
         if not resultado.texto:
@@ -1003,6 +1031,11 @@ class Ouvido:
                     break
                 premida = self.tecla.premida() if self.tecla is not None else False
                 self.processar(chunk, premida)
+                if self.ao_chunk is not None:
+                    try:
+                        self.ao_chunk(chunk)
+                    except Exception:  # noqa: BLE001 - o nivel do microfone e um extra
+                        pass
         except Exception as erro:  # noqa: BLE001
             self.escrever(f"ouvido | ERRO na captura: {erro!r}")
         finally:

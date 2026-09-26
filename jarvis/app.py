@@ -111,8 +111,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 from jarvis import acoes_locais, conversa, voz
+from jarvis.adaptacao import criar_adaptacao
 from jarvis.audio_util import RAIZ, garantir_pasta
 from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns
+from jarvis.bolinha import LigacaoABolinha, PonteDaBolinha
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_config
 from jarvis.confirmacao import Confirmacao, Desfecho, Pedido
 from jarvis.consola import forcar_consola_utf8
@@ -464,6 +466,8 @@ class Painel:
         self._tranca = threading.Lock()
         self.atual: str | None = None
         self.historico: list[str] = []
+        #: Recebe cada estado novo (a bolinha). Tem de ser rapido e nunca levanta.
+        self.ao_mudar: Callable[[str], object] | None = None
 
     def mudar(self, estado: str, detalhe: str = "") -> None:
         with self._tranca:
@@ -474,6 +478,12 @@ class Painel:
         self._escrever(f"estado | {estado}" + (f" | {detalhe}" if detalhe else ""))
         if self._titulo:
             _titulo_da_consola(f"jarvis - {estado.lower()}")
+        ao_mudar = self.ao_mudar
+        if ao_mudar is not None:
+            try:
+                ao_mudar(estado)
+            except Exception:  # noqa: BLE001 - a bolinha e um extra
+                pass
 
 
 # --- Modo ficheiro: varios WAV, um de cada vez ----------------------------------
@@ -791,6 +801,8 @@ class Jarvis:
         self._tranca_da_pergunta = threading.Lock()
         self._consulta: Consulta | None = None
         self._fio_da_pergunta: threading.Thread | None = None
+        #: A bolinha de estado, quando ha janela (`ligar_bolinha`).
+        self.bolinha: PonteDaBolinha | None = None
 
     # -- textos
 
@@ -828,6 +840,54 @@ class Jarvis:
             except Exception as erro:  # noqa: BLE001 - fechar nunca levanta
                 self.log.linha(f"canal | erro ao fechar: {erro!r}")
 
+    def ligar_bolinha(self, ponte: PonteDaBolinha) -> None:
+        """A bolinha passa a seguir o painel, a escuta, o recap e a voz."""
+        self.bolinha = ponte
+        self.painel.ao_mudar = ponte.painel
+        self.confirmacao.ao_propor = self._legenda_do_recap
+        voz.definir_ouvinte_da_voz(ponte.nivel_da_voz)
+        if self.painel.atual is not None:
+            ponte.painel(self.painel.atual)
+        ponte.atualizar()
+
+    def desligar_bolinha(self) -> None:
+        if self.bolinha is None:
+            return
+        voz.definir_ouvinte_da_voz(None)
+        self.painel.ao_mudar = None
+        self.confirmacao.ao_propor = None
+        self.bolinha = None
+
+    def ao_evento_do_ouvido(self, evento: str) -> None:
+        if self.bolinha is not None:
+            self.bolinha.ouvido(evento)
+
+    def ao_audio_do_microfone(self, chunk: bytes) -> None:
+        if self.bolinha is not None:
+            self.bolinha.nivel_do_microfone(chunk)
+
+    def _legenda(self, texto: str) -> None:
+        if self.bolinha is not None:
+            self.bolinha.legenda(texto)
+
+    def _legenda_do_recap(self, recap) -> None:
+        """Durante o recap, a legenda mostra o texto a enviar."""
+        primeira = recap.ecra.splitlines()[0] if recap.ecra else ""
+        self._legenda(recap.pedido.prompt or primeira)
+
+    def _erro_na_bolinha(self) -> None:
+        if self.bolinha is not None:
+            self.bolinha.erro()
+
+    def calar_pela_bolinha(self) -> None:
+        """Um clique na bolinha: cala como o "cala-te" dito, sem fechar o jarvis."""
+        self._calar_ja("clique na bolinha", "clique na bolinha")
+
+    def _calar_ja(self, motivo: str, curto: str) -> None:
+        self.calar_agora(motivo, definitivo=False)
+        self.avisos.descartar(curto)
+        self._fechar_conversa(curto)
+
     def ocioso(self) -> bool:
         with self._condicao:
             return self._pendentes == 0
@@ -852,6 +912,7 @@ class Jarvis:
             numero = self.frases
         sinal = self.relogio()
         self.painel.mudar(A_PENSAR, f"frase #{numero}: {frase.texto!r}")
+        self._legenda(frase.texto)
         medida = MedidaDaFrase(
             numero=numero,
             texto=frase.texto,
@@ -861,9 +922,7 @@ class Jarvis:
         )
         if self._acao_rapida(frase.texto) == "calar":
             # Dito por cima da voz: cala ja, sem esperar que a fala acabe.
-            self.calar_agora("cala-te dito ao jarvis", definitivo=False)
-            self.avisos.descartar("cala-te")
-            self._fechar_conversa("cala-te")
+            self._calar_ja("cala-te dito ao jarvis", "cala-te")
         with self._condicao:
             self._pendentes += 1
         if self._fila is None:
@@ -926,6 +985,7 @@ class Jarvis:
                     self._atualizar_escuta_do_recap()
         except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o jarvis
             self.log.linha(f"frase #{medida.numero} | ERRO no tratamento: {erro!r} | nada enviado")
+            self._erro_na_bolinha()
         finally:
             self._local.registo = None
             self._local.medida = None
@@ -1256,6 +1316,7 @@ class Jarvis:
         else:
             motivo = getattr(resultado, "motivo_falha", "") or "sem motivo"
             marcar(f"voz falhou, resposta so no ecra ({motivo}) | texto: {falado!r}")
+            self._erro_na_bolinha()
         return resultado
 
     # -- executor: so recebe pedidos sem efeito ou confirmados com "sim"
@@ -1533,7 +1594,8 @@ def construir_ouvido(
         nome_da_tecla = "tecla simulada pelo ficheiro"
         com_ativacao = False
     if motor is None:
-        motor = criar_motor(config_ouvido.motor, config_ouvido.device)
+        adaptacao = criar_adaptacao(jarvis.config, avisar=log.linha)
+        motor = criar_motor(config_ouvido.motor, config_ouvido.device, adaptacao=adaptacao)
     if fonte is None:
         fonte = MicrofonePyAudio(jarvis.config.microfone, avisar=log.linha)
     if tecla is None:
@@ -1559,6 +1621,8 @@ def construir_ouvido(
         com_som=com_som,
         nome_da_tecla=nome_da_tecla,
         ao_ativar_sem_fala=jarvis.ao_ativar_sem_fala,
+        ao_evento=jarvis.ao_evento_do_ouvido,
+        ao_chunk=jarvis.ao_audio_do_microfone,
     )
     jarvis.ouvido = ouvido
     return ouvido
@@ -1741,6 +1805,19 @@ def construir_canal(
         return None
 
 
+#: Com esta variavel de ambiente preenchida, a bolinha nunca abre (os testes usam-na).
+VARIAVEL_SEM_BOLINHA = "JARVIS_SEM_BOLINHA"
+
+
+def abrir_bolinha(jarvis: Jarvis, *, ligacao: LigacaoABolinha | None = None) -> LigacaoABolinha | None:
+    """Lanca a janela da bolinha e liga-a ao jarvis; sem ela, o jarvis segue igual."""
+    ligacao = ligacao or LigacaoABolinha(jarvis.calar_pela_bolinha, jarvis.log.linha)
+    if not ligacao.iniciar():
+        return None
+    jarvis.ligar_bolinha(PonteDaBolinha(ligacao.enviar, ligacao.enviar_nivel))
+    return ligacao
+
+
 def construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m jarvis",
@@ -1757,6 +1834,9 @@ def construir_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sem-voz", action="store_true", help="respostas so na consola e no log")
     parser.add_argument("--sem-ativacao", action="store_true", help="desliga as maos-livres: so a tecla de falar")
+    parser.add_argument(
+        "--sem-bolinha", action="store_true", help="sem a janela da bolinha de estado (com --wav nunca abre)"
+    )
     parser.add_argument(
         "--com-som",
         action="store_true",
@@ -1821,10 +1901,12 @@ def _arrancar_e_correr(
     config = carregar_config_tolerante(caminho_da_config, log)
     lingua = "en" if config.ouvido.lingua == "en" else "pt"
     voz.definir_lingua_da_voz(lingua)
+    voz.definir_voz_inglesa(config.voz.nome)
     modo_ficheiro = bool(args.wav)
     com_voz = not args.sem_voz and (not modo_ficheiro or args.com_som)
     log.linha(
-        f"configuracao: {len(config.projetos)} projeto(s) | lingua={lingua} | motor={config.ouvido.motor} "
+        f"configuracao: {len(config.projetos)} projeto(s) | lingua={lingua} | voz inglesa={config.voz.nome} "
+        f"| motor={config.ouvido.motor} "
         f"({config.ouvido.device}) | voz={'ligada' if com_voz else 'desligada'} "
         f"| forja={'configurada' if config.forja else 'sem [forja] no config.toml: so as sessoes'}"
     )
@@ -1846,6 +1928,8 @@ def _arrancar_e_correr(
         painel=Painel(log.linha, titulo=not modo_ficheiro),
     )
     jarvis.canal = construir_canal(config, log, ao_evento=jarvis.avisos.receber)
+    sem_bolinha = modo_ficheiro or args.sem_bolinha or bool(os.environ.get(VARIAVEL_SEM_BOLINHA))
+    ligacao = None if sem_bolinha else abrir_bolinha(jarvis)
     if config.forja is not None and config.projetos and not modo_ficheiro:
         jarvis.vigia = VigiaDosRuns(
             config.projetos, forja.estado.ler_run, jarvis.avisos.receber_run, escrever=log.linha
@@ -1879,6 +1963,9 @@ def _arrancar_e_correr(
         if handler_anterior is not None:
             signal.signal(signal.SIGINT, handler_anterior)
         jarvis.calar_agora("saida do processo", definitivo=True, ja_calado=voz.esta_calado())
+        if ligacao is not None:
+            jarvis.desligar_bolinha()
+            ligacao.fechar()
         log.linha("jarvis terminado")
         log.fechar()
 

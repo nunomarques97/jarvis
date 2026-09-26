@@ -10,7 +10,9 @@ portugues), nunca pelo que estiver instalado:
   - "pt": Piper `pt_PT-tugao-medium` pela biblioteca `piper-tts`;
   - "en": Kokoro-82M (`kokoro-onnx`), voz inglesa natural, quando o pacote e
     os ficheiros do modelo em `models/kokoro/` estao presentes e a primeira
-    sintese passa; senao o Piper, com o motivo na descricao do motor.
+    sintese passa; senao o Piper, com o motivo na descricao do motor. A voz
+    do Kokoro (`voz_inglesa()`, por omissao masculina britanica) e escolhida
+    por quem arranca o jarvis com `definir_voz_inglesa()`.
 
 Ver docs/MODELOS.md para os ficheiros, os URLs e os sha256.
 
@@ -107,6 +109,7 @@ from jarvis.audio_util import (  # noqa: E402
     garantir_pasta,
     ler_wav_pcm16,
 )
+from jarvis.config import VOZ_INGLESA_PADRAO, VOZES_INGLESAS  # noqa: E402
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 #: A voz escolhida para o produto. Nao mudar sem voltar a medir.
@@ -376,7 +379,6 @@ FIOS_DA_SINTESE = 4
 PASTA_MODELOS_KOKORO = RAIZ / "models" / "kokoro"
 MODELO_KOKORO = PASTA_MODELOS_KOKORO / "kokoro-v1.0.onnx"
 VOZES_KOKORO = PASTA_MODELOS_KOKORO / "voices-v1.0.bin"
-VOZ_KOKORO = "af_heart"
 COMANDO_KOKORO = '.venv\\Scripts\\python -m pip install "kokoro-onnx==0.6.1"'
 
 #: Linguas que a voz sabe falar: "pt" pelo Piper pt-PT, "en" pelo Kokoro.
@@ -405,6 +407,52 @@ def definir_lingua_da_voz(lingua: str) -> None:
     """Escolhe a lingua da voz; a frase seguinte usa o motor dessa lingua."""
     global _lingua_da_voz
     _lingua_da_voz = _validar_lingua(lingua)
+
+
+#: A voz do Kokoro que fala ingles neste processo (lista fechada em
+#: `jarvis.config.VOZES_INGLESAS`). Quem arranca o jarvis passa a do config.
+_voz_inglesa = VOZ_INGLESA_PADRAO
+
+
+def _validar_voz_inglesa(nome: str) -> str:
+    if nome not in VOZES_INGLESAS:
+        raise ValueError(f"voz inglesa desconhecida: {nome!r} (conhecidas: {', '.join(VOZES_INGLESAS)})")
+    return nome
+
+
+def voz_inglesa() -> str:
+    """O nome da voz do Kokoro que fala as respostas em ingles."""
+    return _voz_inglesa
+
+
+def definir_voz_inglesa(nome: str) -> None:
+    """Escolhe a voz do Kokoro; se mudar, o motor ingles carregado e esquecido."""
+    global _voz_inglesa
+    nome = _validar_voz_inglesa(nome)
+    with _TRANCA_DO_MOTOR:
+        if nome != _voz_inglesa:
+            _motores_residentes.pop("en", None)
+        _voz_inglesa = nome
+
+
+#: Velocidade do Kokoro por voz, para todas falarem ao ritmo da `af_heart`
+#: (cerca de 196 palavras por minuto nas 20 frases fixas de
+#: `scripts/medir_latencia_voz.py`). As britanicas falam mais devagar a 1.0
+#: (145 a 172 palavras por minuto) e o tempo ate ao primeiro audio cresce com
+#: a duracao do audio a sintetizar; ver docs/MODELOS.md.
+VELOCIDADE_DAS_VOZES = {
+    "af_heart": 1.0,
+    "bm_george": 1.3,
+    "bm_lewis": 1.2,
+    "bm_daniel": 1.2,
+    "bm_fable": 1.35,
+}
+
+
+def lingua_do_fonemizador(nome: str) -> str:
+    """"en-gb" para as vozes britanicas do Kokoro (b...), "en-us" para as americanas (a...)."""
+    return "en-gb" if nome.startswith("b") else "en-us"
+
 
 #: Tamanho de cada escrita no dispositivo de som. Entre blocos verifica-se o
 #: pedido de silencio, por isso isto e tambem o atraso maximo da reproducao a
@@ -493,14 +541,21 @@ class MotorKokoro:
     nome = "kokoro"
     lingua = "en"
 
-    def __init__(self, modelo: Path = MODELO_KOKORO, vozes: Path = VOZES_KOKORO) -> None:
+    def __init__(
+        self, modelo: Path | None = None, vozes: Path | None = None, voz: str | None = None
+    ) -> None:
+        modelo = Path(modelo or MODELO_KOKORO)
+        vozes = Path(vozes or VOZES_KOKORO)
+        self.voz = _validar_voz_inglesa(voz or voz_inglesa())
+        self.lingua_do_fonemizador = lingua_do_fonemizador(self.voz)
+        self.velocidade = VELOCIDADE_DAS_VOZES[self.voz]
         try:
             import kokoro_onnx
         except ImportError as erro:
             raise MotorIndisponivel(
                 f"pacote kokoro-onnx em falta; instalar com: {COMANDO_KOKORO}"
             ) from erro
-        if not Path(modelo).is_file() or not Path(vozes).is_file():
+        if not modelo.is_file() or not vozes.is_file():
             raise MotorIndisponivel(
                 f"modelo Kokoro em falta em {caminho_para_mostrar(PASTA_MODELOS_KOKORO)} "
                 "(ver docs/MODELOS.md)"
@@ -511,15 +566,43 @@ class MotorKokoro:
             str(modelo), sess_options=_opcoes_do_onnx(), providers=["CPUExecutionProvider"]
         )
         self._kokoro = kokoro_onnx.Kokoro.from_session(sessao, str(vozes))
+        if self.voz not in self._kokoro.get_voices():
+            raise MotorIndisponivel(f"voz Kokoro '{self.voz}' nao existe em {caminho_para_mostrar(vozes)}")
         self.taxa = 24000
-        self.descricao = f"Kokoro-82M voz {VOZ_KOKORO} (en, residente, CPU)"
+        self._descrever()
+
+    def _descrever(self) -> None:
+        self.descricao = (
+            f"Kokoro-82M voz {self.voz} ({self.lingua_do_fonemizador}, velocidade {self.velocidade:g}, "
+            "residente, CPU)"
+        )
+
+    def com_voz(self, nome: str) -> "MotorKokoro":
+        """Outro motor com a voz `nome` que partilha o modelo ja carregado.
+
+        Para comparar vozes no mesmo processo sem carregar o modelo uma vez
+        por voz; levanta MotorIndisponivel se a voz nao estiver no ficheiro.
+        """
+        import copy
+
+        nome = _validar_voz_inglesa(nome)
+        if nome not in self._kokoro.get_voices():
+            raise MotorIndisponivel(f"voz Kokoro '{nome}' nao existe no ficheiro de vozes")
+        outro = copy.copy(self)
+        outro.voz = nome
+        outro.lingua_do_fonemizador = lingua_do_fonemizador(nome)
+        outro.velocidade = VELOCIDADE_DAS_VOZES[nome]
+        outro._descrever()
+        return outro
 
     def sintetizar(self, texto: str):
         """Gera blocos PCM16 mono a `self.taxa`, pedaco a pedaco."""
         import numpy
 
         for pedaco in dividir_para_sintese(texto):
-            amostras, taxa = self._kokoro.create(pedaco, voice=VOZ_KOKORO, speed=1.0, lang="en-us")
+            amostras, taxa = self._kokoro.create(
+                pedaco, voice=self.voz, speed=self.velocidade, lang=self.lingua_do_fonemizador
+            )
             self.taxa = int(taxa)
             yield (numpy.clip(amostras, -1.0, 1.0) * 32767).astype("<i2").tobytes()
 
@@ -624,6 +707,26 @@ _SAIDA_DE_SOM = _SaidaDeSom()
 
 _FIM_DOS_BLOCOS = object()
 
+#: Recebe cada bloco PCM16 que vai para a saida de som (a bolinha anima com a
+#: voz). Tem de ser rapido; uma falha dele nunca para a fala.
+_ouvinte_da_voz: Callable[[bytes], object] | None = None
+
+
+def definir_ouvinte_da_voz(ouvinte: Callable[[bytes], object] | None) -> None:
+    """Liga (ou desliga, com None) quem recebe os blocos tocados."""
+    global _ouvinte_da_voz
+    _ouvinte_da_voz = ouvinte
+
+
+def _avisar_ouvinte_da_voz(bloco: bytes) -> None:
+    ouvinte = _ouvinte_da_voz
+    if ouvinte is None:
+        return
+    try:
+        ouvinte(bloco)
+    except Exception:  # noqa: BLE001 - o nivel da voz e um extra
+        pass
+
 
 class FalaResidente:
     """Uma frase dita pelo motor residente.
@@ -727,7 +830,9 @@ class FalaResidente:
                     for inicio in range(0, len(bloco), passo):
                         if self._parar.is_set():
                             break
-                        self._saida.escrever(taxa, bloco[inicio : inicio + passo])
+                        pedaco = bloco[inicio : inicio + passo]
+                        _avisar_ouvinte_da_voz(pedaco)
+                        self._saida.escrever(taxa, pedaco)
                         self._marcar_primeiro_audio()
                 else:
                     self._marcar_primeiro_audio()

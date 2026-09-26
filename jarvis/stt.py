@@ -39,7 +39,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from jarvis.audio_util import (
     PASTA_MODELOS_FASTER_WHISPER,
@@ -47,6 +47,9 @@ from jarvis.audio_util import (
     TAXA_AMOSTRAGEM_PADRAO,
     registar_dlls_do_torch,
 )
+
+if TYPE_CHECKING:
+    from jarvis.adaptacao import Adaptacao
 
 #: A unica taxa de amostragem que a interface aceita. Quem tem audio noutra
 #: taxa reamostra antes (`jarvis.audio_util.reamostrar_pcm16`).
@@ -258,14 +261,19 @@ class MotorParakeet(MotorBase):
     """Parakeet TDT 0.6B v3 (25 linguas europeias, sem pedir lingua) via onnx-asr.
 
     O modelo nao aceita nem devolve a lingua: `Transcricao.lingua` e a lingua
-    pedida (ou None) e `lingua_detetada` e sempre False.
+    pedida (ou None) e `lingua_detetada` e sempre False. Com uma `Adaptacao`
+    (`jarvis.adaptacao`), o reforco de frases liga-se ao modelo quando ele
+    carrega e o lexico corrige o texto de cada frase.
     """
 
     nome = "parakeet-tdt-0.6b-v3"
 
-    def __init__(self, device: str = "cuda", pasta: Path | None = None) -> None:
+    def __init__(
+        self, device: str = "cuda", pasta: Path | None = None, adaptacao: "Adaptacao | None" = None
+    ) -> None:
         super().__init__(device)
         self.pasta = PASTA_MODELO_PARAKEET if pasta is None else Path(pasta)
+        self.adaptacao = adaptacao
 
     def _carregar_modelo(self):
         try:
@@ -299,11 +307,17 @@ class MotorParakeet(MotorBase):
             sess_options=opcoes_de_sessao_onnx(onnxruntime),
         )
         self.device_real = self.device
+        if self.adaptacao is not None:
+            self.adaptacao.instalar(modelo)
         return modelo
 
     def _inferir(self, modelo, pcm16: bytes, lingua: str | None):
-        texto = modelo.recognize(pcm16_para_float32(pcm16), sample_rate=TAXA_DO_MOTOR)
-        return texto, lingua, False
+        audio = pcm16_para_float32(pcm16)
+        if self.adaptacao is None:
+            return modelo.recognize(audio, sample_rate=TAXA_DO_MOTOR), lingua, False
+        with self.adaptacao.ao_transcrever(lingua):
+            texto = modelo.recognize(audio, sample_rate=TAXA_DO_MOTOR)
+        return self.adaptacao.corrigir(texto, lingua), lingua, False
 
 
 #: Nomes que os scripts aceitam, pela ordem em que sao medidos.
@@ -315,12 +329,22 @@ FABRICAS: dict[str, Callable[[str], MotorBase]] = {
 MOTORES = tuple(FABRICAS)
 
 
-def criar_motor(nome: str, device: str = "cuda") -> MotorBase:
-    """Um motor por nome da lista fechada `MOTORES`. Nao carrega nada ainda."""
+def criar_motor(nome: str, device: str = "cuda", adaptacao: "Adaptacao | None" = None) -> MotorBase:
+    """Um motor por nome da lista fechada `MOTORES`. Nao carrega nada ainda.
+
+    A `adaptacao` so se aplica ao Parakeet; noutro motor fica uma linha no
+    log a dizer que foi ignorada.
+    """
     fabrica = FABRICAS.get(nome)
     if fabrica is None:
         raise ValueError(f"motor STT '{nome}' desconhecido; escolher de {', '.join(MOTORES)}")
-    return fabrica(device)
+    motor = fabrica(device)
+    if adaptacao is not None:
+        if isinstance(motor, MotorParakeet):
+            motor.adaptacao = adaptacao
+        else:
+            adaptacao.avisar(f"adaptacao: ignorada no motor {nome} (so o Parakeet a suporta)")
+    return motor
 
 
 # --- Autoteste das partes puras (sem GPU, sem modelos, sem som) --------------

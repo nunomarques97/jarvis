@@ -241,14 +241,19 @@ def _projetos_validos(projetos: object) -> dict[str, str]:
     return {str(k): str(v) for k, v in projetos.items() if k in gravar.MARCADORES_DE_PROJETO}
 
 
-def carregar_gravacoes(pasta: Path, lingua: str, guiao: Path | None = None) -> GravacoesDaLingua:
+def carregar_gravacoes(
+    pasta: Path, lingua: str, guiao: Path | None = None, treino: bool = False
+) -> GravacoesDaLingua:
     """As gravacoes de uma lingua que o manifesto conhece, cujo WAV existe e e valido.
 
     As que falham a validacao do gravador ficam em `invalidas`, com o motivo,
-    e nao entram em `gravacoes`.
+    e nao entram em `gravacoes`. Com `treino`, le as gravacoes de treino
+    (`recordings/treino-<lingua>/`, guiao de treino) em vez das de avaliacao.
     """
-    frases = gravar.ler_guiao(gravar.GUIOES[lingua] if guiao is None else guiao, lingua)
-    pasta_lingua = pasta / lingua
+    if guiao is None:
+        guiao = (gravar.GUIOES_DE_TREINO if treino else gravar.GUIOES)[lingua]
+    frases = gravar.ler_guiao(guiao, lingua, treino=treino)
+    pasta_lingua = pasta / gravar.nome_da_subpasta(lingua, treino)
     manifesto = gravar.ler_manifesto(pasta_lingua)
     resultado = GravacoesDaLingua(lingua)
     projetos = manifesto.get("projetos")
@@ -355,6 +360,48 @@ class ResultadoDaAvaliacao:
     por_lingua: list[GravacoesDaLingua] = field(default_factory=list)
 
 
+def nomes_de_projeto(config: Config, gravacoes: Sequence[Gravacao]) -> list[str]:
+    """Os nomes da configuracao e os lidos nas gravacoes (contam mesmo que o config.toml mude)."""
+    return list(dict.fromkeys([p.nome for p in config.projetos] + [n for g in gravacoes for n in g.projetos_lidos]))
+
+
+def linha_avaliada(
+    gravacao: Gravacao,
+    motor: str,
+    texto: str,
+    latencia_ms: float,
+    config: Config,
+    nomes: Sequence[str],
+    intencao_da_referencia: str,
+    interpretar: Interpretador = intencao_pelo_router,
+) -> LinhaAvaliada:
+    """Uma transcricao medida contra a frase lida: WER, intencao, projeto e ativacao."""
+    frase = gravacao.frase
+    wer = medir.calcular_wer(gravacao.referencia, texto)
+    return LinhaAvaliada(
+        id=frase.id,
+        lingua=gravacao.lingua,
+        motor=motor,
+        caso=frase.caso,
+        duracao_s=gravacao.duracao_s,
+        faixa=faixa_de(gravacao.duracao_s),
+        origem=gravacao.origem,
+        referencia=gravacao.referencia,
+        transcricao=texto,
+        latencia_ms=latencia_ms,
+        distancia=wer.distancia_edicao,
+        palavras_referencia=wer.n_palavras_referencia,
+        wer=wer.wer,
+        intencao_esperada=frase.intencao,
+        intencao_obtida=interpretar(texto, config),
+        intencao_da_referencia=intencao_da_referencia,
+        projeto_esperado=gravacao.projeto_esperado,
+        projeto_obtido=projeto_mencionado(texto, nomes, gravacao.lingua),
+        ativacao_esperada=frase.ativacao,
+        ativacao_detetada=gravar.comeca_pela_ativacao(texto, gravacao.lingua),
+    )
+
+
 def avaliar(
     motores: Sequence[MotorBase],
     gravacoes: Sequence[Gravacao],
@@ -368,8 +415,7 @@ def avaliar(
     resultado parcial com os dos outros motores.
     """
     resultado = ResultadoDaAvaliacao()
-    # Os nomes lidos contam mesmo que o config.toml tenha mudado depois.
-    nomes = list(dict.fromkeys([p.nome for p in config.projetos] + [n for g in gravacoes for n in g.projetos_lidos]))
+    nomes = nomes_de_projeto(config, gravacoes)
     referencias: dict[tuple[str, str], str] = {}
     for gravacao in gravacoes:
         chave = (gravacao.lingua, gravacao.frase.id)
@@ -390,31 +436,17 @@ def avaliar(
                 aquecimento = motor.transcrever(gravacoes[0].pcm, lingua=gravacoes[0].lingua)
                 resultado.aquecimento_ms[motor.nome] = aquecimento.latencia_ms
             for gravacao in gravacoes:
-                frase = gravacao.frase
                 transcricao = motor.transcrever(gravacao.pcm, lingua=gravacao.lingua)
-                wer = medir.calcular_wer(gravacao.referencia, transcricao.texto)
                 linhas.append(
-                    LinhaAvaliada(
-                        id=frase.id,
-                        lingua=gravacao.lingua,
-                        motor=motor.nome,
-                        caso=frase.caso,
-                        duracao_s=gravacao.duracao_s,
-                        faixa=faixa_de(gravacao.duracao_s),
-                        origem=gravacao.origem,
-                        referencia=gravacao.referencia,
-                        transcricao=transcricao.texto,
-                        latencia_ms=transcricao.latencia_ms,
-                        distancia=wer.distancia_edicao,
-                        palavras_referencia=wer.n_palavras_referencia,
-                        wer=wer.wer,
-                        intencao_esperada=frase.intencao,
-                        intencao_obtida=interpretar(transcricao.texto, config),
-                        intencao_da_referencia=referencias[(gravacao.lingua, frase.id)],
-                        projeto_esperado=gravacao.projeto_esperado,
-                        projeto_obtido=projeto_mencionado(transcricao.texto, nomes, gravacao.lingua),
-                        ativacao_esperada=frase.ativacao,
-                        ativacao_detetada=gravar.comeca_pela_ativacao(transcricao.texto, gravacao.lingua),
+                    linha_avaliada(
+                        gravacao,
+                        motor.nome,
+                        transcricao.texto,
+                        transcricao.latencia_ms,
+                        config,
+                        nomes,
+                        referencias[(gravacao.lingua, gravacao.frase.id)],
+                        interpretar,
                     )
                 )
         except Exception as erro:  # GPU sem memoria, DLL, erro do modelo

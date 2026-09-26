@@ -32,6 +32,17 @@ erro se o "horas" passar de 1,2 s p50.
 
 `--evidencia` escreve um resumo em docs/forja/evidence/ (so numeros e as
 frases fixas desta lista, nada da voz do utilizador).
+
+COMPARAR VOZES INGLESAS (`--vozes`): um so modelo Kokoro carregado, cada voz
+aquecida, e as 20 frases inglesas medidas em `--rodadas` voltas. Em cada
+frase as vozes sao todas medidas, numa ordem que roda de frase para frase,
+para a deriva do processador (temperatura, outros programas) cair igual em
+todas. Compara o p50 e o p95 de cada voz com os da `af_heart` na mesma
+corrida; com `--verificar` sai com erro se a voz por omissao do jarvis for
+mais lenta do que a `af_heart` num dos dois. `--evidencia` escreve a tabela.
+
+    .venv\Scripts\python scripts/medir_latencia_voz.py --vozes --verificar --evidencia
+    .venv\Scripts\python scripts/medir_latencia_voz.py --vozes af_heart bm_george --rodadas 5
 """
 
 from __future__ import annotations
@@ -50,6 +61,7 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from jarvis import voz  # noqa: E402
+from jarvis.config import VOZ_INGLESA_PADRAO, VOZES_INGLESAS  # noqa: E402
 from jarvis.audio_util import (  # noqa: E402
     PASTA_AUDIO,
     PASTA_EVIDENCIA,
@@ -136,9 +148,30 @@ def _wav_temporario(nome: str) -> Path:
     return PASTA_AUDIO / "_latencia_voz" / nome
 
 
-def medir_uma(texto: str, *, nulo: bool, nome: str) -> float:
-    """ms do pedido ao primeiro bloco de audio; levanta se nada saiu."""
-    if nulo:
+#: A voz de referencia das comparacoes: a que o jarvis usava antes.
+VOZ_DE_REFERENCIA = "af_heart"
+
+
+def medir_uma(texto: str, *, nulo: bool, nome: str, motor=None) -> float:
+    """ms do pedido ao primeiro bloco de audio; levanta se nada saiu.
+
+    Com `motor`, a frase e dita por esse motor (comparacao de vozes) pelo
+    mesmo `FalaResidente` que `falar()` usa, para WAV ou para lado nenhum.
+    """
+    if motor is not None:
+        fala = voz.FalaResidente(motor)
+        fala.feed(texto)
+        caminho = None if nulo else _wav_temporario(nome)
+        if caminho is not None:
+            caminho.parent.mkdir(parents=True, exist_ok=True)
+        inicio = time.perf_counter()
+        try:
+            fala.play(muted=True, output_wavfile=None if caminho is None else str(caminho))
+        finally:
+            if caminho is not None:
+                caminho.unlink(missing_ok=True)
+        primeiro = fala.instante_do_primeiro_audio
+    elif nulo:
         fala = voz.FalaResidente(voz.motor_residente())
         fala.feed(texto)
         inicio = time.perf_counter()
@@ -236,6 +269,132 @@ def medir_horas(wav: Path, repeticoes: int, device: str | None) -> list[float]:
     return valores
 
 
+def ordem_da_frase(vozes: list[str], rodada: int, numero: int, total: int) -> list[str]:
+    """As vozes pela ordem desta frase: roda uma posicao a cada frase medida.
+
+    Ao fim de `len(vozes)` frases cada voz passou por todas as posicoes, e a
+    deriva da maquina cai por igual em todas.
+    """
+    if not vozes:
+        return []
+    passo = (rodada * total + numero) % len(vozes)
+    return vozes[passo:] + vozes[:passo]
+
+
+def resumo_da_voz(latencias: list[float]) -> dict:
+    return {
+        "p50": statistics.median(latencias),
+        "p95": percentil(latencias, 95),
+        "maximo": max(latencias),
+        "n": len(latencias),
+    }
+
+
+def veredito_da_comparacao(resumos: dict[str, dict], voz_padrao: str) -> list[str]:
+    """Falhas da voz por omissao face a referencia, na mesma corrida (lista vazia = OK)."""
+    if voz_padrao not in resumos or VOZ_DE_REFERENCIA not in resumos:
+        return [f"a comparacao tem de medir {VOZ_DE_REFERENCIA} e a voz por omissao ({voz_padrao})"]
+    falhas = []
+    padrao, referencia = resumos[voz_padrao], resumos[VOZ_DE_REFERENCIA]
+    for chave in ("p50", "p95"):
+        if padrao[chave] > referencia[chave]:
+            falhas.append(
+                f"{voz_padrao} {chave} {padrao[chave]:.0f} ms pior do que {VOZ_DE_REFERENCIA} "
+                f"{referencia[chave]:.0f} ms"
+            )
+    return falhas
+
+
+def comparar_vozes(args, destino: Path | None) -> int:
+    """Mede as vozes inglesas pedidas, intercaladas, com um so modelo carregado."""
+    vozes = list(dict.fromkeys(args.vozes or VOZES_INGLESAS))
+    for obrigatoria in (VOZ_INGLESA_PADRAO, VOZ_DE_REFERENCIA):
+        if obrigatoria not in vozes:
+            vozes.insert(0, obrigatoria)
+    if args.rodadas < 1:
+        print("FALHOU: --rodadas tem de ser pelo menos 1", file=sys.stderr)
+        return 1
+    voz.definir_lingua_da_voz("en")
+    voz.definir_voz_inglesa(VOZ_DE_REFERENCIA)
+    print("=== jarvis - comparacao das vozes inglesas (sem som) ===")
+    inicio = time.perf_counter()
+    try:
+        base = voz.motor_residente("en")
+    except Exception as erro:  # noqa: BLE001 - sem motor nao ha nada para medir
+        print(f"FALHOU: motor de voz por carregar: {erro}")
+        return 1
+    carregamento_ms = (time.perf_counter() - inicio) * 1000.0
+    if not hasattr(base, "com_voz"):
+        print(f"FALHOU: o Kokoro nao carregou, nao ha vozes para comparar ({base.descricao})")
+        return 1
+    try:
+        motores = {nome: base.com_voz(nome) for nome in vozes}
+    except voz.MotorIndisponivel as erro:
+        print(f"FALHOU: {erro}")
+        return 1
+    for motor in motores.values():
+        # Aquecer cada voz: a primeira frase de cada uma paga o estilo e o fonemizador.
+        for frase in FRASES_EN[:3]:
+            medir_uma(frase, nulo=True, nome="aquecer.wav", motor=motor)
+    print(f"modelo carregado uma vez: {carregamento_ms:.0f} ms; vozes: {', '.join(vozes)}")
+
+    latencias: dict[str, list[float]] = {nome: [] for nome in vozes}
+    total = len(FRASES_EN)
+    for rodada in range(args.rodadas):
+        for numero, frase in enumerate(FRASES_EN):
+            for nome in ordem_da_frase(vozes, rodada, numero, total):
+                ms = medir_uma(frase, nulo=args.nulo, nome=f"{nome}-{numero:02d}.wav", motor=motores[nome])
+                latencias[nome].append(ms)
+        print(f"rodada {rodada + 1} de {args.rodadas} medida")
+
+    resumos = {nome: resumo_da_voz(valores) for nome, valores in latencias.items()}
+    for nome in vozes:
+        r = resumos[nome]
+        print(
+            f"{nome:10s} ({voz.lingua_do_fonemizador(nome)}, x{motores[nome].velocidade:g}): p50 {r['p50']:.0f} ms, "
+            f"p95 {r['p95']:.0f} ms, maximo {r['maximo']:.0f} ms ({r['n']} frases)"
+        )
+    falhas = veredito_da_comparacao(resumos, VOZ_INGLESA_PADRAO)
+
+    if destino is not None:
+        linhas = [
+            "# English voices: text to first audio, interleaved comparison\n\n",
+            f"Generated by `scripts/medir_latencia_voz.py --vozes` on {datetime.datetime.now():%Y-%m-%d %H:%M:%S}. "
+            "No sound: synthesis to "
+            + ("a null device" if args.nulo else "a temporary WAV under `audio/` (deleted)")
+            + ".\n\n",
+            f"- one Kokoro-82M model loaded once ({carregamento_ms:.0f} ms), every voice warmed up first\n",
+            f"- {total} fixed English sentences x {args.rodadas} rounds per voice; the voice order rotates "
+            "every sentence to cancel drift\n",
+            f"- reference: `{VOZ_DE_REFERENCIA}`; jarvis default: `{VOZ_INGLESA_PADRAO}`\n\n",
+            "| voice | phonemizer | speed | p50 ms | p95 ms | max ms | sentences |\n|---|---|---|---|---|---|---|\n",
+        ]
+        linhas.extend(
+            f"| {nome} | {voz.lingua_do_fonemizador(nome)} | {motores[nome].velocidade:g} | "
+            f"{resumos[nome]['p50']:.0f} | "
+            f"{resumos[nome]['p95']:.0f} | {resumos[nome]['maximo']:.0f} | {resumos[nome]['n']} |\n"
+            for nome in vozes
+        )
+        linhas.append(
+            "\n"
+            + (
+                "FAILED: " + "; ".join(falhas)
+                if falhas
+                else f"OK: the default `{VOZ_INGLESA_PADRAO}` is not slower than `{VOZ_DE_REFERENCIA}` at p50 and p95."
+            )
+            + "\n"
+        )
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_text("".join(linhas), encoding="utf-8")
+        print(f"evidencia escrita em {caminho_para_mostrar(destino)}")
+
+    if falhas:
+        print("FORA DA META: " + "; ".join(falhas))
+        return 1 if args.verificar else 0
+    print(f"OK: {VOZ_INGLESA_PADRAO} nao e mais lenta do que {VOZ_DE_REFERENCIA} no p50 nem no p95.")
+    return 0
+
+
 def construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/medir_latencia_voz.py",
@@ -255,6 +414,18 @@ def construir_parser() -> argparse.ArgumentParser:
         "--device", default=None, choices=["cuda", "cpu"], help="device do STT no 'horas' (por omissao o do config)"
     )
     parser.add_argument(
+        "--vozes",
+        nargs="*",
+        choices=VOZES_INGLESAS,
+        default=None,
+        metavar="VOZ",
+        help=(
+            "compara vozes inglesas do Kokoro, intercaladas (sem nomes: todas, "
+            f"{', '.join(VOZES_INGLESAS)}); {VOZ_DE_REFERENCIA} e a voz por omissao entram sempre"
+        ),
+    )
+    parser.add_argument("--rodadas", type=int, default=3, help="voltas as 20 frases em --vozes (por omissao 3)")
+    parser.add_argument(
         "--evidencia",
         nargs="?",
         const="",
@@ -268,17 +439,20 @@ def main(argv: list[str] | None = None) -> int:
     forcar_consola_utf8()
     args = construir_parser().parse_args(argv)
     destino = None
+    prefixo = "latencia-vozes" if args.vozes is not None else "latencia-voz"
     if args.evidencia is not None:
         try:
             destino = (
                 caminho_evidencia_de_saida(args.evidencia)
                 if args.evidencia
-                else PASTA_EVIDENCIA / f"latencia-voz-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
+                else PASTA_EVIDENCIA / f"{prefixo}-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
             )
         except ValueError as erro:
             print(f"FALHOU (--evidencia fora de docs/forja/evidence/): {erro}", file=sys.stderr)
             return 1
 
+    if args.vozes is not None:
+        return comparar_vozes(args, destino)
     if args.lingua:
         voz.definir_lingua_da_voz(args.lingua)
     lingua = voz.lingua_da_voz()

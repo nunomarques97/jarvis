@@ -672,6 +672,9 @@ class Confirmacao:
         self._ocupado = False
         self._falhas = 0
         self._numero = 0
+        #: Chamado com cada recap apresentado, antes de ser dito (a bolinha
+        #: mostra o texto a enviar). Uma falha aqui nunca para o recap.
+        self.ao_propor: Callable[[Recap], object] | None = None
 
     # -- estado
 
@@ -767,6 +770,11 @@ class Confirmacao:
             self._recap = None
             self._ocupado = True
         self._mostrar(recap.ecra)
+        if self.ao_propor is not None:
+            try:
+                self.ao_propor(recap)
+            except Exception:  # noqa: BLE001 - um extra de ecra nunca para o recap
+                pass
         self._falar(fala or recap.fala)
         with self._trinco:
             if self._pendente is not interpretacao:

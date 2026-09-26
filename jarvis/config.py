@@ -41,6 +41,14 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     limite_s = 60                 # espera maxima pela resposta (10 a 300)
     localizacao = "Portugal"      # onde o utilizador esta, para o tempo e as noticias
 
+    [voz]                         # opcional; sem ela vale a voz por omissao
+    nome = "bm_fable"             # voz inglesa do Kokoro (lista fechada VOZES_INGLESAS)
+
+    [adaptacao]                   # opcional; sem ela a transcricao nao e adaptada
+    reforco = false               # reforco das frases de comando e nomes de projeto
+    bonus = 1.5                   # forca do reforco, no logit de cada token
+    lexico = false                # correcoes aprendidas (models/adaptacao/lexico-en.json)
+
 `carregar_config()` le com `tomllib` (biblioteca padrao do Python 3.11+, sem
 dependencia nova), valida a estrutura E os caminhos no disco (um caminho
 de configuracao e entrada externa e verifica-se na leitura, nao se aceita em
@@ -153,6 +161,23 @@ LOCALIZACAO_MAXIMA = 80
 #: digitos, espacos e pontuacao simples. Vai no pedido ao modelo.
 _PADRAO_LOCALIZACAO = re.compile(r"[^\W_](?:[\w .,'()-]*[^\W_])?")
 
+#: Vozes inglesas do Kokoro-82M que o jarvis aceita (lista fechada, todas no
+#: `voices-v1.0.bin`): a americana de antes e as quatro masculinas britanicas
+#: comparadas por `scripts/medir_latencia_voz.py --vozes`. A primeira letra do
+#: nome diz o sotaque ("a" americano, "b" britanico) e escolhe a lingua do
+#: fonemizador em `jarvis.voz`.
+VOZES_INGLESAS = ("af_heart", "bm_george", "bm_lewis", "bm_daniel", "bm_fable")
+
+#: Voz inglesa por omissao: masculina britanica, escolhida pelos numeros em
+#: docs/MODELOS.md (latencia ate ao primeiro audio nao pior do que af_heart).
+VOZ_INGLESA_PADRAO = "bm_fable"
+
+
+#: Forca do reforco de frases na transcricao (bonus somado ao logit de cada
+#: token que continua uma frase reforcada) e o intervalo aceite.
+BONUS_DE_REFORCO_PADRAO = 1.5
+BONUS_DE_REFORCO_MAXIMO = 10.0
+
 
 class ConfigError(Exception):
     """Configuracao em falta, mal formada, ou com um caminho que nao existe."""
@@ -228,6 +253,25 @@ class ConfigPerguntas:
 
 
 @dataclass(frozen=True)
+class ConfigVoz:
+    """Que voz fala as respostas em ingles (nome de uma voz do Kokoro)."""
+
+    nome: str = VOZ_INGLESA_PADRAO
+
+
+@dataclass(frozen=True)
+class ConfigAdaptacao:
+    """Adaptacao da transcricao ao sotaque (ver `jarvis.adaptacao`).
+
+    Desligada por omissao: sem [adaptacao] a transcricao fica como estava.
+    """
+
+    reforco: bool = False
+    bonus: float = BONUS_DE_REFORCO_PADRAO
+    lexico: bool = False
+
+
+@dataclass(frozen=True)
 class Projeto:
     """Um projeto conhecido: o nome que o utilizador diz e o caminho no disco."""
 
@@ -246,6 +290,8 @@ class Config:
     #: None quando o config.toml nao tem a tabela [forja].
     forja: ConfigForja | None = None
     perguntas: ConfigPerguntas = ConfigPerguntas()
+    voz: ConfigVoz = ConfigVoz()
+    adaptacao: ConfigAdaptacao = ConfigAdaptacao()
 
     def encontrar_projeto(self, nome: str) -> Projeto | None:
         """Devolve o Projeto com este nome exato (case-insensitive), ou None."""
@@ -537,6 +583,68 @@ def _validar_perguntas(bruto: dict, caminho: Path) -> ConfigPerguntas:
     return ConfigPerguntas(**valores)
 
 
+def _validar_voz(bruto: dict, caminho: Path) -> ConfigVoz:
+    """A tabela [voz], opcional: o nome da voz inglesa, so da lista fechada."""
+    if "voz" not in bruto:
+        return ConfigVoz()
+    tabela = bruto["voz"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [voz] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    permitidas = ("nome",)
+    desconhecidas = sorted(set(tabela) - set(permitidas))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [voz] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(permitidas)})."
+        )
+    if "nome" not in tabela:
+        return ConfigVoz()
+    nome = tabela["nome"]
+    if not isinstance(nome, str) or nome.strip() not in VOZES_INGLESAS:
+        raise ConfigError(
+            f"'{caminho}': [voz].nome = {nome!r} nao e uma voz conhecida; tem de ser uma de "
+            f"{', '.join(VOZES_INGLESAS)} (por omissao \"{VOZ_INGLESA_PADRAO}\")."
+        )
+    return ConfigVoz(nome=nome.strip())
+
+
+def _validar_adaptacao(bruto: dict, caminho: Path) -> ConfigAdaptacao:
+    """A tabela [adaptacao], opcional: dois interruptores e a forca do reforco."""
+    if "adaptacao" not in bruto:
+        return ConfigAdaptacao()
+    tabela = bruto["adaptacao"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [adaptacao] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    permitidas = ("reforco", "bonus", "lexico")
+    desconhecidas = sorted(set(tabela) - set(permitidas))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [adaptacao] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(permitidas)})."
+        )
+    valores: dict[str, object] = {}
+    for chave in ("reforco", "lexico"):
+        if chave in tabela:
+            if not isinstance(tabela[chave], bool):
+                raise ConfigError(
+                    f"'{caminho}': [adaptacao].{chave} = {tabela[chave]!r} nao e valido; tem de ser true ou false."
+                )
+            valores[chave] = tabela[chave]
+    if "bonus" in tabela:
+        bonus = tabela["bonus"]
+        if (
+            isinstance(bonus, bool)
+            or not isinstance(bonus, (int, float))
+            or not 0 < bonus <= BONUS_DE_REFORCO_MAXIMO
+        ):
+            raise ConfigError(
+                f"'{caminho}': [adaptacao].bonus = {bonus!r} nao e valido; tem de ser um numero maior "
+                f"do que 0 e no maximo {BONUS_DE_REFORCO_MAXIMO:g} (por omissao {BONUS_DE_REFORCO_PADRAO:g})."
+            )
+        valores["bonus"] = float(bonus)
+    return ConfigAdaptacao(**valores)
+
+
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
     """Resolve e valida o caminho de um projeto no disco.
 
@@ -619,6 +727,8 @@ def carregar_config(
         interprete=_validar_interprete(bruto, caminho),
         forja=_validar_forja(bruto, caminho, validar_caminhos),
         perguntas=_validar_perguntas(bruto, caminho),
+        voz=_validar_voz(bruto, caminho),
+        adaptacao=_validar_adaptacao(bruto, caminho),
     )
 
 
