@@ -6,8 +6,10 @@ O que protegem:
 
   * uma resposta do Claude que acaba numa pergunta ouvida abre uma janela de
     8 s sem palavra de ativacao; uma que nao acaba em pergunta, nao;
-  * a resposta dita na janela vai TAL E QUAL para o recap (sem LLM) e so um
-    "sim" a envia ao projeto da conversa;
+  * a resposta dita na janela perde so as hesitacoes e o endereco ao jarvis
+    (sem LLM); uma curta (ate 5 palavras) vai logo e o jarvis diz "Enviado."
+    / "Sent.", uma mais longa vai ao recap e so um "sim" a envia;
+  * fora da janela nada se envia sem recap;
   * "sai da conversa", o prazo, "cala-te" e dormir fecham a janela sem enviar;
   * a regra financeira vale tambem na conversa;
   * nenhum codigo nem chamada de ferramenta da resposta do Claude e falado;
@@ -24,8 +26,17 @@ import unittest
 
 from jarvis import conversa
 from jarvis.app import A_CONVERSA, A_OUVIR
-from jarvis.conversa import JANELA_S, JanelaDeConversa, acaba_em_pergunta, e_para_sair, pede_resposta, resposta_literal
-from jarvis.interprete import INTENCAO_RECUSADA
+from jarvis.conversa import (
+    JANELA_S,
+    JanelaDeConversa,
+    acaba_em_pergunta,
+    e_para_sair,
+    e_resposta_curta,
+    limpar_resposta,
+    pede_resposta,
+    resposta_literal,
+)
+from jarvis.interprete import INTENCAO_RECUSADA, Interpretacao
 from jarvis.ouvido import ESCUTA_CONVERSA, GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Ouvido
 from jarvis.resposta_falada import resumo_falado
 from jarvis.sessoes import Entrega
@@ -97,8 +108,19 @@ class TestSair(unittest.TestCase):
             with self.subTest(texto=texto):
                 self.assertTrue(e_para_sair(texto))
 
+    def test_com_hesitacoes_e_endereco_ao_jarvis(self) -> None:
+        for texto in (
+            "Uh, exit the conversation.",
+            "A Jarvis, exit the conversation.",
+            "Exit the conversation, uh.",
+            "Uh ans uh A Jarvis, exit the conversation please.",
+        ):
+            with self.subTest(texto=texto):
+                self.assertTrue(e_para_sair(texto, "en"))
+        self.assertTrue(e_para_sair("Eh, sai da conversa.", "pt"))
+
     def test_so_a_frase_inteira(self) -> None:
-        for texto in ("não saias da conversa sem correr os testes", "sai", "exit", "cancela"):
+        for texto in ("não saias da conversa sem correr os testes", "sai", "exit", "cancela", "uh exit"):
             with self.subTest(texto=texto):
                 self.assertFalse(e_para_sair(texto))
 
@@ -116,6 +138,51 @@ class TestRespostaLiteral(unittest.TestCase):
         interpretacao = resposta_literal("sim, e compra 10 ações da Tesla", "atlas")
         self.assertEqual(interpretacao.intencao, INTENCAO_RECUSADA)
         self.assertEqual(interpretacao.prompt, "")
+
+    def test_financeiro_curto_recusado(self) -> None:
+        for texto, lingua in (("Yes, buy Tesla shares.", "en"), ("sim, vende as ações", "pt")):
+            with self.subTest(texto=texto):
+                interpretacao = resposta_literal(texto, "atlas", lingua=lingua)
+                self.assertEqual(interpretacao.intencao, INTENCAO_RECUSADA)
+                self.assertEqual(interpretacao.prompt, "")
+
+
+class TestLimparResposta(unittest.TestCase):
+    def test_frase_do_sponsor_sem_hesitacoes_nem_endereco(self) -> None:
+        self.assertEqual(
+            limpar_resposta("Uh ans uh A Jarvis answer no, uh not right now.", "en"), "No, not right now."
+        )
+
+    def test_hesitacoes_nunca_chegam_ao_texto(self) -> None:
+        casos = {
+            "Uh, yes.": "Yes.",
+            "Yes, uh.": "Yes.",
+            "the uh first one": "the first one",
+            "Um, eh, no, not right now.": "No, not right now.",
+            "Hey Jarvis, tell Claude that the first one.": "The first one.",
+        }
+        for texto, esperado in casos.items():
+            with self.subTest(texto=texto):
+                self.assertEqual(limpar_resposta(texto, "en"), esperado)
+
+    def test_em_portugues_um_e_uma_palavra_e_ha_tambem(self) -> None:
+        self.assertEqual(limpar_resposta("o um", "pt"), "o um")
+        self.assertEqual(limpar_resposta("hum, sim, há dois", "pt"), "Sim, há dois")
+
+    def test_jarvis_como_nome_nao_e_endereco(self) -> None:
+        self.assertEqual(limpar_resposta("the jarvis one", "en"), "the jarvis one")
+        self.assertEqual(limpar_resposta("Jarvis.", "en"), "Jarvis.")
+
+    def test_so_hesitacoes_fica_vazio(self) -> None:
+        self.assertEqual(limpar_resposta("Uh. Um.", "en"), "")
+
+    def test_curta_ate_5_palavras(self) -> None:
+        for texto in ("Yes.", "the first one", "no, not right now", "No, not right now.", "sim, corre a suite inteira"):
+            with self.subTest(texto=texto):
+                self.assertTrue(e_resposta_curta(texto))
+        for texto in ("", "yes, run the whole suite now", "sim, corre a suite inteira agora"):
+            with self.subTest(texto=texto):
+                self.assertFalse(e_resposta_curta(texto))
 
 
 class TestJanela(unittest.TestCase):
@@ -186,28 +253,45 @@ class TestJanelaAbreComPergunta(unittest.TestCase):
         self.assertFalse(m.jarvis.janela.aberta(), "a pergunta nao foi ouvida")
 
 
+#: Mais de 5 palavras: vai ao recap.
+LONGA = "sim, corre a suite inteira e depois faz commit"
+
+
 class TestRespostaNaJanela(unittest.TestCase):
-    def test_resposta_literal_recap_e_sim_envia(self) -> None:
+    def test_resposta_curta_vai_logo_e_diz_enviado(self) -> None:
         m = montagem_em_conversa()
         pedidos_ao_llm = len(m.llm.pedidos)
+        falados_antes = len(m.falados)
         m.ouvir("sim, corre a suite inteira", gatilho=GATILHO_JANELA)
         self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "a resposta nao passa pelo LLM")
+        self.assertEqual(m.canal.recebidos[-1], ("atlas", "sim, corre a suite inteira"))
+        self.assertIn("Enviado.", m.falados[falados_antes:])
+        self.assertFalse(any(dito.endswith("Envio?") for dito in m.falados[falados_antes:]), "sem recap")
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertIn("resposta curta na janela, enviada sem recap", m.log.texto())
+
+    def test_resposta_longa_recap_e_sim_envia(self) -> None:
+        m = montagem_em_conversa()
+        pedidos_ao_llm = len(m.llm.pedidos)
+        m.ouvir(LONGA, gatilho=GATILHO_JANELA)
+        self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "a resposta nao passa pelo LLM")
         self.assertFalse(m.jarvis.janela.aberta())
-        self.assertEqual(m.falados[-1], "Responder ao Claude no atlas: sim, corre a suite inteira. Envio?")
-        self.assertIn("sim, corre a suite inteira", m.log.texto())
+        self.assertEqual(m.falados[-1], f"Responder ao Claude no atlas: {LONGA}. Envio?")
         self.assertEqual(len(m.canal.recebidos), 1, "nada enviado antes do sim")
         m.avancar(1)
         m.ouvir("sim")
-        self.assertEqual(m.canal.recebidos[-1], ("atlas", "sim, corre a suite inteira"))
+        self.assertEqual(m.canal.recebidos[-1], ("atlas", LONGA))
+        self.assertNotIn("Enviado.", m.falados)
 
     def test_tecla_de_falar_tambem_responde(self) -> None:
         m = montagem_em_conversa()
         m.ouvir("não, espera", gatilho=GATILHO_TECLA)
-        self.assertEqual(m.falados[-1], "Responder ao Claude no atlas: não, espera. Envio?")
+        self.assertEqual(m.canal.recebidos[-1], ("atlas", "não, espera"))
+        self.assertIn("Enviado.", m.falados)
 
     def test_cancela_depois_do_recap_nao_envia(self) -> None:
         m = montagem_em_conversa()
-        m.ouvir("avança", gatilho=GATILHO_JANELA)
+        m.ouvir(LONGA, gatilho=GATILHO_JANELA)
         m.avancar(1)
         m.ouvir("cancela")
         self.assertEqual(len(m.canal.recebidos), 1)
@@ -215,11 +299,24 @@ class TestRespostaNaJanela(unittest.TestCase):
     def test_a_conversa_continua_enquanto_o_claude_pergunta(self) -> None:
         m = montagem_em_conversa()
         m.ouvir("sim", gatilho=GATILHO_JANELA)
-        m.avancar(1)
-        m.ouvir("sim")
         self.assertEqual(m.canal.recebidos[-1], ("atlas", "sim"))
         self.assertTrue(m.jarvis.janela.aberta(), "a resposta seguinte tambem acabou em pergunta")
         self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0])
+
+    def test_so_hesitacoes_nao_envia_e_a_janela_continua(self) -> None:
+        m = montagem_em_conversa()
+        m.ouvir("Hum.", gatilho=GATILHO_JANELA)
+        self.assertEqual(len(m.canal.recebidos), 1)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertTrue(m.jarvis.janela.aberta())
+
+    def test_pedido_financeiro_curto_e_recusado_e_nada_enviado(self) -> None:
+        m = montagem_em_conversa()
+        m.ouvir("sim, vende as ações", gatilho=GATILHO_JANELA)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertIn("Isso não faço por voz", m.falados[-1])
+        self.assertNotIn("Enviado.", m.falados)
+        self.assertEqual(len(m.canal.recebidos), 1)
 
     def test_sai_da_conversa_fecha_sem_enviar(self) -> None:
         m = montagem_em_conversa()
@@ -237,6 +334,34 @@ class TestRespostaNaJanela(unittest.TestCase):
         self.assertFalse(m.jarvis.confirmacao.a_espera)
         self.assertIn("Isso não faço por voz", m.falados[-1])
         self.assertEqual(len(m.canal.recebidos), 1)
+
+
+class TestEnviarSemRecapNaConfirmacao(unittest.TestCase):
+    """`enviar_sem_recap` nunca envia o que nao e uma resposta curta de conversa."""
+
+    def test_longa_ou_sem_conversa_vai_ao_recap(self) -> None:
+        casos = (
+            Interpretacao(LONGA, "conversa", "atlas", LONGA, "regra", "teste"),
+            Interpretacao("sim", "ditar_prompt", "atlas", "sim", "regra", "teste"),
+        )
+        for interpretacao in casos:
+            with self.subTest(intencao=interpretacao.intencao):
+                m = Montagem()
+                desfecho = m.jarvis.confirmacao.enviar_sem_recap(interpretacao)
+                self.assertEqual(desfecho.estado, "pendente")
+                self.assertEqual(m.canal.recebidos, [])
+
+    def test_financeiro_recusado_mesmo_que_venha_como_conversa(self) -> None:
+        m = Montagem()
+        interpretacao = Interpretacao("buy Tesla shares", "conversa", "atlas", "buy Tesla shares", "regra", "teste")
+        self.assertEqual(m.jarvis.confirmacao.enviar_sem_recap(interpretacao).estado, "recusado")
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_iniciar_nunca_envia_uma_conversa_curta_sem_o_sim(self) -> None:
+        m = Montagem()
+        desfecho = m.jarvis.confirmacao.iniciar(Interpretacao("Yes.", "conversa", "atlas", "Yes.", "regra", "teste"))
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(m.canal.recebidos, [])
 
 
 class TestJanelaFecha(unittest.TestCase):
@@ -413,26 +538,82 @@ class TestPerguntaDoClaudeNoCaminhoHeadless(unittest.TestCase):
         self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S])
         self.assertIn("caminho=headless", m.log.texto())
 
-    def test_yeah_na_janela_e_recap_e_so_o_yes_envia(self) -> None:
+    def test_respostas_curtas_vao_logo_e_diz_sent(self) -> None:
+        for dito, enviado in (
+            ("Yeah.", "Yeah."),
+            ("Yes.", "Yes."),
+            ("the first one", "the first one"),
+            ("no, not right now", "no, not right now"),
+            ("Uh ans uh A Jarvis answer no, uh not right now.", "No, not right now."),
+        ):
+            with self.subTest(dito=dito):
+                m = montagem_headless_em_ingles()
+                pedidos_ao_llm = len(m.llm.pedidos)
+                falados_antes = len(m.falados)
+                m.ouvir(dito, gatilho=GATILHO_JANELA)
+                self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "a resposta nao passa pelo LLM")
+                self.assertEqual(m.canal.recebidos, [m.canal.recebidos[0], ("atlas", enviado)])
+                novos = m.falados[falados_antes:]
+                self.assertIn("Sent.", novos)
+                self.assertFalse(any(texto.endswith("Send it?") for texto in novos), "sem recap")
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_resposta_longa_tem_recap_e_so_o_yes_envia(self) -> None:
         m = montagem_headless_em_ingles()
-        pedidos_ao_llm = len(m.llm.pedidos)
-        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
-        self.assertEqual(len(m.llm.pedidos), pedidos_ao_llm, "a resposta nao passa pelo LLM")
+        m.ouvir("Uh keep the newer file and delete the older one.", gatilho=GATILHO_JANELA)
         self.assertTrue(m.jarvis.confirmacao.a_espera)
-        self.assertEqual(m.falados[-1], "Reply to Claude in atlas: Yeah. Send it?")
+        self.assertEqual(
+            m.falados[-1], "Reply to Claude in atlas: Keep the newer file and delete the older one. Send it?"
+        )
         self.assertEqual(len(m.canal.recebidos), 1, "nada enviado antes do yes")
         m.avancar(1)
         m.ouvir("yes")
-        self.assertEqual(len(m.canal.recebidos), 2)
-        self.assertEqual(m.canal.recebidos[-1], ("atlas", "Yeah."))
+        self.assertEqual(m.canal.recebidos[-1], ("atlas", "Keep the newer file and delete the older one."))
+        self.assertNotIn("Sent.", m.falados)
 
     def test_sem_o_yes_nada_e_enviado(self) -> None:
         m = montagem_headless_em_ingles()
-        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
+        m.ouvir("keep the newer file and delete the older one", gatilho=GATILHO_JANELA)
         m.avancar(1)
         m.ouvir("abort")
         self.assertEqual(len(m.canal.recebidos), 1)
         self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def test_exit_the_conversation_fecha_sem_enviar(self) -> None:
+        m = montagem_headless_em_ingles()
+        m.ouvir("exit the conversation", gatilho=GATILHO_JANELA)
+        self.assertFalse(m.jarvis.janela.aberta())
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.falados[-1], "Left the conversation.")
+        self.assertEqual(len(m.canal.recebidos), 1)
+
+    def test_exit_com_hesitacao_ou_endereco_fecha_sem_enviar(self) -> None:
+        for texto in ("Uh, exit the conversation.", "A Jarvis, exit the conversation.", "Exit the conversation, uh."):
+            with self.subTest(texto=texto):
+                m = montagem_headless_em_ingles()
+                m.ouvir(texto, gatilho=GATILHO_JANELA)
+                self.assertFalse(m.jarvis.janela.aberta())
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+                self.assertEqual(m.falados[-1], "Left the conversation.")
+                self.assertNotIn("Sent.", m.falados)
+                self.assertEqual(len(m.canal.recebidos), 1, "sair nunca e enviado ao Claude")
+
+    def test_resposta_curta_financeira_e_recusada(self) -> None:
+        m = montagem_headless_em_ingles()
+        m.ouvir("Yes, buy Tesla shares.", gatilho=GATILHO_JANELA)
+        self.assertEqual(len(m.canal.recebidos), 1)
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertNotIn("Sent.", m.falados)
+        self.assertIn("I don't do that by voice", m.falados[-1])
+
+    def test_fora_da_janela_uma_resposta_curta_nao_e_enviada(self) -> None:
+        m = montagem_headless_em_ingles()
+        m.avancar(JANELA_S + 0.5)
+        m.jarvis.verificar_tempo()
+        self.assertFalse(m.jarvis.janela.aberta())
+        m.ouvir("Uh ans uh A Jarvis answer no, uh not right now.", gatilho=GATILHO_JANELA)
+        self.assertEqual(len(m.canal.recebidos), 1, "fora da janela nada vai sem recap e sim")
+        self.assertNotIn("Sent.", m.falados)
 
     def test_uma_resposta_sem_pergunta_nao_abre(self) -> None:
         m = Montagem([DITADO_EN], lingua="en", canal=CanalHeadlessFalso(resposta="I kept the newer file."))

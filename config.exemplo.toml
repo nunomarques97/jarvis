@@ -44,6 +44,9 @@ limiar_ativacao = 0.6
 #   instalado ou nao cabe na VRAM livre. Instalar com "ollama pull <modelo>".
 # limite_s: espera maxima pelo LLM (no maximo 5); acima disso a frase fica
 #   "desconhecido" e o texto literal so segue para confirmacao.
+# carregamento_s: quando nenhum dos modelos esta carregado (outro programa
+#   usou o Ollama e despejou-o), o jarvis diz "um momento" e espera ate este
+#   tempo pelo carregamento (entre o limite_s e 60).
 # confirmacao_s: quanto tempo o jarvis espera pelo "sim" depois de dizer o que
 #   percebeu (entre 3 e 120; conta a partir do fim da fala do recap); sem
 #   resposta, o pedido e cancelado sem envio.
@@ -52,6 +55,7 @@ url = "http://127.0.0.1:11434"
 modelo = "qwen3:8b"
 modelo_alternativo = "qwen3:4b"
 limite_s = 5.0
+carregamento_s = 20.0
 confirmacao_s = 30.0
 
 # Opcional: runs FORJA por voz ("como esta o run do X", "le o relatorio",

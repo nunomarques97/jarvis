@@ -13,7 +13,9 @@ Recebe a `Interpretacao` de uma frase e decide:
   - todas as outras intencoes tem efeito (enviar um prompt, abrir o editor
     ou a pasta, lancar, retomar ou parar um run, responder numa conversa) e
     ficam PENDENTES: o jarvis mostra na consola o que percebeu e o texto
-    exato a enviar, e diz em voz alta um resumo com no maximo duas frases.
+    exato a enviar, e diz em voz alta um resumo com no maximo duas frases;
+  - a unica excecao e `enviar_sem_recap`: uma resposta curta a uma pergunta
+    do Claude, dita na janela de conversa (`jarvis.conversa`), vai logo.
 
 Com um pedido pendente, cada resposta do utilizador e uma de:
 
@@ -73,10 +75,12 @@ from jarvis.interprete import (
     _PADRAO_TROCA,
     _so_o_projeto,
     limpar_texto,
+    pedido_financeiro,
     projetos_em_alternativa,
     projetos_mencionados,
     sem_palavra_de_ativacao,
 )
+from jarvis.conversa import e_resposta_curta
 from jarvis.router import _normalizar, encaminhar
 
 #: Intencoes de um projeto que so leem: correm logo, sem recap nem "sim",
@@ -184,6 +188,44 @@ _FRASES_DE_CANCELAR_APROXIMADAS = (
 _PALAVRAS_DO_CANCELAR_APROXIMADO = 3
 #: Diferencas maximas entre os esqueletos de consoantes (Levenshtein).
 _DISTANCIA_DO_CANCELAR_APROXIMADO = 1
+
+
+#: Um artigo solto antes do verbo de uma correcao ("The no change ...").
+_ARTIGOS_SOLTOS = frozenset({"the", "o"})
+#: Hesitacoes que em portugues sao o artigo ("muda um teste").
+_HESITACOES_QUE_SAO_ARTIGOS = frozenset({"um"})
+
+
+def _abertura(palavras: list[str]) -> tuple[list[str], bool]:
+    """(palavras a partir do verbo, houve negacao antes dele).
+
+    Antes do verbo de uma correcao podem vir, em qualquer ordem, hesitacoes,
+    negacoes e um artigo solto ("The no change uh um the login screen to
+    ..."); o verbo seguinte tambem perde as hesitacoes que o seguem. Sem
+    negacao nem verbo a seguir, as palavras ficam como estavam, e um artigo
+    sem negacao nem hesitacao ao lado e o comeco de uma frase nova ("The
+    change log ...").
+    """
+    inicio, negada, artigo, hesitou = 0, False, False, False
+    while inicio < len(palavras) and (
+        palavras[inicio] in _HESITACOES or palavras[inicio] in _NEGACOES or palavras[inicio] in _ARTIGOS_SOLTOS
+    ):
+        negada = negada or palavras[inicio] in _NEGACOES
+        artigo = artigo or palavras[inicio] in _ARTIGOS_SOLTOS
+        hesitou = hesitou or palavras[inicio] in _HESITACOES
+        inicio += 1
+    resto = palavras[inicio:]
+    verbo = bool(resto) and (resto[0] in _VERBOS_DE_TROCA or resto[0] in _VERBOS_DE_ACRESCENTO)
+    if (not negada and not verbo) or (artigo and not negada and not hesitou):
+        return palavras, False
+    if verbo:
+        seguinte = 1
+        while seguinte < len(resto) and resto[seguinte] in _HESITACOES:
+            seguinte += 1
+        # "muda um para dois": um "um" sozinho depois do verbo e o artigo.
+        if set(resto[1:seguinte]) - _HESITACOES_QUE_SAO_ARTIGOS:
+            resto = resto[:1] + resto[seguinte:]
+    return resto, negada
 
 
 def _sem_hesitacoes(palavras: list[str], *, no_fim: bool) -> list[str]:
@@ -370,10 +412,7 @@ def _classificar_sem_confirmar(limpo: str, palavras: list[str]) -> tuple[TipoDeR
     if palavras[0] in _SINS and len(palavras) > 2 and palavras[1] in {"mas", "but"}:
         palavras = palavras[2:]
         limpo = _SIM_MAS_NO_INICIO.sub("", limpo, count=1)
-    negada = False
-    while palavras and palavras[0] in _NEGACOES:
-        negada = True
-        palavras = palavras[1:]
+    palavras, negada = _abertura(palavras)
     if not palavras:
         return "outro", ""
     if palavras[0] in _PALAVRAS_DE_CANCELAR or " ".join(palavras[:2]) in _PARES_DE_CANCELAR:
@@ -392,16 +431,13 @@ def e_correcao(texto: str | None, nomes: tuple[str, ...] | list[str]) -> bool:
     """A frase e claramente uma correcao a um pedido. Deterministico, sem LLM.
 
     Conta uma negacao seguida de uma troca ("nao, muda X para Y", "no, change
-    X to Y"), ou uma troca sozinha ("change X to Y") quando X ou Y e so um
+    X to Y", tambem com hesitacoes e ordem solta: "The no change uh um X to
+    Y"), ou uma troca sozinha ("change X to Y") quando X ou Y e so um
     nome de projeto, ou quando a frase nao diz nenhum projeto. Uma troca que
     diz o projeto noutro sitio ("change the title to welcome in atlas") e um
     ditado, e um acrescento ("add ...") nunca e uma correcao sem pedido.
     """
-    palavras = _palavras(texto or "")
-    negada = False
-    while palavras and palavras[0] in _NEGACOES:
-        negada = True
-        palavras = palavras[1:]
+    palavras, negada = _abertura(_palavras(texto or ""))
     if not palavras or palavras[0] not in _VERBOS_DE_TROCA:
         return False
     frase = " ".join(palavras)
@@ -426,6 +462,8 @@ class Pedido:
     projeto: str | None
     prompt: str
     detalhe: str | None = None
+    #: Resposta curta na janela de conversa, enviada sem recap.
+    sem_recap: bool = False
 
 
 def _pedido_de_leitura(interpretacao: Interpretacao) -> Pedido:
@@ -528,8 +566,8 @@ _FRASES = {
     },
 }
 
-#: Fim de frase dentro do prompt: na voz vira virgula, para o recap falado
-#: ter sempre no maximo duas frases (o pedido e a pergunta).
+#: Fim de frase dentro da pergunta de projeto: na voz vira virgula, para a
+#: pergunta ser uma so frase.
 _FIM_DE_FRASE = re.compile(r"\s*[.!?…;]+(?:\s+|$)")
 
 
@@ -570,13 +608,14 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
         if not prompt:
             fala = f"{acao}. {pergunta}"
         else:
-            dito = _numa_frase(prompt)
-            palavras = dito.split()
-            if len(palavras) > PALAVRAS_DITAS or len(dito) > CARACTERES_DITOS:
-                inicio = " ".join(palavras[:PALAVRAS_DO_RESUMO]).rstrip(",")
-                fala = frases["longo"].format(acao=acao, n=len(prompt.split()), inicio=inicio) + f". {pergunta}"
+            # As frases do prompt sao ditas como estao no prompt.
+            palavras = prompt.split()
+            if len(palavras) > PALAVRAS_DITAS or len(prompt) > CARACTERES_DITOS:
+                inicio = " ".join(palavras[:PALAVRAS_DO_RESUMO]).rstrip(",;:.!?…")
+                fala = frases["longo"].format(acao=acao, n=len(palavras), inicio=inicio) + f". {pergunta}"
             else:
-                fala = f"{acao}: {dito}. {pergunta}"
+                dito = prompt if prompt[-1] in ".!?…" else prompt.rstrip(",;:") + "."
+                fala = f"{acao}: {dito} {pergunta}"
 
     nome_da_intencao = intencao.replace("_", " ")
     linhas = [
@@ -695,6 +734,31 @@ class Confirmacao:
             return Desfecho("nao_percebido", interpretacao.motivo)
         return self._propor(interpretacao)
 
+    def enviar_sem_recap(self, interpretacao: Interpretacao) -> Desfecho:
+        """Envia logo uma resposta curta a uma pergunta do Claude, sem recap.
+
+        So para quem trata a janela de conversa. Uma resposta que nao e de
+        conversa, sem projeto ou comprida vai para `iniciar` (recap e "sim");
+        a regra financeira vem antes de tudo, ao texto ouvido e ao que se envia.
+        """
+        texto = limpar_texto(interpretacao.prompt)
+        financeiro = self._financeiro(interpretacao.texto) or self._financeiro(texto)
+        if financeiro or interpretacao.intencao == INTENCAO_RECUSADA:
+            with self._trinco:
+                self._limpar()
+            self._mostrar("confirmacao | resposta recusada (pedido financeiro); nada foi enviado")
+            self._falar(self._texto("recusado"))
+            return Desfecho("recusado", interpretacao.motivo if not financeiro else "pedido financeiro na conversa")
+        if interpretacao.intencao != "conversa" or not interpretacao.projeto or not e_resposta_curta(texto):
+            return self.iniciar(interpretacao)
+        with self._trinco:
+            substituido = self._pendente is not None
+            self._limpar()
+        if substituido:
+            self._mostrar("confirmacao | pedido anterior cancelado por um pedido novo; nada foi enviado")
+        pedido = Pedido(interpretacao.intencao, interpretacao.projeto, texto, sem_recap=True)
+        return self._correr(pedido, None, "resposta curta na janela de conversa: enviada sem recap")
+
     def _propor(self, interpretacao: Interpretacao, fala: str | None = None) -> Desfecho:
         with self._trinco:
             self._numero += 1
@@ -753,6 +817,10 @@ class Confirmacao:
                 elif tipo == "cancelar" and not (aproximado and projeto_dito):
                     self._limpar()
                     acao = "cancelar"
+                elif projeto_dito and self._financeiro(texto):
+                    # O projeto dito com um pedido de dinheiro: a regra financeira vem antes.
+                    self._limpar()
+                    acao = "recusar"
                 elif projeto_dito:
                     # "no orbita" e a resposta a "qual projeto", nao um "no".
                     self._ocupado = True
@@ -780,6 +848,10 @@ class Confirmacao:
             self._mostrar("confirmacao | cancelado; nada foi enviado")
             self._falar(self._texto("cancelado"))
             return Desfecho("cancelado", "cancelado pelo utilizador", recap=recap)
+        if acao == "recusar":
+            self._mostrar("confirmacao | resposta recusada (pedido financeiro); nada foi enviado")
+            self._falar(self._texto("recusado"))
+            return Desfecho("recusado", "pedido financeiro na resposta ao projeto", recap=recap)
         if acao == "desistir":
             self._mostrar("confirmacao | cancelado depois de respostas que nao percebi; nada foi enviado")
             self._falar(self._texto("cancelado"))
@@ -838,6 +910,10 @@ class Confirmacao:
         self._mostrar("confirmacao | correcao sem nenhum pedido a espera; nada foi enviado")
         self._falar(self._texto("nada_para_corrigir"))
         return Desfecho("sem_pedido", "correcao sem nenhum pedido por confirmar")
+
+    def _financeiro(self, texto: str | None) -> bool:
+        nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)
+        return pedido_financeiro(limpar_texto(texto or ""), nomes) is not None
 
     def _projeto_dito(self, texto: str | None) -> str | None:
         nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)

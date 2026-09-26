@@ -36,7 +36,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from jarvis import acoes_locais, app, pergunta_geral, voz
+from jarvis import acoes_locais, app, conversa, pergunta_geral, voz
 from jarvis.acoes_locais import AcaoError, ResultadoAcao
 from jarvis.app import (
     A_DORMIR,
@@ -60,7 +60,7 @@ from jarvis.app import (
     formatar_etapa,
 )
 from jarvis.config import Config, ConfigInterprete, ConfigOuvido, Projeto
-from jarvis.interprete import Interprete, MotorIndisponivel
+from jarvis.interprete import Interprete, MotorIndisponivel, Vram
 from jarvis.ouvido import GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Frase, TeclaDoFicheiro
 from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA_DO_CLAUDE, frase_de_recurso, prefixo_da_resposta
 from jarvis.sessoes import Entrega
@@ -413,10 +413,17 @@ class TestConfirmacaoNoProcesso(unittest.TestCase):
 
     def test_conversa_sem_projeto_pede_o_projeto_e_nao_envia(self) -> None:
         m = Montagem([resposta_llm("conversa", "", "Sim, pode avançar.")])
-        m.ouvir("diz-lhe que sim pode avançar")
-        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        m.ouvir("sim, pode avançar")
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "fica pendente como um ditado sem projeto")
         self.assertEqual(m.canal.recebidos, [])
-        self.assertEqual(m.falados, ["Diz em que projeto é a conversa."])
+        self.assertEqual(m.falados, ["Percebi o pedido, mas não o projeto. Para que projeto?"])
+        m.avancar()
+        m.ouvir("atlas")
+        self.assertEqual(m.canal.recebidos, [], "o projeto dito so completa o recap")
+        self.assertEqual(m.falados[-1], "Responder ao Claude no atlas: Sim, pode avançar. Envio?")
+        m.avancar()
+        m.ouvir("sim")
+        self.assertEqual(m.canal.recebidos, [("atlas", "Sim, pode avançar.")])
 
     def test_sem_canal_o_sim_nao_envia_e_diz_porque(self) -> None:
         m = Montagem([DITADO], canal=None)
@@ -488,6 +495,112 @@ class TestConfirmacaoNoProcesso(unittest.TestCase):
 # --- Nomes mal ouvidos e correcao sem pedido ------------------------------------------
 
 #: Um projeto ficticio com uma palavra financeira no nome.
+NOMES_DO_ENSAIO = ("chamora", "jarvis", "atlas")
+
+#: Frases do ensaio de aceitacao, como o reconhecimento as transcreveu.
+RUN_NO_CHAMORA = "Start a run on Shamara to read them README and listed sections. Don't change anything."
+CONVERSA_NO_JARVIS = "Asked Jarvis to ask me if the change log should mention the new option and wait for my answer."
+CONVERSA_SEM_PROJETO = "Tell it to ask me if the change log should mention the new option and wait for my answer."
+PERGUNTA_DO_CHANGELOG = "Ask me if the change log should mention the new option and wait for my answer."
+
+
+class ForjaFalsa:
+    """Regista os pedidos confirmados a FORJA; nunca lanca nada."""
+
+    def __init__(self) -> None:
+        self.pedidos: list[tuple[str, str | None, str]] = []
+
+    def executar(self, intencao, projeto, texto="", lingua="pt"):
+        self.pedidos.append((intencao, projeto, texto))
+        return mock.Mock(ecra=(), falado="Run started.")
+
+
+class TestObjetivoEConversaSemProjeto(unittest.TestCase):
+    def montagem(self, respostas_llm) -> Montagem:
+        m = Montagem(respostas_llm, lingua="en", nomes=NOMES_DO_ENSAIO)
+        m.jarvis.forja = ForjaFalsa()
+        return m
+
+    def test_o_objetivo_do_run_e_so_o_pedido_e_so_segue_depois_do_sim(self) -> None:
+        limpo = "Read the README and list its sections. Don't change anything."
+        for prompt_do_llm in (limpo, "Start a run on Shamara to read the README and list its sections. Don't change anything.", ""):
+            with self.subTest(prompt_do_llm=prompt_do_llm):
+                m = self.montagem([resposta_llm("lancar_run", "", prompt_do_llm)])
+                m.ouvir(RUN_NO_CHAMORA)
+                recap = m.jarvis.confirmacao.recap
+                self.assertEqual((recap.pedido.intencao, recap.pedido.projeto), ("lancar_run", "chamora"))
+                objetivo = recap.pedido.prompt
+                self.assertTrue(objetivo.startswith("Read "), objetivo)
+                self.assertTrue(objetivo.endswith("Don't change anything."), objetivo)
+                self.assertNotIn("start", objetivo.lower())
+                self.assertNotIn("shamara", objetivo.lower())
+                self.assertEqual(m.jarvis.forja.pedidos, [], "nada lanca antes do sim")
+                m.avancar()
+                m.ouvir("yes")
+                self.assertEqual(m.jarvis.forja.pedidos, [("lancar_run", "chamora", objetivo)])
+
+    def test_asked_jarvis_to_e_uma_conversa_com_o_projeto_jarvis(self) -> None:
+        m = self.montagem([resposta_llm("conversa", "", "")])
+        m.ouvir(CONVERSA_NO_JARVIS)
+        self.assertTrue(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertEqual(m.falados[-1], f"Reply to Claude in jarvis: {PERGUNTA_DO_CHANGELOG} Send it?")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("jarvis", PERGUNTA_DO_CHANGELOG)])
+
+    def test_conversa_sem_projeto_pergunta_o_projeto_e_a_resposta_completa_o_pedido(self) -> None:
+        m = self.montagem([resposta_llm("conversa", "", PERGUNTA_DO_CHANGELOG)])
+        m.ouvir(CONVERSA_SEM_PROJETO)
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "fica pendente como um ditado sem projeto")
+        self.assertEqual(m.falados, ["I got the request, but not the project. Which project?"])
+        self.assertNotIn("Tell me which project the conversation is for.", m.falados)
+        m.avancar()
+        m.ouvir("The project is Jarvis.")
+        self.assertEqual(len(m.llm.pedidos), 1, "a resposta completa o pedido; nao e uma frase nova")
+        self.assertEqual(m.canal.recebidos, [], "o projeto dito so completa o recap")
+        self.assertEqual(m.falados[-1], f"Reply to Claude in jarvis: {CONVERSA_SEM_PROJETO} Send it?")
+        m.avancar()
+        m.ouvir("yes")
+        self.assertEqual(m.canal.recebidos, [("jarvis", CONVERSA_SEM_PROJETO)])
+
+    def test_conversa_sem_projeto_nunca_envia_sem_o_sim(self) -> None:
+        for fim in ("abort", "yes"):
+            with self.subTest(fim=fim):
+                m = self.montagem([resposta_llm("conversa", "", PERGUNTA_DO_CHANGELOG)])
+                m.ouvir(CONVERSA_SEM_PROJETO)
+                m.avancar()
+                # Sem projeto, nem um "yes" envia: falta o projeto.
+                m.ouvir(fim)
+                self.assertEqual(m.canal.recebidos, [])
+                if fim == "yes":
+                    self.assertTrue(m.jarvis.confirmacao.a_espera)
+                    self.assertEqual(m.falados[-1], "Which project?")
+                self.assertEqual(m.canal.recebidos, [])
+
+    def test_regra_financeira_antes_de_qualquer_destes_caminhos(self) -> None:
+        for frase in (
+            "Tell it to buy 100 euros of bitcoin.",
+            "Asked Jarvis to buy 100 euros of bitcoin.",
+            "Start a run on Shamara to buy 100 euros of bitcoin.",
+        ):
+            with self.subTest(frase=frase):
+                m = self.montagem([resposta_llm("conversa", "", "")])
+                m.ouvir(frase)
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+                self.assertEqual(m.llm.pedidos, [], "recusado antes do LLM")
+                self.assertEqual(m.canal.recebidos, [])
+                self.assertEqual(m.jarvis.forja.pedidos, [])
+                self.assertIn("money and trading", m.falados[-1])
+
+    def test_financeiro_na_resposta_a_which_project_nao_envia(self) -> None:
+        m = self.montagem([resposta_llm("conversa", "", PERGUNTA_DO_CHANGELOG)])
+        m.ouvir(CONVERSA_SEM_PROJETO)
+        m.avancar()
+        m.ouvir("The project is Jarvis, and buy 100 euros of bitcoin.")
+        self.assertEqual(m.canal.recebidos, [])
+
+
 NOMES_COM_CRIPTO = (*NOMES, "crypto-radar")
 
 
@@ -1088,15 +1201,32 @@ class TestCortesiaEPedidosSemProjeto(unittest.TestCase):
         m.jarvis.janela.abrir("atlas")
         m.avancar(1.5)
         m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
-        self.assertTrue(m.jarvis.confirmacao.a_espera, "a resposta na janela vai a recap")
-        self.assertEqual(m.canal.recebidos, [])
+        # Resposta curta a uma pergunta do Claude: vai logo, sem recap.
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertEqual(m.canal.recebidos, [("atlas", "Yeah.")])
+        self.assertEqual(m.falados[-1], "Sent.")
         self.assertNotIn("Okay.", m.falados)
-        m.avancar()
-        m.ouvir("yes")
-        self.assertEqual(len(m.canal.recebidos), 1)
-        self.assertEqual(m.canal.recebidos[0][0], "atlas")
-        self.assertIn("Yeah", m.canal.recebidos[0][1])
         self.assertEqual(m.llm.pedidos, [])
+
+    def test_resposta_curta_fora_da_janela_nunca_vai_sem_recap(self) -> None:
+        m = self.montagem([resposta_llm("conversa", "atlas", "Yes.")])
+        m.ouvir("tell atlas yes")
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "fora da janela uma conversa curta vai a recap")
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertNotIn("Sent.", m.falados)
+        m.avancar()
+        m.ouvir("abort")
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_janela_expirada_uma_resposta_curta_nao_e_enviada(self) -> None:
+        m = self.montagem()
+        m.jarvis.janela.abrir("atlas")
+        m.avancar(conversa.JANELA_S + 0.5)
+        m.jarvis.verificar_tempo()
+        m.ouvir("Yeah.", gatilho=GATILHO_JANELA)
+        self.assertEqual(m.canal.recebidos, [])
+        self.assertFalse(m.jarvis.confirmacao.a_espera)
+        self.assertNotIn("Sent.", m.falados)
 
     def test_ditado_longo_guarda_o_arranque_lento(self) -> None:
         truncado = "Find out which step takes longest and tell me before changing anything."
@@ -1530,6 +1660,106 @@ class TestExecutorLocal(unittest.TestCase):
         resultado = acoes_locais.executar_pedido("abrir_pasta", "ATLAS", self.config, simular=True)
         self.assertFalse(resultado.executou)
         self.assertIn(str(self.pasta), resultado.comando)
+
+
+# --- LLM ocupado: "um momento" enquanto o modelo carrega -----------------------------
+
+
+class OllamaQueCarrega(LlmFalso):
+    """Nenhum modelo do jarvis carregado; a resposta chega `demora_s` depois, no relogio falso."""
+
+    def __init__(self, respostas, relogio: RelogioFalso, demora_s: float, carregados=None) -> None:
+        super().__init__(respostas)
+        self.relogio = relogio
+        self.demora_s = demora_s
+        self.pronto_em = 0.0
+        self.carregados = carregados if carregados is not None else {"qwen3:14b": (10 << 30, 10 << 30)}
+
+    def conversar(self, modelo, mensagens, esquema, *, limite_s=None):
+        self.pronto_em = self.relogio.agora + self.demora_s
+        if limite_s is not None and self.demora_s > limite_s:
+            self.pedidos.append(mensagens)
+            raise MotorIndisponivel(f"o LLM nao respondeu em {limite_s:g} s")
+        return super().conversar(modelo, mensagens, esquema, limite_s=limite_s)
+
+    def modelos_carregados(self, limite_s=None):
+        return dict(self.carregados)
+
+    def modelos_instalados(self, limite_s=None):
+        return {"qwen3:8b": 5 << 30, "qwen3:4b": 5 << 29}
+
+    def esperar(self, evento: threading.Event, segundos: float) -> bool:
+        evento.wait(5)
+        fim = self.relogio.agora + segundos
+        if self.pronto_em <= fim:
+            self.relogio.agora = max(self.relogio.agora, self.pronto_em)
+            return True
+        self.relogio.agora = fim
+        return False
+
+
+class TestUmMomento(unittest.TestCase):
+    """O modelo foi despejado por outro programa: o jarvis avisa e espera ate 20 s."""
+
+    FRASE = "Jarvis, start a run on atlas to read the README and list its sections."
+    RUN = resposta_llm("lancar_run", "atlas", "Read the README and list its sections.")
+
+    def _montagem(self, demora_s: float, lingua: str = "en", carregados=None) -> tuple[Montagem, OllamaQueCarrega]:
+        m = Montagem(lingua=lingua)
+        ollama = OllamaQueCarrega([self.RUN], m.relogio, demora_s, carregados)
+        # Nao cabe nenhum dos dois na VRAM: o Ollama tem de carregar o principal.
+        m.interprete.cliente = ollama
+        m.interprete._relogio = m.relogio
+        m.interprete._medir = lambda: Vram(usada_mib=15800, livre_mib=500, total_mib=16303)
+        m.interprete._esperar = ollama.esperar
+        return m, ollama
+
+    def test_diz_one_moment_uma_vez_antes_do_recap_e_regista_o_modelo(self) -> None:
+        m, _ = self._montagem(15.0)
+        m.ouvir(self.FRASE)
+        self.assertEqual(m.falados[0], "One moment.")
+        self.assertEqual(m.falados.count("One moment."), 1)
+        self.assertGreater(len(m.falados), 1, "depois do aviso vem o recap")
+        self.assertTrue(m.jarvis.confirmacao.a_espera, "o pedido fica a espera do sim")
+        self.assertEqual(m.canal.recebidos, [], "nada enviado sem o sim")
+        registo = "\n".join(m.log.linhas)
+        self.assertIn("aviso de demora do interprete: falado: 'One moment.'", registo)
+        interprete = next(linha for linha in m.log.linhas if "etapa 3/5" in linha)
+        self.assertIn("modelo=qwen3:8b", interprete)
+        self.assertIn("um momento dito; esperou 15.0 s", interprete)
+        decisao = next(linha for linha in m.log.linhas if "etapa 4/5" in linha)
+        self.assertNotIn("resposta sem accao", decisao, "o aviso nao e a decisao da frase")
+        self.assertNotEqual(m.jarvis.medidas[0].primeira_fala, "One moment.")
+
+    def test_em_portugues_diz_um_momento(self) -> None:
+        m, _ = self._montagem(15.0, lingua="pt")
+        m.ouvir(self.FRASE)
+        self.assertEqual(m.falados[0], "Um momento.")
+
+    def test_mais_de_20_s_nao_percebido_sem_nada_executado(self) -> None:
+        m, _ = self._montagem(25.0)
+        m.ouvir(self.FRASE)
+        self.assertEqual(m.falados.count("One moment."), 1)
+        self.assertEqual(m.falados[0], "One moment.")
+        self.assertEqual((m.canal.recebidos, m.locais), ([], []))
+        interprete = next(linha for linha in m.log.linhas if "etapa 3/5" in linha)
+        self.assertIn("intencao=desconhecido", interprete)
+        self.assertIn("nao respondeu em 20 s", interprete)
+
+    def test_resposta_rapida_nunca_diz_one_moment(self) -> None:
+        for demora_s, carregados in ((0.6, {"qwen3:8b": (5 << 30, 5 << 30)}), (1.0, None)):
+            with self.subTest(demora_s=demora_s, carregado=carregados is not None):
+                m, _ = self._montagem(demora_s, carregados=carregados)
+                m.ouvir(self.FRASE)
+                self.assertNotIn("One moment.", m.falados)
+                self.assertTrue(m.jarvis.confirmacao.a_espera)
+
+    def test_calado_so_regista_o_aviso(self) -> None:
+        m, _ = self._montagem(15.0)
+        m.jarvis.estado.mudo = True
+        m.ouvir(self.FRASE)
+        self.assertNotIn("One moment.", m.falados)
+        self.assertIn("aviso de demora do interprete: modo calado", "\n".join(m.log.linhas))
 
 
 if __name__ == "__main__":

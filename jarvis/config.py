@@ -28,6 +28,7 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     modelo = "qwen3:8b"
     modelo_alternativo = "qwen3:4b"
     limite_s = 5.0                # acima disto a frase fica "desconhecido"
+    carregamento_s = 20.0         # sem modelo carregado: espera enquanto o Ollama o carrega
     confirmacao_s = 30.0          # espera pelo "sim"; depois cancela sem enviar
 
     [forja]                       # opcional; sem ela nao ha runs FORJA por voz
@@ -114,6 +115,12 @@ HOSTS_LOCAIS = ("127.0.0.1", "localhost", "::1")
 #: como "desconhecido" (so para confirmacao); o config pode baixar, nunca subir.
 LIMITE_DO_INTERPRETE_S = 5.0
 
+#: Quando nenhum modelo do interprete esta carregado (outro programa usou o
+#: Ollama e despejou-o), o jarvis diz "um momento" e espera ate este tempo
+#: pelo carregamento em vez de desistir no limite normal.
+ESPERA_DO_CARREGAMENTO_S = 20.0
+ESPERA_DO_CARREGAMENTO_MAXIMA_S = 60.0
+
 #: Quanto tempo o jarvis espera pelo "sim" depois de acabar de dizer o recap.
 #: Sem resposta dentro deste tempo o pedido e cancelado sem ser enviado.
 ESPERA_DA_CONFIRMACAO_S = 30.0
@@ -182,6 +189,8 @@ class ConfigInterprete:
     modelo: str = "qwen3:8b"
     modelo_alternativo: str = "qwen3:4b"
     limite_s: float = LIMITE_DO_INTERPRETE_S
+    #: Espera maxima pelo LLM quando o modelo ainda tem de ser carregado.
+    carregamento_s: float = ESPERA_DO_CARREGAMENTO_S
     #: Espera pela confirmacao de um pedido recapitulado; depois cancela.
     confirmacao_s: float = ESPERA_DA_CONFIRMACAO_S
 
@@ -367,7 +376,7 @@ def _validar_interprete(bruto: dict, caminho: Path) -> ConfigInterprete:
     tabela = bruto["interprete"]
     if not isinstance(tabela, dict):
         raise ConfigError(f"'{caminho}': [interprete] tem de ser uma tabela, nao {type(tabela).__name__}.")
-    permitidas = ("url", "modelo", "modelo_alternativo", "limite_s", "confirmacao_s")
+    permitidas = ("url", "modelo", "modelo_alternativo", "limite_s", "carregamento_s", "confirmacao_s")
     desconhecidas = sorted(set(tabela) - set(permitidas))
     if desconhecidas:
         raise ConfigError(
@@ -402,6 +411,19 @@ def _validar_interprete(bruto: dict, caminho: Path) -> ConfigInterprete:
                 f"numero maior que 0 e no maximo {LIMITE_DO_INTERPRETE_S:g}."
             )
         valores["limite_s"] = float(limite)
+    if "carregamento_s" in tabela:
+        espera = tabela["carregamento_s"]
+        minimo = float(valores.get("limite_s", LIMITE_DO_INTERPRETE_S))
+        if (
+            isinstance(espera, bool)
+            or not isinstance(espera, (int, float))
+            or not minimo <= espera <= ESPERA_DO_CARREGAMENTO_MAXIMA_S
+        ):
+            raise ConfigError(
+                f"'{caminho}': [interprete].carregamento_s = {espera!r} nao e valido; tem de ser um "
+                f"numero entre {minimo:g} (o limite_s) e {ESPERA_DO_CARREGAMENTO_MAXIMA_S:g}."
+            )
+        valores["carregamento_s"] = float(espera)
     if "confirmacao_s" in tabela:
         espera = tabela["confirmacao_s"]
         if (

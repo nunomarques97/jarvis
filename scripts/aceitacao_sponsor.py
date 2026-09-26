@@ -170,17 +170,31 @@ RESPOSTAS_DO_FLUXO = {
         "pt": 'ABORT ("aborta"; "cancel" ou "cancela" também servem) — nada é enviado',
     },
     "corrigir": {
-        "en": '"no, change X to Y" (ou "add ...") e depois YES',
-        "pt": '"no, change X to Y" ("não, muda X para Y") ou "add ..." ("acrescenta ..."), e depois YES ("sim")',
+        "en": '"no, change tests to docs" (ou "add that it is urgent") e depois YES',
+        "pt": '"não, muda testes para documentação" (ou "acrescenta que é urgente") e depois YES ("sim")',
     },
     "projeto": {
         "en": "o nome do projeto e depois YES",
         "pt": 'o nome do projeto e depois YES ("sim")',
     },
     "conversa": {
-        "en": 'YES; quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis") e depois YES',
-        "pt": 'YES ("sim"); quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis") '
-        'e depois YES ("sim")',
+        "en": 'YES; quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis"); '
+        'uma resposta curta vai logo ("Sent."), uma mais longa pede outro YES',
+        "pt": 'YES ("sim"); quando o Claude fizer a pergunta, responde logo em voz alta (sem "hey jarvis"); '
+        'uma resposta curta vai logo ("Enviado."), uma mais longa pede outro YES ("sim")',
+    },
+}
+
+#: A frase exata de cada tarefa de correcao do guiao, feita para o texto do
+#: seu exemplo; o guiao repete-a em "o que deve acontecer".
+RESPOSTAS_DE_CORRECAO = {
+    "a-04": {
+        "en": '"no, change login to settings" e depois YES',
+        "pt": '"não, muda login para definições" e depois YES ("sim")',
+    },
+    "a-05": {
+        "en": '"add that the summary has three lines" e depois YES',
+        "pt": '"acrescenta que o resumo tem três linhas" e depois YES ("sim")',
     },
 }
 
@@ -214,7 +228,9 @@ ECRA_INICIAL = (
     "1. Tem só UM jarvis aberto. Se houver outra janela do jarvis, fecha-a primeiro.",
     '2. Para falar com o jarvis: carrega no Shift da direita enquanto falas, ou começa a frase com "hey jarvis".',
     "3. No fim de cada tarefa, este ecrã diz-te exatamente o que responder ao jarvis (linha NO FIM RESPONDE).",
-    '   YES envia; ABORT cancela e nada é enviado; "no, change X to Y" corrige o texto antes de enviar.',
+    '   YES envia; ABORT cancela e nada é enviado; uma correção como "no, change tests to docs"',
+    '   ("não, muda testes para documentação") corrige o texto antes de enviar.',
+    "   Nas tarefas de correção, a linha NO FIM RESPONDE diz a frase exata.",
     "4. YES envia a sério para o Claude Code do projeto. Na primeira vez que isso acontece num projeto,",
     "   abre-se uma janela do Claude Code com um aviso: aceita o aviso e deixa a janela aberta.",
     "   Nunca feches essa janela: é por ela que o jarvis fala com o Claude Code.",
@@ -458,7 +474,9 @@ _SINAL = re.compile(r"^primeiro sinal de vida: (-?\d+) ms")
 _FALA = re.compile(r"^inicio da resposta falada: (-?\d+) ms")
 _DESFECHO = re.compile(r"^desfecho: (\S+) \| ?(.*)$")
 _TOTAL = re.compile(r"^TOTAL \|\s*(-?\d+) ms desde o inicio da escuta")
-_ENTREGUE = re.compile(r"^canal \| prompt confirmado entregue ao canal do (\S+): ")
+_ENTREGUE = re.compile(
+    r"^canal \| (?:prompt confirmado|resposta curta ao Claude) entregue ao canal do (\S+)(?: sem recap)?: "
+)
 _PERGUNTA = re.compile(r"^conversa \| o (\S+) fez uma pergunta")
 _RESPOSTA = re.compile(r"^canal \| resposta do (\S+) \(caminho=")
 _CONFIGURACAO = re.compile(r"^configuracao: .*\blingua=(\w+)")
@@ -1315,6 +1333,12 @@ def mostrar_ecra_inicial(
     return tecla("Enter para seguir para a primeira tarefa (q sai):", (ENTER, "q")) == ENTER
 
 
+def resposta_da_tarefa(tarefa: Tarefa, lingua: str) -> str:
+    """O que o Sponsor responde no fim da tarefa: a frase da propria tarefa, quando a tem."""
+    propria = RESPOSTAS_DE_CORRECAO.get(tarefa.id) if tarefa.fluxo == "corrigir" else None
+    return (propria or RESPOSTAS_DO_FLUXO[tarefa.fluxo])[lingua]
+
+
 def linhas_da_tarefa(tarefa: Tarefa, lingua: str, projetos: dict[str, str]) -> list[str]:
     """O que o ecra mostra de uma tarefa: o pedido e as tres linhas em destaque."""
     linhas = [f"   {trocar_marcadores(tarefa.tarefa, projetos)}"]
@@ -1325,7 +1349,7 @@ def linhas_da_tarefa(tarefa: Tarefa, lingua: str, projetos: dict[str, str]) -> l
     linhas += [
         f"   {SEPARADOR}",
         f"   {ROTULO_DIZER:<{largura}} \"{trocar_marcadores(tarefa.exemplos[lingua], projetos)}\"",
-        f"   {ROTULO_RESPONDER:<{largura}} {RESPOSTAS_DO_FLUXO[tarefa.fluxo][lingua]}",
+        f"   {ROTULO_RESPONDER:<{largura}} {resposta_da_tarefa(tarefa, lingua)}",
         f"   {ROTULO_ACONTECER:<{largura}} {trocar_marcadores(tarefa.acontecer, projetos)}",
         f"   {SEPARADOR}",
     ]

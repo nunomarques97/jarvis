@@ -36,9 +36,10 @@ O CAMINHO VIVO de cada frase:
   voz         a resposta falada pela voz residente, em streaming.
 
 Conversa (`jarvis.conversa`): quando a resposta do Claude acaba numa pergunta,
-abre-se uma janela de escuta de 8 s sem palavra de ativacao; o que o
-utilizador disser vai tal e qual para a confirmacao rapida e so um "sim" o
-envia. "sai da conversa" ou 8 s sem resposta fecham a janela.
+abre-se uma janela de escuta de 8 s sem palavra de ativacao; a resposta, sem
+hesitacoes nem o endereco ao jarvis, vai logo se for curta (ate 5 palavras,
+o jarvis diz "Sent.") e, se for mais longa, vai para a confirmacao rapida e
+so um "sim" a envia. "sai da conversa" ou 8 s sem resposta fecham a janela.
 
 Uma so instancia (`jarvis.instancia`): com o microfone, o jarvis so arranca
 com a tranca `logs/jarvis.lock` (o PID dele); se outro jarvis vivo a tem, diz
@@ -126,6 +127,7 @@ from jarvis.instancia import (
 from jarvis.interprete import (
     INTENCAO_CORTESIA,
     INTENCAO_PERGUNTA_GERAL,
+    INTENCAO_RECUSADA,
     Interpretacao,
     Interprete,
     medir_vram,
@@ -227,9 +229,9 @@ _TEXTOS = {
         "acordado": "Estou acordado.",
         "a_dormir": "Estou a dormir. Para me acordar, diz boas jarvis, acorda.",
         "enviado": "Enviado para o {projeto}.",
+        "enviado_curto": "Enviado.",
         "a_abrir": "Vou abrir a sessão do {projeto}. Aceita o aviso na janela nova e o pedido segue.",
         "sem_forja": "O estado e os runs da FORJA não estão disponíveis. Não fiz nada.",
-        "conversa_sem_projeto": "Diz em que projeto é a conversa.",
         "sem_canal": "O canal para o Claude Code não está disponível. Não enviei nada.",
         "sem_resposta": "Não recebi resposta do {projeto}. Os detalhes estão no ecrã.",
         "conversa_fim": "Saí da conversa.",
@@ -238,6 +240,7 @@ _TEXTOS = {
         "pergunta_recusada": "Isso não faço por voz: pedidos de dinheiro ou de bolsa ficam de fora.",
         "sem_perguntas": "As perguntas gerais não estão disponíveis.",
         "cortesia": "Está bem.",
+        "um_momento": "Um momento.",
     },
     "en": {
         "calado": "I'll be quiet.",
@@ -245,9 +248,9 @@ _TEXTOS = {
         "acordado": "I'm awake.",
         "a_dormir": "I'm asleep. To wake me, say hey jarvis, wake up.",
         "enviado": "Sent to {projeto}.",
+        "enviado_curto": "Sent.",
         "a_abrir": "Opening the {projeto} session. Accept the notice in the new window and the request follows.",
         "sem_forja": "Project status and FORJA runs are not available. I did nothing.",
-        "conversa_sem_projeto": "Tell me which project the conversation is for.",
         "sem_canal": "The Claude Code channel is not available. Nothing was sent.",
         "sem_resposta": "I got no answer from {projeto}. The details are on screen.",
         "conversa_fim": "Left the conversation.",
@@ -256,6 +259,7 @@ _TEXTOS = {
         "pergunta_recusada": "I don't do that by voice: money and trading requests are off limits.",
         "sem_perguntas": "General questions are not available.",
         "cortesia": "Okay.",
+        "um_momento": "One moment.",
     },
 }
 
@@ -734,6 +738,8 @@ class Jarvis:
         self.config = config
         self.log = log
         self.interprete = interprete
+        # Com o modelo do interprete a carregar, o jarvis diz "um momento".
+        self.interprete.ao_demorar = self._avisar_demora
         self.canal = canal
         self.forja = forja
         self.perguntas = perguntas
@@ -1038,22 +1044,34 @@ class Jarvis:
     def _responder_na_conversa(
         self, frase: Frase, registo: RegistoDaFrase, medida: MedidaDaFrase
     ) -> Desfecho | None:
-        """A frase dita na janela: sair, ou a resposta literal com confirmacao rapida."""
+        """A frase dita na janela: sair, uma resposta curta que vai logo, ou uma longa com recap."""
         estado = self.janela.fechar()
         self._fechar_escuta()
         if estado is None:  # fechada entretanto: a frase nao chega a ser tratada
             registo.marcar(3, "conversa: a janela ja tinha fechado (nada interpretado)")
             return None
         medida.projeto = estado.projeto
-        if conversa.e_para_sair(frase.texto):
+        if conversa.e_para_sair(frase.texto, self.lingua):
             medida.intencao = "sair_da_conversa"
             registo.marcar(3, f"conversa com o {estado.projeto}: sair (nada enviado)")
             self._dizer(self._texto("conversa_fim"))
             return Desfecho("cancelado", "saiu da conversa")
         nomes = tuple(projeto.nome for projeto in self.config.projetos)
-        interpretacao = conversa.resposta_literal(frase.texto, estado.projeto, nomes)
+        interpretacao = conversa.resposta_literal(frase.texto, estado.projeto, nomes, lingua=self.lingua)
         medida.intencao = interpretacao.intencao
-        registo.marcar(3, "conversa: resposta literal na janela | " + self._detalhe_da_interpretacao(interpretacao))
+        detalhe = self._detalhe_da_interpretacao(interpretacao)
+        if interpretacao.intencao == INTENCAO_RECUSADA:
+            registo.marcar(3, "conversa: resposta na janela recusada | " + detalhe)
+            return self.confirmacao.iniciar(interpretacao)
+        if not interpretacao.prompt:
+            # So hesitacoes: nada a enviar, e a pergunta continua por responder.
+            registo.marcar(3, "conversa: so hesitacoes na janela (nada interpretado)")
+            self._abrir_conversa(estado.projeto)
+            return Desfecho("ignorado", "resposta so com hesitacoes; a janela abre de novo")
+        if conversa.e_resposta_curta(interpretacao.prompt):
+            registo.marcar(3, "conversa: resposta curta na janela, enviada sem recap | " + detalhe)
+            return self.confirmacao.enviar_sem_recap(interpretacao)
+        registo.marcar(3, "conversa: resposta longa na janela, com recap | " + detalhe)
         return self.confirmacao.iniciar(interpretacao)
 
     def _abrir_conversa(self, projeto: str) -> None:
@@ -1166,10 +1184,6 @@ class Jarvis:
             self._marcar_decisao("so cortesia: nada enviado")
             self._dizer(self._texto("cortesia"))
             return Desfecho("ignorado", "so cortesia")
-        if interpretacao.intencao == "conversa" and interpretacao.projeto is None:
-            self._marcar_decisao("conversa sem projeto: nada a confirmar")
-            self._dizer(self._texto("conversa_sem_projeto"))
-            return Desfecho("nao_percebido", "conversa sem projeto")
         return self.confirmacao.iniciar(interpretacao)
 
     # -- saida para o ecra e para a voz
@@ -1186,8 +1200,16 @@ class Jarvis:
         for linha in texto.splitlines() or [""]:
             self.log.linha(f"ecra | {linha}")
 
-    def _dizer(self, texto: str) -> voz.ResultadoFala | None:
-        """Fala (ou mostra) uma resposta do jarvis, e regista quando comecou a soar."""
+    def _avisar_demora(self) -> None:
+        """O modelo do interprete esta a carregar: "um momento", uma vez, na thread da frase."""
+        self._dizer(self._texto("um_momento"), aviso=True)
+
+    def _dizer(self, texto: str, *, aviso: bool = False) -> voz.ResultadoFala | None:
+        """Fala (ou mostra) uma resposta do jarvis, e regista quando comecou a soar.
+
+        Um `aviso` (o "um momento" enquanto o modelo carrega) so fica numa
+        nota: nao e a decisao nem a resposta da frase, nem mexe nas etapas.
+        """
         falado = " ".join((texto or "").split())
         if not falado:
             return None
@@ -1196,13 +1218,16 @@ class Jarvis:
                 "sem_corte_seguro", self.lingua
             )
         registo: RegistoDaFrase | None = getattr(self._local, "registo", None)
-        medida: MedidaDaFrase | None = getattr(self._local, "medida", None)
-        self._marcar_decisao("resposta sem accao")
+        medida: MedidaDaFrase | None = None if aviso else getattr(self._local, "medida", None)
+        if not aviso:
+            self._marcar_decisao("resposta sem accao")
         if medida is not None and medida.primeira_fala is None:
             medida.primeira_fala = falado
 
         def marcar(detalhe: str) -> None:
-            if registo is not None:
+            if registo is not None and aviso:
+                registo.nota(f"aviso de demora do interprete: {detalhe}")
+            elif registo is not None:
                 registo.marcar(5, detalhe)
             else:
                 self.log.linha(f"voz | {detalhe}")
@@ -1221,7 +1246,7 @@ class Jarvis:
             self.painel.mudar(A_FALAR)
             resultado = self._falar(falado)
         primeiro_audio = getattr(resultado, "primeiro_audio", None)
-        if primeiro_audio is not None and registo is not None and registo.fim_da_fala is not None:
+        if primeiro_audio is not None and registo is not None and registo.fim_da_fala is not None and not aviso:
             ms = (primeiro_audio - registo.fim_da_fala) * 1000
             if medida is not None and medida.primeira_fala_ms is None:
                 medida.primeira_fala_ms = ms
@@ -1287,8 +1312,14 @@ class Jarvis:
                 self._dizer(self._texto("sem_canal"))
                 return None
             ja_aberta = self.canal.enviar(pedido.projeto, pedido.prompt, self._ao_responder)
-            self.log.linha(f"canal | prompt confirmado entregue ao canal do {pedido.projeto}: {pedido.prompt!r}")
-            self._dizer(self._texto("enviado" if ja_aberta else "a_abrir", projeto=pedido.projeto))
+            if pedido.sem_recap:
+                self.log.linha(
+                    f"canal | resposta curta ao Claude entregue ao canal do {pedido.projeto} sem recap: {pedido.prompt!r}"
+                )
+            else:
+                self.log.linha(f"canal | prompt confirmado entregue ao canal do {pedido.projeto}: {pedido.prompt!r}")
+            enviado = "enviado_curto" if pedido.sem_recap else "enviado"
+            self._dizer(self._texto(enviado if ja_aberta else "a_abrir", projeto=pedido.projeto))
             return pedido
         raise acoes_locais.AcaoError(f"'{intencao}' ainda nao se faz por voz")
 

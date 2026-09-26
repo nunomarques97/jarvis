@@ -232,7 +232,8 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
         self._tarefa("a-06", ["tell orbita to delete the old logs", "cancel"])
         # So aqui o Claude responde com uma pergunta: abre a janela de conversa.
         self.m.canal.resposta = self.pergunta
-        self._tarefa("d-01", ["ask atlas to ask me which test file to keep", "yes", "the second one", "yes"])
+        # "the second one" e uma resposta curta: vai logo, sem recap nem segundo "yes".
+        self._tarefa("d-01", ["ask atlas to ask me which test file to keep", "yes", "the second one"])
         resultados, frases = self._resultados()
 
         self.assertTrue(all(r.acertou for r in resultados.values()), {k: r.intencao_obtida for k, r in resultados.items()})
@@ -251,6 +252,10 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
         self.assertTrue(all(f.fonte == ac.FONTE_MICROFONE and f.lingua == "en" for f in frases))
         # Nada foi enviado no cancelamento; o ditado e a resposta da conversa foram.
         self.assertEqual([p for p, _ in self.m.canal.recebidos], ["atlas", "orbita", "atlas", "atlas"])
+        self.assertEqual(self.m.canal.recebidos[-1], ("atlas", "the second one"))
+        entregas = [e for e in ac.atribuir(self.sessao.tarefas, *ac.ler_logs([self.log.caminho]))["d-01"][1]
+                    if e.tipo == "entregue"]
+        self.assertEqual(len(entregas), 2, "o ditado e a resposta curta contam como entregues")
 
     def test_projeto_errado_nao_conta_a_primeira(self) -> None:
         # O Sponsor disse atlas, a transcricao saiu orbita: o recap mostra-o e ele confirma na mesma.
@@ -901,10 +906,48 @@ class TestEcraDasTarefas(unittest.TestCase):
         self.assertEqual(set(ac.RESPOSTAS_DO_FLUXO), set(ac.FLUXOS))
         for lingua in ac.LINGUAS:
             self.assertIn("cancel", ac.RESPOSTAS_DO_FLUXO["cancelar"][lingua])
-            self.assertIn('"no, change X to Y"', ac.RESPOSTAS_DO_FLUXO["corrigir"][lingua])
-            self.assertIn('"add ..."', ac.RESPOSTAS_DO_FLUXO["corrigir"][lingua])
+        self.assertIn('"no, change tests to docs"', ac.RESPOSTAS_DO_FLUXO["corrigir"]["en"])
+        self.assertIn('"add that it is urgent"', ac.RESPOSTAS_DO_FLUXO["corrigir"]["en"])
+        self.assertIn('"não, muda testes para documentação"', ac.RESPOSTAS_DO_FLUXO["corrigir"]["pt"])
+        self.assertIn('"acrescenta que é urgente"', ac.RESPOSTAS_DO_FLUXO["corrigir"]["pt"])
         self.assertIn('"sim"', ac.RESPOSTAS_DO_FLUXO["confirmar"]["pt"])
         self.assertIn('"aborta"', ac.RESPOSTAS_DO_FLUXO["cancelar"]["pt"])
+
+    def test_nada_mostra_o_marcador_literal_da_correcao(self) -> None:
+        # O Sponsor leu "change X to Y" a letra: os exemplos sao frases concretas.
+        literais = re.compile(r"\bX (to|para) Y\b|change X\b|muda X\b|\"add \.\.\.\"|\"acrescenta \.\.\.\"")
+        guiao = ac.GUIAO.read_text(encoding="utf-8")
+        self.assertNotRegex(guiao, literais)
+        for lingua in ac.LINGUAS:
+            with self.subTest(lingua=lingua):
+                ecra = ac.texto_do_ecra_inicial(lingua, PROJETOS)
+                blocos = _ecra_de_todas_as_tarefas(lingua)
+                texto = "\n".join([*ecra, *(l for b in blocos.values() for l in b)])
+                self.assertNotRegex(texto, literais)
+                self.assertIn('"no, change tests to docs"', "\n".join(ecra))
+                self.assertIn('"não, muda testes para documentação"', "\n".join(ecra))
+
+    def test_cada_tarefa_de_correcao_diz_a_frase_do_seu_exemplo(self) -> None:
+        corrigir = [t for t in TAREFAS if t.fluxo == "corrigir"]
+        self.assertEqual([t.id for t in corrigir], ["a-04", "a-05"])
+        self.assertEqual(set(ac.RESPOSTAS_DE_CORRECAO), {t.id for t in corrigir})
+        # A palavra trocada existe no exemplo de cada lingua.
+        troca = {"a-04": {"en": "login", "pt": "login"}}
+        for lingua in ac.LINGUAS:
+            blocos = _ecra_de_todas_as_tarefas(lingua)
+            for tarefa in corrigir:
+                with self.subTest(lingua=lingua, tarefa=tarefa.id):
+                    resposta = _valor(blocos[tarefa.id], ac.ROTULO_RESPONDER)
+                    self.assertEqual(resposta, ac.RESPOSTAS_DE_CORRECAO[tarefa.id][lingua])
+                    frase = re.match(r'^"([^"]+)"', resposta).group(1)
+                    self.assertIn(f'"{frase}"', tarefa.acontecer)
+                    self.assertNotEqual(frase, re.match(r'^"([^"]+)"', ac.RESPOSTAS_DO_FLUXO["corrigir"][lingua]).group(1))
+                    if tarefa.id in troca:
+                        self.assertIn(troca[tarefa.id][lingua], tarefa.exemplos[lingua])
+        self.assertIn("no, change login to settings", ac.RESPOSTAS_DE_CORRECAO["a-04"]["en"])
+        self.assertIn("não, muda login para definições", ac.RESPOSTAS_DE_CORRECAO["a-04"]["pt"])
+        self.assertIn("add that the summary has three lines", ac.RESPOSTAS_DE_CORRECAO["a-05"]["en"])
+        self.assertIn("acrescenta que o resumo tem três linhas", ac.RESPOSTAS_DE_CORRECAO["a-05"]["pt"])
 
     def test_as_tarefas_do_run_dizem_que_mexem_num_run_forja_real(self) -> None:
         blocos = _ecra_de_todas_as_tarefas("pt")

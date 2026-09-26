@@ -1030,7 +1030,7 @@ class TestRecap(Base):
         "responde, e escreve testes para os três casos: sucesso, credenciais erradas e servidor em baixo."
     )
 
-    def test_recap_falado_tem_no_maximo_duas_frases(self) -> None:
+    def test_recap_falado_le_as_frases_do_prompt_e_acaba_na_pergunta(self) -> None:
         prompts = ("Corrige os testes.", "Corrige os testes. Depois corre a suite! Está bem?", self.LONGO, "Versão 1.5 do x; e depois y")
         for lingua in ("pt", "en"):
             for intencao in sorted(INTENCOES_COM_EFEITO):
@@ -1039,8 +1039,35 @@ class TestRecap(Base):
                         interpretacao = self.pedido(intencao, projeto, prompt)
                         recap = compor_recap(1, interpretacao, lingua)
                         with self.subTest(lingua=lingua, intencao=intencao, projeto=projeto, prompt=prompt[:20]):
-                            self.assertLessEqual(contar_frases(recap.fala), 2, recap.fala)
+                            # Um prompt curto e dito com as frases dele; um longo, o pedido falta o projeto
+                            # ou um sem prompt ficam em duas frases.
+                            curto = recap.pedido.prompt and prompt != self.LONGO and not recap.falta_projeto
+                            maximo = contar_frases(prompt) + 1 if curto else 2
+                            self.assertLessEqual(contar_frases(recap.fala), maximo, recap.fala)
                             self.assertTrue(recap.fala.endswith("?"))
+                            if curto:
+                                self.assertIn(recap.pedido.prompt.rstrip("."), recap.fala)
+
+    def test_recap_diz_as_frases_como_estao_no_prompt(self) -> None:
+        interpretacao = self.pedido(
+            "ditar_prompt", "chamora", "Read the README and summarize it in Portuguese. Don't change anything."
+        )
+        recap = compor_recap(1, interpretacao, "en")
+        self.assertEqual(
+            recap.fala, "To chamora: Read the README and summarize it in Portuguese. Don't change anything. Send it?"
+        )
+        self.assertNotIn(", Don't", recap.fala)
+        self.assertIn("Read the README and summarize it in Portuguese. Don't change anything.", recap.ecra)
+
+    def test_resumo_do_prompt_longo_nao_junta_frases_com_virgula(self) -> None:
+        longo = (
+            "Fix the login. Then rewrite the form so that it uses the new component and keeps the email and "
+            "password validation exactly as it is today, and add a clear error message when the server does not answer."
+        )
+        recap = compor_recap(1, self.pedido("ditar_prompt", "atlas", longo), "en")
+        self.assertIn("starts with: Fix the login. Then rewrite the form so that it uses the, and the rest", recap.fala)
+        self.assertNotIn("login, Then", recap.fala)
+        self.assertIn(longo, recap.ecra)
 
     def test_prompt_longo_e_resumido_na_voz_e_inteiro_no_ecra(self) -> None:
         confirmacao = self.montar()
@@ -1340,6 +1367,208 @@ class TestEstadoERelatorioSemConfirmacao(Base):
         self.assertEqual(self.canal.recebidos, [])
         self.assertEqual(confirmacao.responder("yes").estado, "executado")
         self.assertEqual(self.canal.recebidos, [Pedido("parar_run", "atlas", "")])
+
+
+class TestProjetoPeloSomNaResposta(Base):
+    lingua = "en"
+
+    def montar_com_chamora(self, respostas_llm) -> Confirmacao:
+        self.relogio = RelogioFalso()
+        self.llm = LlmFalso(respostas_llm)
+        config = Config(
+            microfone="Microfone Ficticio",
+            projetos=tuple(
+                Projeto(nome, Path("D:/caminho/para") / nome) for nome in ("seekai", "jarvis", "chamora", "atlas")
+            ),
+            ouvido=ConfigOuvido(lingua="en"),
+            interprete=ConfigInterprete(),
+        )
+        self.interprete = Interprete(config, cliente=self.llm)
+        self.canal = CanalFalso()
+        self.falas: list[str] = []
+        self.confirmacao = Confirmacao(
+            self.interprete, self.canal, falar=self.falas.append, mostrar=lambda _t: None, relogio=self.relogio
+        )
+        return self.confirmacao
+
+    def test_resposta_a_which_project_pelo_som_completa_o_pedido(self) -> None:
+        for resposta in ("Shamura.", "The project is Chamara.", "Chamara. Chamura. Chamura.", "Mara Chamura."):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar_com_chamora([_llm("ditar_prompt", "", "List the tests.")])
+                interpretacao = self.interprete.interpretar("list the tests")
+                self.assertIsNone(interpretacao.projeto)
+                desfecho = confirmacao.iniciar(interpretacao)
+                self.assertTrue(desfecho.recap.falta_projeto)
+                self.assertTrue(self.falas[-1].endswith("Which project?"))
+                novo = confirmacao.responder(resposta)
+                self.assertEqual(novo.estado, "pendente")
+                self.assertFalse(novo.recap.falta_projeto)
+                self.assertEqual(novo.recap.pedido, Pedido("ditar_prompt", "chamora", "List the tests."))
+                # Nada sai sem o sim.
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertEqual(confirmacao.responder("yes").estado, "executado")
+                self.assertEqual(self.canal.recebidos, [Pedido("ditar_prompt", "chamora", "List the tests.")])
+
+    def test_resposta_com_dois_nomes_continua_a_perguntar(self) -> None:
+        for resposta in ("Shamura or seekai.", "Shamara or atlas."):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar_com_chamora([_llm("ditar_prompt", "", "List the tests.")])
+                confirmacao.iniciar(self.interprete.interpretar("list the tests"))
+                self.assertEqual(confirmacao.responder(resposta).estado, "pendente")
+                self.assertTrue(confirmacao.recap.falta_projeto)
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_estado_sem_projeto_corre_com_o_nome_pelo_som(self) -> None:
+        confirmacao = self.montar_com_chamora([])
+        confirmacao.iniciar(self.pedido("estado", None))
+        self.assertTrue(self.falas[-1].endswith("Which project?"))
+        self.assertEqual(confirmacao.responder("Shamra.").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("estado", "chamora", "")])
+
+
+PROMPT_DO_README = "Read the README and summarize it. Don't change anything."
+ACRESCENTO_DITO = "Uh no, add uh one more uh request. I want to s uh the summarize to be in Portuguese."
+PROMPT_EM_PORTUGUES = "Read the README and summarize it in Portuguese. Don't change anything."
+CORRECAO_DITA = "The no change uh um the login screen to Wipstone"
+
+
+class TestCorrecoesDitasNoRecap(TestProjetoPeloSomNaResposta):
+    """Correcoes e acrescentos reais ao recap: reescritos limpos, nada enviado sem o sim."""
+
+    # Os testes herdados ja correm na classe de cima.
+    test_resposta_a_which_project_pelo_som_completa_o_pedido = None
+    test_resposta_com_dois_nomes_continua_a_perguntar = None
+    test_estado_sem_projeto_corre_com_o_nome_pelo_som = None
+
+    def test_classifica_o_acrescento_e_a_correcao_com_hesitacoes(self) -> None:
+        self.assertEqual(classificar_resposta(ACRESCENTO_DITO)[0], "acrescentar")
+        self.assertEqual(classificar_resposta(CORRECAO_DITA)[0], "corrigir")
+        # Sem pedido pendente, tambem e uma correcao.
+        self.assertTrue(e_correcao(CORRECAO_DITA, ("seekai", "jarvis", "chamora", "atlas")))
+        self.assertTrue(e_correcao("Uh no uh change tests to docs", ()))
+        self.assertFalse(e_correcao("The login screen is broken", ()))
+        # Um artigo sem negacao nem hesitacao comeca uma frase nova.
+        self.assertFalse(e_correcao("The change log for version two is wrong", ()))
+        self.assertEqual(classificar_resposta("The change log for version two is wrong")[0], "outro")
+        self.assertTrue(e_correcao("The uh change tests to docs", ()))
+        # Em portugues "um" logo depois do verbo e o artigo, nao uma hesitacao.
+        self.assertTrue(e_correcao("muda um para dois", ()))
+        self.assertTrue(e_correcao("não, muda um teste para dois", ()))
+
+    def test_acrescento_reescrito_e_recap_com_as_frases_do_prompt(self) -> None:
+        confirmacao = self.montar_com_chamora([_llm("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES)])
+        confirmacao.iniciar(self.pedido("ditar_prompt", "chamora", PROMPT_DO_README))
+        desfecho = confirmacao.responder(ACRESCENTO_DITO)
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(len(self.llm.pedidos), 1, "o acrescento passou pelo LLM")
+        self.assertEqual(confirmacao.recap.pedido, Pedido("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES))
+        self.assertEqual(
+            self.falas[-1], "To chamora: Read the README and summarize it in Portuguese. Don't change anything. Send it?"
+        )
+        self.assertEqual(self.canal.recebidos, [])
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES)])
+
+    def test_acrescento_colado_ou_sem_llm_nao_muda_o_pedido(self) -> None:
+        colado = "Read the README and summarize it. Don't change anything, no, add uh one more uh request, I want to s u"
+        for respostas in ([_llm("ditar_prompt", "chamora", colado)], []):
+            with self.subTest(respostas=bool(respostas)):
+                confirmacao = self.montar_com_chamora(respostas)
+                if not respostas:
+                    self.llm.erro = MotorIndisponivel("Ollama indisponivel")
+                confirmacao.iniciar(self.pedido("ditar_prompt", "chamora", PROMPT_DO_README))
+                confirmacao.responder(ACRESCENTO_DITO)
+                self.assertEqual(confirmacao.recap.pedido.prompt, PROMPT_DO_README)
+                self.assertTrue(self.falas[-1].startswith("I couldn't apply that change; the request stays the same."))
+                self.assertNotIn(" uh", " ".join(self.falas))
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_correcao_com_hesitacoes_e_ordem_solta_corrige_sem_enviar(self) -> None:
+        confirmacao = self.montar_com_chamora([_llm("ditar_prompt", "chamora", "Fix the Wipstone. Don't change the tests.")])
+        confirmacao.iniciar(self.pedido("ditar_prompt", "chamora", "Fix the login screen. Don't change the tests."))
+        desfecho = confirmacao.responder(CORRECAO_DITA)
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertEqual(confirmacao.recap.pedido.prompt, "Fix the Wipstone. Don't change the tests.")
+        self.assertEqual(self.falas[-1], "To chamora: Fix the Wipstone. Don't change the tests. Send it?")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_regra_financeira_na_correcao_nunca_envia(self) -> None:
+        for resposta, respostas_llm in (
+            ("Uh no, add uh buy some bitcoin.", []),
+            (ACRESCENTO_DITO, [_llm("ditar_prompt", "chamora", "Read the README and sell the shares. Don't change anything.")]),
+        ):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar_com_chamora(respostas_llm)
+                confirmacao.iniciar(self.pedido("ditar_prompt", "chamora", PROMPT_DO_README))
+                confirmacao.responder(resposta)
+                confirmacao.responder("yes")
+                self.assertEqual(self.canal.recebidos, [])
+
+
+PERGUNTA_DO_CHANGELOG = "Ask me if the change log should mention the new option and wait for my answer."
+
+
+class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
+    def conversa_sem_projeto(self) -> Confirmacao:
+        confirmacao = self.montar_com_chamora([_llm("conversa", "", PERGUNTA_DO_CHANGELOG)])
+        interpretacao = self.interprete.interpretar(
+            "Tell it to ask me if the change log should mention the new option and wait for my answer."
+        )
+        self.assertEqual((interpretacao.intencao, interpretacao.projeto), ("conversa", None))
+        self.confirmacao_prompt = interpretacao.prompt
+        desfecho = confirmacao.iniciar(interpretacao)
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertTrue(desfecho.recap.falta_projeto)
+        return confirmacao
+
+    def test_fica_pendente_e_pergunta_which_project(self) -> None:
+        self.conversa_sem_projeto()
+        self.assertEqual(self.falas, ["I got the request, but not the project. Which project?"])
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_a_resposta_completa_o_pedido_e_segue_o_recap_normal(self) -> None:
+        confirmacao = self.conversa_sem_projeto()
+        novo = confirmacao.responder("The project is Jarvis.")
+        self.assertEqual(novo.estado, "pendente")
+        self.assertFalse(novo.recap.falta_projeto)
+        prompt = self.confirmacao_prompt
+        self.assertEqual(novo.recap.pedido, Pedido("conversa", "jarvis", prompt))
+        self.assertEqual(self.falas[-1], f"Reply to Claude in jarvis: {prompt} Send it?")
+        self.assertEqual(len(self.llm.pedidos), 1, "a resposta nao e uma frase nova")
+        self.assertEqual(self.canal.recebidos, [], "nada sai sem o sim")
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("conversa", "jarvis", prompt)])
+
+    def test_sem_projeto_nem_o_sim_envia_e_abortar_cancela(self) -> None:
+        confirmacao = self.conversa_sem_projeto()
+        self.assertEqual(confirmacao.responder("yes").estado, "pendente")
+        self.assertTrue(confirmacao.recap.falta_projeto)
+        self.assertEqual(self.falas[-1], "Which project?")
+        self.assertEqual(confirmacao.responder("abort").estado, "cancelado")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_resposta_financeira_a_which_project_nao_envia(self) -> None:
+        confirmacao = self.conversa_sem_projeto()
+        desfecho = confirmacao.responder("The project is Jarvis, and buy 100 euros of bitcoin.")
+        self.assertEqual(desfecho.estado, "recusado")
+        self.assertFalse(confirmacao.a_espera)
+        self.assertIn("money and trading", self.falas[-1])
+        confirmacao.responder("yes")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_em_portugues_pergunta_que_projeto(self) -> None:
+        confirmacao = self.montar(
+            [_llm("conversa", "", "Pergunta-me se o changelog deve falar da opção nova.")], lingua="pt"
+        )
+        interpretacao = self.interprete.interpretar("diz-lhe para me perguntar se o changelog deve falar da opção nova")
+        self.assertEqual((interpretacao.intencao, interpretacao.projeto), ("conversa", None))
+        desfecho = confirmacao.iniciar(interpretacao)
+        self.assertTrue(desfecho.recap.falta_projeto)
+        self.assertEqual(self.falas[-1], "Percebi o pedido, mas não o projeto. Para que projeto?")
+        novo = confirmacao.responder("atlas")
+        self.assertEqual(novo.recap.pedido.projeto, "atlas")
+        self.assertTrue(self.falas[-1].startswith("Responder ao Claude no atlas: "), self.falas[-1])
+        self.assertEqual(self.canal.recebidos, [])
 
 
 if __name__ == "__main__":

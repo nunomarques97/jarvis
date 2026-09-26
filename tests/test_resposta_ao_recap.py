@@ -278,13 +278,13 @@ class TestRespostaSemPalavraDeAtivacao(unittest.TestCase):
     def test_recap_da_janela_de_conversa_tambem_ouve_a_resposta(self) -> None:
         cena = Cena()
         cena.jarvis._abrir_conversa("atlas")
-        cena.dizer("yes, run the whole suite")
+        cena.dizer("yes, run the whole suite and then the linter")
         self.assertTrue(cena.jarvis.confirmacao.a_espera)
-        self.assertEqual(cena.falados[-1], "Reply to Claude in atlas: yes, run the whole suite. Send it?")
+        self.assertEqual(cena.falados[-1], "Reply to Claude in atlas: yes, run the whole suite and then the linter. Send it?")
         self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
         self.assertEqual(cena.aberturas[-1][1:], (30.0, ESCUTA_RECAP, False))
         cena.dizer("go ahead")
-        self.assertEqual(cena.canal.recebidos, [("atlas", "yes, run the whole suite")])
+        self.assertEqual(cena.canal.recebidos, [("atlas", "yes, run the whole suite and then the linter")])
 
     def test_resposta_do_claude_durante_o_recap_nao_e_ouvida_como_resposta(self) -> None:
         from jarvis.sessoes import Entrega
@@ -655,6 +655,36 @@ class TestRespostasReaisAoRecap(unittest.TestCase):
                 self.assertEqual(cena.canal.recebidos, [])
                 self.assertEqual(cena.falados[-1], "Say yes to send, or abort.")
                 self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
+
+    def test_acrescento_com_hesitacoes_reescrito_limpo_e_enviado_so_com_o_sim(self) -> None:
+        pedido = "Read the README and summarize it. Don't change anything."
+        limpo = "Read the README and summarize it in Portuguese. Don't change anything."
+        cena = Cena(
+            [resposta_llm("ditar_prompt", "chamora", pedido), resposta_llm("ditar_prompt", "chamora", limpo)],
+            nomes=("atlas", "chamora"),
+        )
+        cena.com_recap("hey jarvis, tell chamora to read the README and summarize it. Don't change anything.")
+        cena.dizer("Uh no, add uh one more uh request. I want to s uh the summarize to be in Portuguese.")
+        self.assertEqual(cena.jarvis.confirmacao.recap.pedido.prompt, limpo)
+        self.assertEqual(cena.falados[-1], f"To chamora: {limpo} Send it?")
+        self.assertEqual(cena.canal.recebidos, [])
+        self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
+        cena.dizer("Yes.")
+        self.assertEqual(cena.canal.recebidos, [("chamora", limpo)])
+
+    def test_correcao_com_hesitacoes_e_ordem_solta_e_uma_correcao(self) -> None:
+        cena = Cena(
+            [
+                resposta_llm("ditar_prompt", "atlas", "Fix the login screen."),
+                resposta_llm("ditar_prompt", "atlas", "Fix the Wipstone."),
+            ]
+        )
+        cena.com_recap("hey jarvis, tell atlas to fix the login screen")
+        cena.dizer("The no change uh um the login screen to Wipstone")
+        self.assertEqual(len(cena.m.llm.pedidos), 2, "a correcao passou pelo interprete")
+        self.assertEqual(cena.jarvis.confirmacao.recap.pedido.prompt, "Fix the Wipstone.")
+        self.assertEqual(cena.falados[-1], "To atlas: Fix the Wipstone. Send it?")
+        self.assertEqual(cena.canal.recebidos, [])
 
     def test_estado_do_jarvis_corre_sem_recap(self) -> None:
         cena = Cena([resposta_llm("estado", "jarvis")], nomes=("atlas", "jarvis"))

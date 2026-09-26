@@ -77,7 +77,8 @@ class ClienteFalso:
         self.respostas = list(respostas or [])
         self.pedidos: list[tuple[str, list[dict]]] = []
         self.instalados = instalados if instalados is not None else {"qwen3:8b": 5200 * MIB}
-        self.carregados = carregados if carregados is not None else {}
+        # Por omissao o principal esta carregado, como depois do arranque.
+        self.carregados = carregados if carregados is not None else {"qwen3:8b": (5200 * MIB, 5200 * MIB)}
         self.descarregados: list[str] = []
         self.erro = erro
         self.limite_s = LIMITE_DO_INTERPRETE_S
@@ -557,6 +558,165 @@ class TestNomesMalOuvidos(unittest.TestCase):
         )
 
 
+# --- Nomes de projeto pelo som ---------------------------------------------------
+
+#: Projetos configurados no ensaio real, com um nome curto dito de muitas formas.
+NOMES_PELO_SOM = ("seekai", "jarvis", "chamora", "atlas", "orbita")
+
+#: Como o reconhecimento de voz transcreveu "chamora" no ensaio.
+CHAMORA_MAL_OUVIDO = (
+    "Shamara",
+    "Shama",
+    "Shamora",
+    "Shamura",
+    "Chamura",
+    "Chamorra",
+    "Shamra",
+    "Mara Chamura.",
+    "Chamara. Chamura. Chamura.",
+)
+
+#: Palavras comuns, perto de um nome pelo som ou pelas letras, que nunca sao um projeto.
+COMUNS_PERTO_DE_UM_NOME = (
+    "at last the menu works",
+    "the camera is on",
+    "summer is here",
+    "share more of the tests",
+    "the drama is over",
+    "I love the sombrero",
+    "chama o tecnico",
+    "a chamada caiu",
+    "o drama acabou",
+    "Shama.",
+    "tell idle to wait",
+    "tell atalho to fix it",
+    "outlaws never win",
+    "search the jar file",
+)
+
+
+def _interprete_pelo_som(
+    respostas=None, lingua: str = "en", nomes: tuple[str, ...] = NOMES_PELO_SOM
+) -> tuple[Interprete, ClienteFalso]:
+    cliente = ClienteFalso(respostas)
+    config = Config(
+        microfone="Microfone Ficticio",
+        projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in nomes),
+        ouvido=ConfigOuvido(lingua=lingua),
+        interprete=ConfigInterprete(),
+    )
+    return Interprete(config, cliente=cliente), cliente
+
+
+class TestNomesPeloSom(unittest.TestCase):
+    def test_cada_transcricao_do_ensaio_e_chamora_a_primeira(self) -> None:
+        for dito in CHAMORA_MAL_OUVIDO:
+            texto = f"Tell {dito} to list the tests. Don't change anything."
+            for projeto_do_llm in ("", "seekai", "chamora"):
+                with self.subTest(dito=dito, projeto_do_llm=projeto_do_llm):
+                    self.assertEqual(projetos_mencionados(texto, NOMES_PELO_SOM), ("chamora",))
+                    self.assertEqual(projetos_em_alternativa(texto, NOMES_PELO_SOM), ())
+                    interprete, cliente = _interprete_pelo_som(
+                        [_llm("ditar_prompt", projeto_do_llm, "List the tests. Don't change anything.")]
+                    )
+                    resultado = interprete.interpretar(texto)
+                    self.assertEqual(len(cliente.pedidos), 1)
+                    self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "chamora"))
+                    self.assertIsNone(resultado.pergunta)
+                    # O nome mal ouvido, repetido ou partido, sai todo do prompt.
+                    self.assertEqual(resultado.prompt, "List the tests. Don't change anything.")
+
+    def test_projeto_do_llm_diferente_do_dito_e_ignorado_e_registado(self) -> None:
+        interprete, _ = _interprete_pelo_som([_llm("ditar_prompt", "seekai", "List the tests.")])
+        resultado = interprete.interpretar("Tell Shamara to list the tests.")
+        self.assertEqual(resultado.projeto, "chamora")
+        self.assertIn("projeto 'seekai' do LLM nao foi dito: ignorado", resultado.motivo)
+
+    def test_varias_repeticoes_do_nome_contam_uma_vez(self) -> None:
+        for texto in ("Chamara. Chamura. Chamura.", "Shamura, Shamura, list the tests", "Mara Chamura."):
+            with self.subTest(texto=texto):
+                self.assertEqual(projetos_mencionados(texto, NOMES_PELO_SOM), ("chamora",))
+                self.assertEqual(projetos_em_alternativa(texto, NOMES_PELO_SOM), ())
+
+    def test_palavras_comuns_nunca_sao_projeto(self) -> None:
+        for texto in (*COMUNS_PERTO_DE_UM_NOME, *SEM_PROJETO):
+            with self.subTest(texto=texto):
+                self.assertEqual(projetos_mencionados(texto, NOMES_PELO_SOM), ())
+
+    def test_e_deterministico(self) -> None:
+        texto = "Tell Shamra to list the tests."
+        resultados = {projetos_mencionados(texto, NOMES_PELO_SOM) for _ in range(20)}
+        self.assertEqual(resultados, {("chamora",)})
+
+    def test_dois_nomes_ou_alternativa_perguntam(self) -> None:
+        for texto in (
+            "Tell Shamara or seekai to list the tests.",
+            "in Shamura or in atlas list the tests",
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(len(projetos_em_alternativa(texto, NOMES_PELO_SOM)), 2)
+                interprete, _ = _interprete_pelo_som([_llm("ditar_prompt", "seekai", "List the tests.")])
+                resultado = interprete.interpretar(texto)
+                self.assertIsNone(resultado.projeto)
+                self.assertIsNotNone(resultado.pergunta)
+
+    def test_troco_empatado_entre_dois_nomes_pergunta(self) -> None:
+        nomes = ("chamora", "chamira")
+        self.assertEqual(projetos_mencionados("tell Chamara to list the tests", nomes), nomes)
+        self.assertEqual(projetos_em_alternativa("tell Chamara to list the tests", nomes), nomes)
+        # O nome exato ganha sempre ao parecido.
+        self.assertEqual(projetos_mencionados("tell chamira to list the tests", nomes), ("chamira",))
+        self.assertEqual(projetos_em_alternativa("tell chamira to list the tests", nomes), ())
+
+    def test_nome_cortado_so_conta_no_lugar_do_endereco(self) -> None:
+        self.assertEqual(projetos_mencionados("Tell Shama to list the tests.", NOMES_PELO_SOM), ("chamora",))
+        self.assertEqual(projetos_mencionados("The project is Shama.", NOMES_PELO_SOM), ("chamora",))
+        self.assertEqual(projetos_mencionados("the shama list", NOMES_PELO_SOM), ())
+
+    def test_palavra_de_ativacao_mal_ouvida_no_inicio_nao_e_o_projeto(self) -> None:
+        self.assertEqual(projetos_mencionados("Jorvis, list the tests", NOMES_PELO_SOM), ())
+        self.assertEqual(projetos_mencionados("tell Jorvis to list the tests", NOMES_PELO_SOM), ("jarvis",))
+
+    def test_nome_pelo_som_nunca_esconde_um_termo_financeiro(self) -> None:
+        for texto in (
+            "Tell Shamara to buy bitcoin.",
+            "Tell Shamura to sell my crypto.",
+            "Chamara. Chamura. Place an order on binance.",
+        ):
+            with self.subTest(texto=texto):
+                self.assertIsNotNone(pedido_financeiro(texto, NOMES_PELO_SOM))
+                interprete, cliente = _interprete_pelo_som([_llm("ditar_prompt", "chamora", "List the tests.")])
+                self.assertEqual(interprete.interpretar(texto).intencao, INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_palavra_financeira_so_com_a_vizinha_nunca_e_tirada_como_nome(self) -> None:
+        # "shares" soa como "charis" e "dinheiro" como "denaro": tiradas como
+        # nome, a frase deixava de ser financeira.
+        for nomes, texto, lingua in (
+            (("charis", "seekai"), "A thousand euros in shares.", "en"),
+            (("cheris", "seekai"), "A thousand euros in shares.", "en"),
+            (("sharis", "seekai"), "A thousand euros in shares.", "en"),
+            (("denaro", "seekai"), "Transfere o dinheiro todo para a minha conta.", "pt"),
+        ):
+            with self.subTest(nomes=nomes, texto=texto):
+                self.assertIsNotNone(pedido_financeiro(texto, ()))
+                self.assertIsNotNone(pedido_financeiro(texto, nomes))
+                interprete, cliente = _interprete_pelo_som(
+                    [_llm("ditar_prompt", nomes[0], "List the tests.")], lingua=lingua, nomes=nomes
+                )
+                self.assertEqual(interprete.interpretar(texto).intencao, INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_palavra_antes_do_nome_so_e_pedaco_dele_se_acabar_igual(self) -> None:
+        # "Mara" repete o fim de "chamora"; "more" nao, e continua na fala.
+        self.assertEqual(
+            interprete_mod._fala_sem_projetos("add one more Shamora test", NOMES_PELO_SOM),
+            ["add", "one", "more", "test"],
+        )
+        self.assertEqual(interprete_mod._fala_sem_projetos("Mara Chamura, list the tests", NOMES_PELO_SOM),
+                         ["list", "the", "tests"])
+
+
 # --- Palavras compostas que comecam por crypto/cripto ------------------------------
 
 #: Compostos colados, em CamelCase ou com hifen cujo resto nao e financeiro:
@@ -883,6 +1043,14 @@ class TestConfigDoInterprete(unittest.TestCase):
         self.assertEqual(validar_url_local("http://[::1]:11434"), "http://[::1]:11434")
         self.assertEqual(validar_url_local("http://LOCALHOST"), "http://localhost")
 
+    def test_espera_do_carregamento(self) -> None:
+        self.assertEqual(_carregar("").interprete.carregamento_s, 20.0)
+        self.assertEqual(_carregar("[interprete]\ncarregamento_s = 30\n").interprete.carregamento_s, 30.0)
+        for valor in ("2", "61", "true", '"20"'):
+            with self.subTest(valor=valor):
+                with self.assertRaises(ConfigError):
+                    _carregar(f"[interprete]\ncarregamento_s = {valor}\n")
+
     def test_nomes_de_modelo_e_chaves_invalidas(self) -> None:
         for extra in (
             '[interprete]\nmodelo = "qwen3 8b"\n',
@@ -1186,13 +1354,13 @@ class TestDitadoLimpo(unittest.TestCase):
         # O mesmo para um lancamento de run.
         interprete, _ = _interprete([_llm("lancar_run", "atlas", "")])
         resultado = interprete.interpretar("no atlas lança um run para corrigir o login")
-        self.assertEqual(resultado.prompt, "Lança um run para corrigir o login.")
+        self.assertEqual(resultado.prompt, "Corrigir o login.")
 
     def test_conversa_so_perde_o_endereco_claro_ao_projeto(self) -> None:
         interprete, _ = _interprete([_llm("conversa", "", "")])
         self.assertEqual(interprete.interpretar("sim podes avançar").prompt, "sim podes avançar")
         interprete, _ = _interprete([_llm("conversa", "atlas", "diz ao atlas que sim, podes avançar")])
-        self.assertEqual(interprete.interpretar("diz ao atlas que sim, podes avançar").prompt, "sim, podes avançar")
+        self.assertEqual(interprete.interpretar("diz ao atlas que sim, podes avançar").prompt, "Sim, podes avançar")
 
     def test_regra_financeira_corre_sobre_o_prompt_final(self) -> None:
         interprete, cliente = _interprete_com_cripto(
@@ -1946,6 +2114,565 @@ class TestMinimoDaIntencao(unittest.TestCase):
     def test_minimo_nunca_desce_a_meta_base(self) -> None:
         errados = len(self.casos) // 10
         self.assertEqual(self._correr(["--minimo-intencao", "50"], errados=errados), 1)
+
+
+# --- Correcoes e acrescentos ditos, reescritos pelo LLM ----------------------------
+
+NOMES_COM_CHAMORA = ("seekai", "jarvis", "chamora", "atlas")
+PROMPT_DO_README = "Read the README and summarize it. Don't change anything."
+ACRESCENTO_DITO = "Uh no, add uh one more uh request. I want to s uh the summarize to be in Portuguese."
+PROMPT_EM_PORTUGUES = "Read the README and summarize it in Portuguese. Don't change anything."
+CORRECAO_DITA = "The no change uh um the login screen to Wipstone"
+PROMPT_DO_LOGIN = "Fix the login screen. Don't change the tests."
+#: O que a aceitacao mostrou: a fala colada em bruto ao prompt.
+PROMPT_COLADO = "Read the README and summarize it. Don't change anything, no, add uh one more uh request, I want to s u"
+
+
+class TestCorrecoesDitas(unittest.TestCase):
+    """Correcoes e acrescentos com hesitacoes passam pelo LLM e pela mesma fidelidade dos ditados."""
+
+    def interprete(self, respostas=None, *, erro=None, lingua: str = "en") -> tuple[Interprete, ClienteFalso]:
+        cliente = ClienteFalso(respostas, erro=erro)
+        config = Config(
+            microfone="Microfone Ficticio",
+            projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in NOMES_COM_CHAMORA),
+            ouvido=ConfigOuvido(lingua=lingua),
+            interprete=ConfigInterprete(),
+        )
+        return Interprete(config, cliente=cliente), cliente
+
+    @staticmethod
+    def pendente(prompt: str = PROMPT_DO_README) -> Interpretacao:
+        return Interpretacao("frase", "ditar_prompt", "chamora", prompt, "llm", "teste")
+
+    def assertSemFalaEmBruto(self, prompt: str) -> None:
+        normalizado = " " + prompt.lower().replace(",", " ").replace(".", " ") + " "
+        for proibido in (" uh ", " um ", " eh ", " no  add", "no, add", "one more", "request", " s u", " to the summarize"):
+            self.assertNotIn(proibido, normalizado if proibido.startswith(" ") else prompt.lower(), prompt)
+
+    def test_acrescento_com_hesitacoes_passa_pelo_llm_e_fica_limpo(self) -> None:
+        interprete, cliente = self.interprete([_llm("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES)])
+        corrigido = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+        self.assertEqual(len(cliente.pedidos), 1, "o acrescento passa pelo LLM")
+        self.assertEqual((corrigido.intencao, corrigido.projeto, corrigido.prompt), ("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES))
+        self.assertEqual(corrigido.origem, "llm")
+        # O LLM so ve a edicao sem hesitacoes.
+        edicao = json.loads(cliente.pedidos[0][1][-1]["content"])["edicao"]
+        self.assertEqual(edicao["tipo"], "acrescentar")
+        self.assertNotIn(" uh", edicao["texto"].lower())
+        self.assertNotIn("Uh", edicao["texto"])
+
+    def test_llm_que_cola_a_fala_em_bruto_e_recusado_e_nada_se_cola(self) -> None:
+        for prompt_do_llm in (
+            PROMPT_COLADO,
+            PROMPT_DO_README + " No, add one more request. I want the summary to be in Portuguese.",
+        ):
+            with self.subTest(prompt=prompt_do_llm):
+                interprete, _ = self.interprete([_llm("ditar_prompt", "chamora", prompt_do_llm)])
+                corrigido = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+                # A palavra cortada ("to s uh the") impede a letra: o pedido fica igual.
+                self.assertEqual(corrigido.intencao, "desconhecido", corrigido.motivo)
+                self.assertEqual(corrigido.prompt, "")
+                self.assertIn("palavra cortada", corrigido.motivo)
+
+    def test_llm_que_acrescenta_pedidos_ou_perde_palavras_e_recusado(self) -> None:
+        for prompt_do_llm, motivo in (
+            (PROMPT_EM_PORTUGUES + " Then commit it.", "acrescenta pedidos"),
+            ("Read the README and summarize it in Portuguese.", "perde palavras do pedido"),
+            (PROMPT_DO_README, "perde palavras da edicao (portuguese)"),
+        ):
+            with self.subTest(prompt=prompt_do_llm):
+                interprete, _ = self.interprete([_llm("ditar_prompt", "chamora", prompt_do_llm)])
+                corrigido = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+                self.assertEqual(corrigido.intencao, "desconhecido")
+                self.assertIn(motivo, corrigido.motivo)
+
+    def test_hesitacoes_do_llm_nunca_ficam_no_prompt_corrigido(self) -> None:
+        interprete, _ = self.interprete(
+            [_llm("ditar_prompt", "chamora", "Read the README and uh summarize it in Portuguese. Don't change anything.")]
+        )
+        corrigido = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+        self.assertEqual(corrigido.prompt, PROMPT_EM_PORTUGUES)
+
+    def test_sem_llm_o_acrescento_fica_igual_ou_limpo_a_letra(self) -> None:
+        erro = MotorIndisponivel("Ollama indisponivel")
+        interprete, _ = self.interprete(erro=erro)
+        corrigido = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+        self.assertEqual((corrigido.intencao, corrigido.prompt), ("desconhecido", ""))
+        # Sem palavra cortada, a letra junta so o que se acrescenta, limpo.
+        interprete, _ = self.interprete(erro=erro)
+        corrigido = interprete.corrigir(
+            self.pendente(), "Uh no, add uh one more uh request. I want the summary to be in Portuguese.", "acrescentar"
+        )
+        self.assertEqual(corrigido.origem, "regra")
+        self.assertEqual(corrigido.prompt, PROMPT_DO_README + " I want the summary to be in Portuguese.")
+        self.assertSemFalaEmBruto(corrigido.prompt)
+
+    def test_correcao_com_hesitacoes_e_ordem_solta(self) -> None:
+        interprete, cliente = self.interprete([_llm("ditar_prompt", "chamora", "Fix the Wipstone. Don't change the tests.")])
+        corrigido = interprete.corrigir(self.pendente(PROMPT_DO_LOGIN), CORRECAO_DITA, "corrigir")
+        self.assertEqual(corrigido.prompt, "Fix the Wipstone. Don't change the tests.")
+        edicao = json.loads(cliente.pedidos[0][1][-1]["content"])["edicao"]["texto"]
+        self.assertNotIn("uh", edicao.split())
+        self.assertNotIn("um", edicao.split())
+
+    def test_correcao_colada_pelo_llm_cai_na_letra_limpa(self) -> None:
+        for prompt_do_llm in (
+            # A troca colada tal como foi dita, perdendo o "Fix".
+            "Change the login screen to Wipstone. Don't change the tests.",
+            "Fix the login screen. Don't change the tests. No change the login screen to Wipstone.",
+        ):
+            with self.subTest(prompt=prompt_do_llm):
+                interprete, _ = self.interprete([_llm("ditar_prompt", "chamora", prompt_do_llm)])
+                corrigido = interprete.corrigir(self.pendente(PROMPT_DO_LOGIN), CORRECAO_DITA, "corrigir")
+                self.assertEqual(corrigido.origem, "regra", corrigido.motivo)
+                self.assertEqual(corrigido.prompt, "Fix Wipstone. Don't change the tests.")
+        interprete, _ = self.interprete(erro=MotorIndisponivel("Ollama indisponivel"))
+        corrigido = interprete.corrigir(self.pendente(PROMPT_DO_LOGIN), CORRECAO_DITA, "corrigir")
+        self.assertEqual(corrigido.prompt, "Fix Wipstone. Don't change the tests.")
+
+    def test_correcao_pelo_llm_nunca_perde_outras_palavras_do_pedido(self) -> None:
+        pendente = self.pendente("Fix the login screen on mobile.")
+        for prompt_do_llm in ("Fix the Wipstone.", "Fix the login screen on mobile and Wipstone."):
+            with self.subTest(prompt=prompt_do_llm):
+                interprete, _ = self.interprete([_llm("ditar_prompt", "chamora", prompt_do_llm)])
+                corrigido = interprete.corrigir(pendente, CORRECAO_DITA, "corrigir")
+                # O LLM e recusado e fica a troca a letra, que guarda "on mobile".
+                self.assertEqual(corrigido.origem, "regra", corrigido.motivo)
+                self.assertEqual(corrigido.prompt, "Fix Wipstone on mobile.")
+        interprete, _ = self.interprete([_llm("ditar_prompt", "chamora", "Fix the Wipstone on mobile.")])
+        corrigido = interprete.corrigir(pendente, CORRECAO_DITA, "corrigir")
+        self.assertEqual((corrigido.origem, corrigido.prompt), ("llm", "Fix the Wipstone on mobile."))
+
+    def test_regra_financeira_antes_e_depois_do_llm(self) -> None:
+        interprete, cliente = self.interprete([_llm("ditar_prompt", "chamora", "never used")])
+        recusado = interprete.corrigir(self.pendente(), "Uh no, add uh buy some bitcoin.", "acrescentar")
+        self.assertEqual(recusado.intencao, INTENCAO_RECUSADA)
+        self.assertEqual(cliente.pedidos, [], "a regra corre antes do LLM")
+        for resposta in (
+            _llm("ditar_prompt", "chamora", "Read the README and sell the shares. Don't change anything."),
+            _llm("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES, financeiro=True),
+        ):
+            with self.subTest(resposta=resposta):
+                interprete, _ = self.interprete([resposta])
+                recusado = interprete.corrigir(self.pendente(), ACRESCENTO_DITO, "acrescentar")
+                self.assertEqual(recusado.intencao, INTENCAO_RECUSADA)
+
+    def test_conteudo_da_edicao_sem_anuncio_nem_negacao(self) -> None:
+        self.assertEqual(
+            interprete_mod.conteudo_da_edicao(ACRESCENTO_DITO, "acrescentar", "en"),
+            "I want to the summarize to be in Portuguese",
+        )
+        self.assertEqual(interprete_mod.conteudo_da_edicao(CORRECAO_DITA, "corrigir", "en"), "change the login screen to Wipstone")
+        self.assertTrue(interprete_mod.tem_palavra_cortada(ACRESCENTO_DITO, "en"))
+        self.assertFalse(interprete_mod.tem_palavra_cortada(CORRECAO_DITA, "en"))
+
+
+class TestHesitacoesNuncaChegamAoPrompt(unittest.TestCase):
+    def test_sem_hesitacoes_no_texto(self) -> None:
+        casos = (
+            ("en", "Uh fix the uh login test, um, and eh the docs.", "fix the login test, and the docs."),
+            ("en", "Fix it. Uh add a test.", "Fix it. Add a test."),
+            ("en", "I want to s uh the summary in Portuguese.", "I want to the summary in Portuguese."),
+            ("en", "uh um", ""),
+            # Siglas em maiusculas nao sao hesitacoes.
+            ("en", "Draw the ER diagram uh of the database.", "Draw the ER diagram of the database."),
+            ("en", "UM students uh use it.", "UM students use it."),
+            # Uma letra que e conteudo fica; so sai a que a palavra seguinte recomeca.
+            ("en", "Plan B uh is the fallback.", "Plan B is the fallback."),
+            ("en", "rename x uh to count", "rename x to count"),
+            # Em portugues "um" e um artigo e fica.
+            ("pt", "Corrige um teste, hum, e eh a documentação.", "Corrige um teste, e a documentação."),
+        )
+        for lingua, texto, esperado in casos:
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_hesitacoes_no_texto(texto, lingua), esperado)
+
+    def test_ditado_sem_hesitacoes_venha_do_llm_ou_da_fala(self) -> None:
+        for prompt_do_llm in ("Uh fix the login test, um, in atlas.", ""):
+            with self.subTest(prompt=prompt_do_llm):
+                interprete, _ = _interprete([_llm("ditar_prompt", "atlas", prompt_do_llm)], lingua="en")
+                resultado = interprete.interpretar("uh tell atlas to um fix the login test")
+                self.assertEqual(resultado.projeto, "atlas")
+                palavras = resultado.prompt.lower().replace(",", " ").split()
+                for hesitacao in ("uh", "um", "eh"):
+                    self.assertNotIn(hesitacao, palavras, resultado.prompt)
+                self.assertIn("fix the login test", resultado.prompt.lower())
+
+    def test_sigla_er_fica_no_ditado_e_na_correcao(self) -> None:
+        interprete, _ = _interprete([_llm("ditar_prompt", "atlas", "Draw the ER diagram of the database.")], lingua="en")
+        resultado = interprete.interpretar("Tell atlas to draw the ER diagram of the database.")
+        self.assertEqual(resultado.prompt, "Draw the ER diagram of the database.")
+
+        anterior = Interpretacao("frase", "ditar_prompt", "atlas", "Draw the diagram of the database.", "llm", "teste")
+        corrigido_pelo_llm = "Draw the ER diagram of the database."
+        for respostas in ([_llm("ditar_prompt", "atlas", corrigido_pelo_llm)], None):
+            with self.subTest(llm=bool(respostas)):
+                if respostas:
+                    interprete, _ = _interprete(respostas, lingua="en")
+                else:
+                    interprete, _ = _interprete([], lingua="en", erro=MotorIndisponivel("Ollama indisponivel"))
+                corrigido = interprete.corrigir(anterior, "Uh no, change diagram to ER diagram", "corrigir")
+                self.assertEqual(corrigido.prompt, corrigido_pelo_llm, corrigido.motivo)
+
+    def test_um_portugues_fica_no_ditado(self) -> None:
+        interprete, _ = _interprete([_llm("ditar_prompt", "atlas", "Hum, escreve um teste para o login.")])
+        resultado = interprete.interpretar("no atlas hum escreve um teste para o login")
+        self.assertEqual(resultado.prompt, "Escreve um teste para o login.")
+
+
+# --- Objetivo do run limpo e conversa sem projeto ----------------------------------
+
+NOMES_DO_ENSAIO = ("chamora", "jarvis", "atlas")
+RUN_NO_CHAMORA = "Start a run on Shamara to read them README and listed sections. Don't change anything."
+OBJETIVO_DO_README = "Read the README and list its sections. Don't change anything."
+CONVERSA_NO_JARVIS = "Asked Jarvis to ask me if the change log should mention the new option and wait for my answer."
+PERGUNTA_DO_CHANGELOG = "Ask me if the change log should mention the new option and wait for my answer."
+
+
+class TestObjetivoDoRunEConversaSemProjeto(unittest.TestCase):
+    def interprete(self, respostas) -> tuple[Interprete, ClienteFalso]:
+        return _interprete_pelo_som(respostas, nomes=NOMES_DO_ENSAIO)
+
+    def test_objetivo_do_run_sem_o_comando_nem_o_projeto(self) -> None:
+        for prompt_do_llm in (
+            OBJETIVO_DO_README,
+            "Start a run on Shamara to read the README and list its sections. Don't change anything.",
+            "Start a run on chamora to read the README and list its sections. Don't change anything.",
+            "",
+        ):
+            with self.subTest(prompt_do_llm=prompt_do_llm):
+                interprete, _ = self.interprete([_llm("lancar_run", "", prompt_do_llm)])
+                resultado = interprete.interpretar(RUN_NO_CHAMORA)
+                self.assertEqual((resultado.intencao, resultado.projeto), ("lancar_run", "chamora"))
+                objetivo = resultado.prompt
+                self.assertTrue(objetivo.startswith("Read "), objetivo)
+                self.assertTrue(objetivo.endswith("Don't change anything."), objetivo)
+                self.assertNotIn("start", objetivo.lower())
+                self.assertNotIn("run", objetivo.lower().split())
+                for nome in ("shamara", "chamora"):
+                    self.assertNotIn(nome, objetivo.lower())
+                if prompt_do_llm:
+                    self.assertEqual(objetivo, OBJETIVO_DO_README, resultado.motivo)
+                else:
+                    self.assertEqual(
+                        objetivo, "Read them README and listed sections. Don't change anything.", resultado.motivo
+                    )
+
+    def test_sem_comando_de_lancar(self) -> None:
+        nomes = (*NOMES_DO_ENSAIO, "orbita")
+        casos = (
+            (RUN_NO_CHAMORA, "chamora", "read them README and listed sections. Don't change anything."),
+            ("Start a new run on project chamora with the goal to fix the tests.", "chamora", "fix the tests."),
+            ("Uh, launch a run in chamora: fix the tests.", "chamora", "fix the tests."),
+            ("Lança um run no chamora para corrigir os testes.", "chamora", "corrigir os testes."),
+            ("Start a run to fix the tests.", "chamora", "fix the tests."),
+            ("começa um run novo no orbita para traduzir a interface para inglês", "orbita",
+             "traduzir a interface para inglês"),
+        )
+        for texto, projeto, esperado in casos:
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_comando_de_lancar(texto, projeto, nomes), esperado)
+
+    def test_sem_comando_de_lancar_nunca_muda_o_pedido(self) -> None:
+        nomes = NOMES_DO_ENSAIO
+        for texto in (
+            # Nao e um comando de lancar no inicio: fica igual.
+            "Read the README and start a run on chamora after that.",
+            "Start the server and run the tests.",
+            # Outro projeto que nao o escolhido fica no objetivo.
+            "Start a run on atlas",
+            # Sem objetivo depois do comando: nunca esvazia.
+            "Start a run on chamora",
+            "",
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(interprete_mod.sem_comando_de_lancar(texto, "chamora", nomes), texto)
+
+    def test_asked_jarvis_to_e_ask_jarvis_to_sao_para_o_projeto_jarvis(self) -> None:
+        for frase in (
+            CONVERSA_NO_JARVIS,
+            "Ask Jarvis to ask me if the change log should mention the new option and wait for my answer.",
+        ):
+            for prompt_do_llm in ("", PERGUNTA_DO_CHANGELOG):
+                with self.subTest(frase=frase, prompt_do_llm=prompt_do_llm):
+                    interprete, _ = self.interprete([_llm("conversa", "", prompt_do_llm)])
+                    resultado = interprete.interpretar(frase)
+                    self.assertEqual((resultado.intencao, resultado.projeto), ("conversa", "jarvis"), resultado.motivo)
+                    self.assertEqual(resultado.prompt, PERGUNTA_DO_CHANGELOG, resultado.motivo)
+                    self.assertIsNone(resultado.pergunta)
+
+    def test_endereco_asked_sai_do_prompt(self) -> None:
+        self.assertEqual(
+            interprete_mod.sem_endereco_ao_projeto(CONVERSA_NO_JARVIS, "jarvis", NOMES_DO_ENSAIO),
+            "ask me if the change log should mention the new option and wait for my answer.",
+        )
+
+    def test_a_palavra_de_ativacao_continua_a_sair_do_inicio(self) -> None:
+        interprete, _ = self.interprete([_llm("conversa", "", "")])
+        resultado = interprete.interpretar("Jarvis, tell chamora to ask me if the tests should run.")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("conversa", "chamora"), resultado.motivo)
+        self.assertEqual(resultado.prompt, "Ask me if the tests should run.")
+        self.assertNotIn("jarvis", resultado.prompt.lower())
+
+    def test_conversa_sem_projeto_fica_a_espera_do_projeto(self) -> None:
+        interprete, _ = self.interprete([_llm("conversa", "", PERGUNTA_DO_CHANGELOG)])
+        resultado = interprete.interpretar(
+            "Tell it to ask me if the change log should mention the new option and wait for my answer."
+        )
+        self.assertEqual(resultado.intencao, "conversa")
+        self.assertIsNone(resultado.projeto)
+        self.assertEqual(resultado.pergunta, "Which project?")
+
+    def test_regra_financeira_antes_do_run_e_da_conversa(self) -> None:
+        for frase in (
+            "Start a run on Shamara to buy 100 euros of bitcoin.",
+            "Asked Jarvis to sell my shares.",
+            "Tell it to buy 100 euros of bitcoin.",
+        ):
+            with self.subTest(frase=frase):
+                interprete, cliente = self.interprete([_llm("conversa", "jarvis", "")])
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(resultado.intencao, interprete_mod.INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [], "recusado antes do LLM")
+
+
+# --- LLM ocupado: modelo carregado, alternativo e "um momento" -------------------------
+
+
+class _RelogioFalso:
+    def __init__(self) -> None:
+        self.agora = 0.0
+
+    def __call__(self) -> float:
+        return self.agora
+
+
+class _OllamaQueDemora(ClienteFalso):
+    """O modelo pedido so responde `demora_s` depois do pedido, no relogio falso.
+
+    `esperar` faz de Event.wait: o pedido falso responde logo de verdade, e o
+    relogio salta para quando a resposta chegaria ou para o fim da espera.
+    """
+
+    def __init__(self, respostas, relogio: _RelogioFalso, demora_s: float, **kwargs) -> None:
+        super().__init__(respostas, **kwargs)
+        self.relogio = relogio
+        self.demora_s = demora_s
+        self.pronto_em = 0.0
+        self.limites: list[float | None] = []
+        self.esperas: list[float] = []
+
+    def conversar(self, modelo, mensagens, esquema, *, limite_s=None):
+        self.limites.append(limite_s)
+        self.pronto_em = self.relogio.agora + self.demora_s
+        if limite_s is not None and self.demora_s > limite_s:
+            self.pedidos.append((modelo, mensagens))
+            raise MotorIndisponivel(f"o LLM nao respondeu em {limite_s:g} s")
+        return super().conversar(modelo, mensagens, esquema, limite_s=limite_s)
+
+    def esperar(self, evento: threading.Event, segundos: float) -> bool:
+        self.esperas.append(segundos)
+        evento.wait(5)
+        fim = self.relogio.agora + segundos
+        if self.pronto_em <= fim:
+            self.relogio.agora = max(self.relogio.agora, self.pronto_em)
+            return True
+        self.relogio.agora = fim
+        return False
+
+
+#: 16 GB de VRAM com o qwen3:14b de outro programa carregado.
+VRAM_OCUPADA = Vram(usada_mib=12500, livre_mib=3800, total_mib=16303)
+VRAM_CHEIA = Vram(usada_mib=15800, livre_mib=500, total_mib=16303)
+VRAM_LIVRE = Vram(usada_mib=1200, livre_mib=15100, total_mib=16303)
+INSTALADOS_OS_DOIS = {"qwen3:8b": 5200 * MIB, "qwen3:4b": 2600 * MIB, "qwen3:14b": 9300 * MIB}
+SO_O_OUTRO = {"qwen3:14b": (10500 * MIB, 10500 * MIB)}
+
+
+def _ocupado(
+    respostas,
+    *,
+    demora_s: float,
+    carregados,
+    vram: Vram | None = VRAM_OCUPADA,
+    avisos: list | None = None,
+) -> tuple[Interprete, _OllamaQueDemora]:
+    relogio = _RelogioFalso()
+    cliente = _OllamaQueDemora(respostas, relogio, demora_s, instalados=INSTALADOS_OS_DOIS, carregados=carregados)
+    interprete = Interprete(
+        _config("en"), cliente=cliente, relogio=relogio, medir=lambda: vram, esperar=cliente.esperar
+    )
+    if avisos is not None:
+        interprete.ao_demorar = lambda: avisos.append((relogio.agora, threading.current_thread()))
+    return interprete, cliente
+
+
+class TestModeloDaFrase(unittest.TestCase):
+    def test_principal_carregado_responde(self) -> None:
+        escolha = interprete_mod.modelo_para_a_frase(
+            "qwen3:8b", "qwen3:4b", INSTALADOS_OS_DOIS, {"qwen3:8b": (5200 * MIB, 5200 * MIB)}, VRAM_OCUPADA
+        )
+        self.assertEqual((escolha.modelo, escolha.pronto), ("qwen3:8b", True))
+
+    def test_principal_despejado_que_cabe_volta_a_carregar(self) -> None:
+        escolha = interprete_mod.modelo_para_a_frase("qwen3:8b", "qwen3:4b", INSTALADOS_OS_DOIS, {}, VRAM_LIVRE)
+        self.assertEqual((escolha.modelo, escolha.pronto), ("qwen3:8b", False))
+
+    def test_principal_despejado_que_nao_cabe_passa_ao_alternativo(self) -> None:
+        escolha = interprete_mod.modelo_para_a_frase(
+            "qwen3:8b", "qwen3:4b", INSTALADOS_OS_DOIS, SO_O_OUTRO, VRAM_OCUPADA
+        )
+        self.assertEqual((escolha.modelo, escolha.pronto), ("qwen3:4b", False))
+        self.assertIn("nao cabe", escolha.motivo)
+        carregado = interprete_mod.modelo_para_a_frase(
+            "qwen3:8b",
+            "qwen3:4b",
+            INSTALADOS_OS_DOIS,
+            {**SO_O_OUTRO, "qwen3:4b": (2600 * MIB, 2600 * MIB)},
+            Vram(usada_mib=15500, livre_mib=800, total_mib=16303),
+        )
+        self.assertEqual((carregado.modelo, carregado.pronto), ("qwen3:4b", True))
+
+    def test_nenhum_cabe_fica_o_principal_por_carregar(self) -> None:
+        escolha = interprete_mod.modelo_para_a_frase(
+            "qwen3:8b", "qwen3:4b", INSTALADOS_OS_DOIS, SO_O_OUTRO, VRAM_CHEIA
+        )
+        self.assertEqual((escolha.modelo, escolha.pronto), ("qwen3:8b", False))
+
+
+class TestLlmOcupado(unittest.TestCase):
+    """Uma frase da aceitacao com o qwen3:8b despejado por outro programa."""
+
+    FRASE = "Start a run on atlas to read the README and list its sections. Don't change anything."
+    RESPOSTA = _llm("lancar_run", "atlas", "Read the README and list its sections. Don't change anything.")
+
+    def test_principal_despejado_e_alternativo_que_cabe_usa_o_alternativo(self) -> None:
+        avisos: list = []
+        interprete, cliente = _ocupado([self.RESPOSTA], demora_s=1.0, carregados=SO_O_OUTRO, avisos=avisos)
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual(cliente.pedidos[0][0], "qwen3:4b")
+        self.assertEqual((resultado.modelo, resultado.intencao), ("qwen3:4b", "lancar_run"))
+        self.assertIn("LLM qwen3:4b (alternativo cabe", resultado.motivo)
+        self.assertIn("principal fora da memoria e nao cabe", resultado.motivo)
+        self.assertEqual(avisos, [], "resposta em 1 s: nada de 'um momento'")
+
+    def test_alternativo_carregado_responde_com_o_limite_normal(self) -> None:
+        avisos: list = []
+        interprete, cliente = _ocupado(
+            [self.RESPOSTA],
+            demora_s=0.4,
+            carregados={**SO_O_OUTRO, "qwen3:4b": (2600 * MIB, 2600 * MIB)},
+            vram=Vram(15500, 800, 16303),
+            avisos=avisos,
+        )
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual((resultado.modelo, cliente.limites), ("qwen3:4b", [LIMITE_DO_INTERPRETE_S]))
+        self.assertIn("LLM qwen3:4b (alternativo carregado", resultado.motivo)
+        self.assertEqual((avisos, cliente.esperas), ([], []))
+
+    def test_principal_carregado_nunca_diz_um_momento(self) -> None:
+        avisos: list = []
+        interprete, cliente = _ocupado(
+            [self.RESPOSTA], demora_s=0.8, carregados={"qwen3:8b": (5200 * MIB, 5200 * MIB)}, avisos=avisos
+        )
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual((resultado.modelo, resultado.intencao), ("qwen3:8b", "lancar_run"))
+        self.assertIn("LLM qwen3:8b (carregado)", resultado.motivo)
+        self.assertEqual(cliente.limites, [LIMITE_DO_INTERPRETE_S])
+        self.assertEqual(avisos, [])
+
+    def test_nada_pronto_diz_um_momento_a_1_5_s_e_aceita_um_carregamento_de_15_s(self) -> None:
+        avisos: list = []
+        interprete, cliente = _ocupado(
+            [self.RESPOSTA], demora_s=15.0, carregados=SO_O_OUTRO, vram=VRAM_CHEIA, avisos=avisos
+        )
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual(len(avisos), 1, "um so aviso")
+        self.assertEqual(avisos[0][0], 1.5)
+        self.assertIs(avisos[0][1], threading.current_thread(), "o aviso sai na thread da frase")
+        self.assertEqual(cliente.limites, [20.0])
+        self.assertEqual(
+            (resultado.intencao, resultado.projeto, resultado.modelo), ("lancar_run", "atlas", "qwen3:8b")
+        )
+        self.assertEqual(resultado.prompt, "Read the README and list its sections. Don't change anything.")
+        self.assertIn("um momento dito; esperou 15.0 s", resultado.motivo)
+        self.assertAlmostEqual(resultado.latencia_s, 15.0)
+
+    def test_resposta_rapida_de_um_modelo_por_carregar_nao_diz_um_momento(self) -> None:
+        avisos: list = []
+        interprete, _ = _ocupado([self.RESPOSTA], demora_s=1.2, carregados={}, vram=VRAM_LIVRE, avisos=avisos)
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual((resultado.intencao, avisos), ("lancar_run", []))
+        self.assertIn("esperou 1.2 s", resultado.motivo)
+        self.assertNotIn("um momento", resultado.motivo)
+
+    def test_mais_de_20_s_acaba_em_nao_percebido_sem_nada_executado(self) -> None:
+        avisos: list = []
+        interprete, cliente = _ocupado(
+            [self.RESPOSTA], demora_s=25.0, carregados=SO_O_OUTRO, vram=VRAM_CHEIA, avisos=avisos
+        )
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual(len(avisos), 1)
+        self.assertEqual((resultado.intencao, resultado.origem), ("desconhecido", "recurso"))
+        self.assertTrue(resultado.so_confirmacao)
+        self.assertIn("nao respondeu em 20 s", resultado.motivo)
+        self.assertIn("LLM qwen3:8b", resultado.motivo)
+        self.assertEqual(cliente.esperas, [1.5, 18.5])
+
+    def test_aviso_que_falha_nao_impede_a_resposta(self) -> None:
+        interprete, _ = _ocupado([self.RESPOSTA], demora_s=6.0, carregados={}, vram=VRAM_LIVRE)
+
+        def falha() -> None:
+            raise RuntimeError("sem voz")
+
+        interprete.ao_demorar = falha
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual(resultado.intencao, "lancar_run")
+        self.assertIn("aviso da demora falhou (RuntimeError)", resultado.motivo)
+
+    def test_erro_do_pedido_chega_a_thread_da_frase(self) -> None:
+        interprete, cliente = _ocupado([], demora_s=3.0, carregados={}, vram=VRAM_LIVRE)
+        cliente.erro = MotorIndisponivel("o LLM nao esta acessivel: ConnectionRefusedError")
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual(resultado.intencao, "desconhecido")
+        self.assertIn("ConnectionRefusedError", resultado.motivo)
+
+    def test_sem_api_ps_fica_o_modelo_do_arranque_com_o_limite_normal(self) -> None:
+        interprete, cliente = _ocupado([self.RESPOSTA], demora_s=0.5, carregados={})
+        cliente.modelos_carregados = mock.Mock(side_effect=MotorIndisponivel("o LLM nao esta acessivel"))
+        resultado = interprete.interpretar(self.FRASE)
+        self.assertEqual((resultado.modelo, cliente.limites), ("qwen3:8b", [LIMITE_DO_INTERPRETE_S]))
+
+    def test_a_correcao_tambem_espera_pelo_carregamento(self) -> None:
+        avisos: list = []
+        anterior = Interpretacao(
+            "Start a run on atlas to run the tests.", "lancar_run", "atlas", "Run the tests.", "llm", "teste"
+        )
+        interprete, cliente = _ocupado(
+            [_llm("lancar_run", "atlas", "Run the docs.")],
+            demora_s=15.0,
+            carregados=SO_O_OUTRO,
+            vram=VRAM_CHEIA,
+            avisos=avisos,
+        )
+        resultado = interprete.corrigir(anterior, "no, change tests to docs", "corrigir")
+        self.assertEqual(len(avisos), 1)
+        self.assertEqual(cliente.limites, [20.0])
+        self.assertEqual((resultado.modelo, resultado.prompt), ("qwen3:8b", "Run the docs."))
+        self.assertIn("esperou 15.0 s", resultado.motivo)
+
+    def test_nenhum_aviso_depois_da_resposta(self) -> None:
+        avisos: list = []
+        interprete, _ = _ocupado([self.RESPOSTA], demora_s=15.0, carregados={}, vram=VRAM_LIVRE, avisos=avisos)
+        interprete.interpretar(self.FRASE)
+        depois = len(avisos)
+        for fio in [fio for fio in threading.enumerate() if fio.name == "jarvis-interprete-carga"]:
+            fio.join(1)
+            self.assertFalse(fio.is_alive())
+        time.sleep(0.05)
+        self.assertEqual(len(avisos), depois, "nada agendado dispara depois da resposta")
+
 
 if __name__ == "__main__":
     unittest.main()
