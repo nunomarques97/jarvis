@@ -38,7 +38,7 @@ the measurement script):
 
 ### Kokoro-82M (ONNX)
 
-**Status: not installed yet.** Install the package into the venv and download
+**Status: installed and verified (English voice `af_heart`, CPU).** To install, add the package into the venv and download
 the two model files into `models/kokoro/`:
 
 ```
@@ -56,8 +56,8 @@ is not Kokoro.
 
 | File | Source URL | sha256 |
 |---|---|---|
-| `models/kokoro/kokoro-v1.0.onnx` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx` | (pending download) |
-| `models/kokoro/voices-v1.0.bin` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin` | (pending download) |
+| `models/kokoro/kokoro-v1.0.onnx` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx` | `7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5` |
+| `models/kokoro/voices-v1.0.bin` | `https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin` | `bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d` |
 
 ## Spoken reply: Piper `pt_PT-tugão-medium`
 
