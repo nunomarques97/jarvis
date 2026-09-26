@@ -55,6 +55,10 @@ Only those whole answers send; anything close but different ("yes but ...", "go 
 
 The first prompt to a project opens that project's Claude Code session in a new window, with the jarvis channel attached; accept Claude Code's notice in that window once and the prompt follows. If the channel cannot be used, the prompt goes to a headless session in the project folder, and the command to resume that session is shown on screen. Nothing is written into your projects or into `~/.claude`: the files jarvis generates stay in `.jarvis/`, ignored by Git.
 
+## General questions
+
+A question that is not about a project or a local command ("what's the temperature in Porto today", "what football games are on today") is answered straight away, without a recap, because it only reads. jarvis says "Let me check." / "Deixa-me ver." and passes the question to a headless Claude Code (`claude -p`) that can only search and read the web: it runs in a neutral folder under the system temp folder, outside jarvis and every project, with no shell, no file editing and no MCP servers. The answer goes through the same spoken-reply filter as project replies; "cala-te", Ctrl+C, "dorme" or a new request drop an answer that has not arrived yet. These questions use your Claude subscription quota. The model, the time limit and your default location are in the optional `[perguntas]` table of `config.toml` (see `config.exemplo.toml`). Asset prices, quotes and trading are refused before anything leaves the PC.
+
 ## Conversation and notices
 
 **Hands-free conversation.** When Claude's reply ends with a question you heard, jarvis listens for 8 seconds without the wake word (the key works too). What you say goes into a quick recap word for word, for example "Responder ao Claude no atlas: sim, corre a suite inteira. Envio?", and is sent only after your "yes". Saying "sai da conversa" / "exit the conversation", or 8 seconds of silence, closes the window without sending anything.
@@ -66,7 +70,7 @@ The first prompt to a project opens that project's Claude Code session in a new 
 1. **Listening**: the push-to-talk key, or openWakeWord followed by voice activity detection (webrtcvad).
 2. **Transcription**: NVIDIA Parakeet TDT 0.6B v3 (ONNX, on the CPU by default), loaded once and kept warm. faster-whisper can be chosen instead with `[ouvido] motor`.
 3. **Understanding**: a local language model in Ollama (`qwen3:8b`, falling back to `qwen3:4b` when GPU memory is short) returns the intent, the project and, for a dictation, a clear rewritten prompt. It never adds requests of its own, and a project is never guessed: it has to be named.
-4. **Confirmation**: the recap above; nothing leaves the PC before your "yes".
+4. **Confirmation**: the recap above; nothing leaves the PC before your "yes", except a general question (below).
 5. **Action**: a local action, or the prompt into the project's Claude Code session.
 6. **Spoken reply**: a resident voice that starts speaking while it is still synthesising (Kokoro for English when its model files are present, Piper `pt_PT-tugão-medium` for European Portuguese). Code, tool calls and file paths in Claude's replies are never read out; the full reply stays in the log.
 

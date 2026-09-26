@@ -57,7 +57,7 @@
 {"id": "en-057", "texto": "no, i don't want you to delete that file", "intencao": "conversa", "projeto": null, "obrigatorios": ["file"], "proibidos": ["commit", "test"], "nota": "reply with negation"}
 {"id": "en-058", "texto": "yes you can go ahead", "intencao": "conversa", "projeto": null, "obrigatorios": ["ahead"], "proibidos": ["commit", "test", "push"], "nota": ""}
 {"id": "en-059", "texto": "answer that the right name is customer not user", "intencao": "conversa", "projeto": null, "obrigatorios": ["customer", "user"], "proibidos": ["commit", "test"], "nota": ""}
-{"id": "en-060", "texto": "do you think i should use sqlite or postgres for this", "intencao": "conversa", "projeto": null, "obrigatorios": ["sqlite", "postgres"], "proibidos": ["commit", "install"], "nota": "general question"}
+{"id": "en-060", "texto": "do you think i should use sqlite or postgres for this", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["sqlite", "postgres"], "proibidos": ["commit", "install"], "nota": "question with no project: general question"}
 {"id": "en-061", "texto": "thanks claude that looks great", "intencao": "conversa", "projeto": null, "obrigatorios": ["thank"], "proibidos": ["commit", "test"], "nota": ""}
 {"id": "en-062", "texto": "what time is it", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
 {"id": "en-063", "texto": "hey jarvis, tell me the time", "intencao": "horas", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "whitelist"}
@@ -97,3 +97,13 @@
 {"id": "en-097", "texto": "place a thousand euros in gold", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
 {"id": "en-098", "texto": "go long on tesla", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
 {"id": "en-099", "texto": "invest a grand in apple shares", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "money placed without a buy verb"}
+{"id": "en-100", "texto": "Uh what uh temperature is in Porto today?", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["temperature", "porto"], "proibidos": ["commit"], "nota": "today alone is not a time request"}
+{"id": "en-101", "texto": "I asked about the temperature, not the time.", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["temperature"], "proibidos": ["commit"], "nota": "negated time"}
+{"id": "en-102", "texto": "Uh tell me the temperature in Porto.", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["temperature", "porto"], "proibidos": ["commit"], "nota": ""}
+{"id": "en-103", "texto": "I'm asking about the the temperature in Porto, not about a project.", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["temperature", "porto"], "proibidos": ["commit"], "nota": "repeated word"}
+{"id": "en-104", "texto": "Uh what football games uh is gonna be uh on today?", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["football"], "proibidos": ["commit"], "nota": "fillers"}
+{"id": "en-105", "texto": "who won the champions league last year", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["champions"], "proibidos": ["commit"], "nota": ""}
+{"id": "en-106", "texto": "what's the capital of australia", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["australia"], "proibidos": ["commit"], "nota": ""}
+{"id": "en-107", "texto": "what time does the benfica game start tonight", "intencao": "pergunta_geral", "projeto": null, "obrigatorios": ["benfica"], "proibidos": ["commit"], "nota": "time of an event, not the clock"}
+{"id": "en-108", "texto": "what is the price of bitcoin today", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "asset price"}
+{"id": "en-109", "texto": "how much are tesla shares worth", "intencao": "recusado", "projeto": null, "obrigatorios": [], "proibidos": [], "nota": "asset price"}

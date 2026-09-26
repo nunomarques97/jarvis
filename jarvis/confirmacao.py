@@ -4,6 +4,8 @@ Recebe a `Interpretacao` de uma frase e decide:
 
   - horas/data, calar, dormir e acordar correm logo: so leem ou silenciam;
   - um pedido financeiro e recusado em voz alta, sem nada a confirmar;
+  - uma pergunta geral ou de atualidade segue logo para quem a responde:
+    so le, nao mexe em nada nem vai a uma sessao de projeto;
   - uma frase que nao se percebeu (ou que o LLM nao interpretou) nao faz
     nada: o jarvis pede para repetir;
   - todas as outras intencoes tem efeito (enviar um prompt, abrir o editor
@@ -56,6 +58,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
 from jarvis.interprete import (
+    INTENCAO_PERGUNTA_GERAL,
     INTENCAO_RECUSADA,
     INTENCOES_COM_EFEITO,
     INTENCOES_COM_PROJETO,
@@ -586,6 +589,10 @@ class Confirmacao:
         if interpretacao.pode_dispensar_confirmacao:
             pedido = Pedido(interpretacao.intencao, None, "", interpretacao.detalhe)
             return self._correr(pedido, None, "sem efeito: dispensa confirmacao")
+        pergunta = limpar_texto(interpretacao.prompt)
+        if interpretacao.intencao == INTENCAO_PERGUNTA_GERAL and pergunta and not interpretacao.so_confirmacao:
+            pedido = Pedido(INTENCAO_PERGUNTA_GERAL, None, pergunta)
+            return self._correr(pedido, None, "pergunta geral: so le, dispensa confirmacao")
         sem_texto = interpretacao.intencao in INTENCOES_COM_PROMPT and not limpar_texto(interpretacao.prompt)
         if interpretacao.so_confirmacao or interpretacao.intencao not in INTENCOES_COM_EFEITO or sem_texto:
             if interpretacao.texto:

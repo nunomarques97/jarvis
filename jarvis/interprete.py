@@ -12,6 +12,8 @@ Recebe a frase ja transcrita e devolve uma `Interpretacao`:
   prompt   - para ditar_prompt, conversa e lancar_run: o que o utilizador
              pediu, reescrito claro, sem pedidos novos nem mudanca de
              intencao. E isto que a confirmacao mostra e le em voz alta.
+             Para pergunta_geral: a pergunta, limpa e sem endereco a um
+             projeto, que segue para uma pesquisa sem tocar em projetos.
 
 Por ordem, cada frase passa por:
 
@@ -29,7 +31,13 @@ Por ordem, cada frase passa por:
      resposta presa a um esquema JSON; a resposta volta a ser validada aqui
      como entrada nao confiavel;
   5. a marca `financeiro` do LLM (verdadeira -> `recusado`) e a mesma regra
-     financeira sobre o prompt reescrito.
+     financeira sobre o prompt reescrito;
+  6. as guardas de comando local: horas, calar, dormir e acordar vindos do
+     LLM so contam quando a frase tem as palavras desse comando; senao a
+     frase e uma pergunta geral (ou `desconhecido`, se nao tem conteudo).
+     Uma conversa sem projeto dito tambem passa a pergunta geral, a nao ser
+     que responda ao Claude ou lhe seja dirigida; uma frase sem conteudo
+     ("sim", "ok", "hum") fica `desconhecido`.
 
 Se o LLM nao responde, demora mais do que o limite (5 s por omissao) ou
 devolve algo fora do esquema, a intencao e `desconhecido` e o texto literal
@@ -84,6 +92,7 @@ INTENCOES: tuple[str, ...] = (
     "calar",
     "dormir",
     "acordar",
+    "pergunta_geral",
     "desconhecido",
 )
 
@@ -106,13 +115,20 @@ INTENCOES_COM_PROJETO = frozenset(
 )
 
 #: Intencoes cujo texto e reescrito como prompt (o que vai ser enviado).
-INTENCOES_COM_PROMPT = frozenset({"ditar_prompt", "conversa", "lancar_run"})
+INTENCOES_COM_PROMPT = frozenset({"ditar_prompt", "conversa", "lancar_run", "pergunta_geral"})
 
 #: Intencoes que so leem ou silenciam, e podem dispensar a confirmacao.
 INTENCOES_SEM_EFEITO = frozenset({"horas", "calar", "dormir", "acordar"})
 
+#: Pergunta de conhecimento geral ou de atualidade, sem projeto: nao mexe em
+#: nada nem vai a uma sessao de projeto, por isso nao tem recap nem correcao.
+#: Tambem nao e uma acao local imediata: e respondida fora deste modulo.
+INTENCAO_PERGUNTA_GERAL = "pergunta_geral"
+
 #: Intencoes com efeito: so correm depois de um "sim" explicito ao recap.
-INTENCOES_COM_EFEITO = frozenset(INTENCOES) - INTENCOES_SEM_EFEITO - {"desconhecido"}
+INTENCOES_COM_EFEITO = (
+    frozenset(INTENCOES) - INTENCOES_SEM_EFEITO - {"desconhecido", INTENCAO_PERGUNTA_GERAL}
+)
 
 #: Como o Sponsor pode mudar um pedido antes de o confirmar.
 TIPOS_DE_CORRECAO = ("corrigir", "acrescentar")
@@ -133,6 +149,20 @@ CONTEXTO_DO_LLM = 4096
 
 #: Quanto tempo o Ollama mantem o modelo carregado depois da ultima frase.
 MANTER_CARREGADO = "30m"
+
+#: Quanto tempo um pedido ao Ollama fica aberto depois de o interprete
+#: desistir dele. Se outro programa usou o Ollama e o modelo saiu da memoria,
+#: a frase seguinte tem de o voltar a carregar; fechar a ligacao ao fim do
+#: limite fazia o Ollama abortar esse carregamento, e cada frase seguinte
+#: recomecava-o e voltava a abortar. Assim o carregamento acaba e a frase
+#: seguinte ja encontra o modelo pronto.
+PRAZO_DO_CARREGAMENTO_S = 120.0
+
+#: Tokens que o modelo pode gerar: a resposta JSON e do tamanho da frase, por
+#: isso o limite cresce com ela, ate ao maximo. Uma saida descontrolada (texto
+#: repetido ou espacos sem fim) acaba cedo e cai no recurso `desconhecido`.
+TOKENS_DA_RESPOSTA_BASE = 64
+TOKENS_DA_RESPOSTA_MAXIMO = 400
 
 Origem = Literal["regra", "llm", "recurso"]
 
@@ -231,6 +261,9 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
     r"|carteira\s+(?:digital|de\s+cripto\w*|de\s+bitcoin|de\s+investimentos?)"
     r"|trading|traders?|day\s+trade"
     r"|dividendos?|cotac(?:ao|oes)|forex|cambio"
+    # o preco ou o valor de acoes ("quanto valem as acoes da galp")
+    r"|(?:quanto\s+(?:valem|vale|custam|custa|estao)|precos?|valor)\s+(?:\w+\s+){0,2}"
+    + _ACOES_FINANCEIRAS +
     r"|adquir(?:e|es|em|ir|o|a|as|am|i|iu|imos|ido|idos|ida|idas|indo|iria)"
     r"(?!\s+(?:(?:o|a|os|as|um|uma)\s+)?" + _OBJETOS_DE_SINCRONIZACAO + r")"
     r"|" + _QUANTIDADE_PT + r"\s+acoes"
@@ -246,6 +279,9 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
     r"|invest|invests|investing|investment|investments|investor|investors"
     r"|acquir(?:e|es|ed|ing)(?!\s+(?:(?:the|a|an)\s+)?" + _OBJETOS_DE_SINCRONIZACAO + r")"
     r"|stocks?|stock\s+market|shares\s+(?:of|in)|my\s+shares"
+    # o preco ou o valor de acoes ("how much are tesla shares worth")
+    r"|share\s+prices?|shares\s+(?:\w+\s+){0,2}(?:worth|prices?|value|trading)"
+    r"|(?:prices?|worth|value)\s+(?:of\s+)?(?:\w+\s+){0,3}shares"
     r"|" + _QUANTIDADE_EN + r"\s+shares"
     r"|trades?(?!\s+offs?\b)|traded"
     r"|dividends?|exchange\s+rate"
@@ -970,7 +1006,9 @@ class ClienteOllama:
     """HTTP minimo para o Ollama local (biblioteca padrao, sem proxy).
 
     Cada pedido tem um prazo total: se a resposta nao chega inteira dentro de
-    `limite_s`, levanta MotorIndisponivel e o pedido e abandonado.
+    `limite_s`, levanta MotorIndisponivel e o pedido e abandonado. A ligacao
+    de uma conversa abandonada fica aberta ate `PRAZO_DO_CARREGAMENTO_S`,
+    para o Ollama acabar de carregar o modelo em vez de abortar.
     """
 
     def __init__(self, url: str, limite_s: float) -> None:
@@ -980,13 +1018,27 @@ class ClienteOllama:
         self._host = partes.hostname or "127.0.0.1"
         self._porta = partes.port or 11434
 
-    def _pedido(self, metodo: str, caminho: str, corpo: dict | None, limite_s: float) -> dict:
+    def _pedido(
+        self,
+        metodo: str,
+        caminho: str,
+        corpo: dict | None,
+        limite_s: float,
+        *,
+        prazo_da_ligacao_s: float | None = None,
+    ) -> dict:
+        """O JSON da resposta, se chega dentro de `limite_s`.
+
+        A ligacao so e fechada ao fim de `prazo_da_ligacao_s` (por omissao o
+        proprio limite), mesmo que o chamador ja tenha desistido.
+        """
         import http.client
 
         resultado: dict[str, Any] = {}
+        prazo_s = max(limite_s, prazo_da_ligacao_s or limite_s)
 
         def fazer() -> None:
-            conexao = http.client.HTTPConnection(self._host, self._porta, timeout=limite_s)
+            conexao = http.client.HTTPConnection(self._host, self._porta, timeout=prazo_s)
             try:
                 dados = None if corpo is None else json.dumps(corpo).encode("utf-8")
                 cabecalhos = {"Content-Type": "application/json"} if dados is not None else {}
@@ -1006,7 +1058,10 @@ class ClienteOllama:
         fio.start()
         fio.join(limite_s)
         if fio.is_alive() or resultado.get("lento"):
-            raise MotorIndisponivel(f"o LLM nao respondeu em {limite_s:g} s")
+            raise MotorIndisponivel(
+                f"o LLM nao respondeu em {limite_s:g} s"
+                + (" (o pedido fica aberto para o modelo acabar de carregar)" if prazo_s > limite_s else "")
+            )
         if "erro" in resultado:
             erro = resultado["erro"]
             raise MotorIndisponivel(f"o LLM nao esta acessivel: {type(erro).__name__}: {erro}")
@@ -1032,17 +1087,29 @@ class ClienteOllama:
         limite_s: float | None = None,
     ) -> str:
         """O conteudo da resposta do modelo (texto), sem pensamento."""
+        opcoes = {
+            "temperature": 0,
+            "seed": 0,
+            "num_ctx": CONTEXTO_DO_LLM,
+            "num_predict": tokens_da_resposta(mensagens),
+        }
         corpo: dict[str, Any] = {
             "model": modelo,
             "messages": mensagens,
             "stream": False,
             "think": False,
             "keep_alive": MANTER_CARREGADO,
-            "options": {"temperature": 0, "seed": 0, "num_ctx": CONTEXTO_DO_LLM, "num_predict": 400},
+            "options": opcoes,
         }
         if esquema is not None:
             corpo["format"] = esquema
-        dados = self._pedido("POST", "/api/chat", corpo, limite_s or self.limite_s)
+        dados = self._pedido(
+            "POST",
+            "/api/chat",
+            corpo,
+            limite_s or self.limite_s,
+            prazo_da_ligacao_s=PRAZO_DO_CARREGAMENTO_S,
+        )
         mensagem = dados.get("message")
         if not isinstance(mensagem, dict) or not isinstance(mensagem.get("content"), str):
             raise MotorIndisponivel("a resposta do LLM nao traz message.content")
@@ -1064,6 +1131,17 @@ class ClienteOllama:
         """Pede ao Ollama para tirar o modelo da memoria (keep_alive 0)."""
         corpo = {"model": modelo, "messages": [], "keep_alive": 0, "stream": False}
         self._pedido("POST", "/api/chat", corpo, limite_s or self.limite_s)
+
+
+def tokens_da_resposta(mensagens: list[dict[str, str]]) -> int:
+    """Quantos tokens o modelo pode gerar para responder a ultima mensagem.
+
+    A resposta repete no maximo o texto do utilizador (o prompt reescrito)
+    mais os campos do JSON; um token tem pelo menos dois caracteres.
+    """
+    ultima = mensagens[-1].get("content", "") if mensagens else ""
+    tamanho = len(ultima) if isinstance(ultima, str) else 0
+    return min(TOKENS_DA_RESPOSTA_MAXIMO, TOKENS_DA_RESPOSTA_BASE + tamanho // 2)
 
 
 def _tamanhos(dados: dict, chave: str) -> dict[str, int]:
@@ -1202,19 +1280,20 @@ Return JSON with:
   lancar_run = start a new run or session in a project, usually with a goal;
   retomar_run = resume or continue a run;
   parar_run = stop, interrupt or cancel a running run (in Portuguese "para o run", "pára", "interrompe");
-  conversa = a reply to a question Claude asked (including short answers such as "yes", "no", "go ahead", "sim, podes avançar"), or a general chat message that is not a request for project work;
-  horas = asks the time or the date;
+  conversa = a reply or message to Claude inside a project conversation (including short answers such as "yes", "no", "go ahead", "sim, podes avançar", or "tell it I prefer the simpler version");
+  horas = asks the current time or today's date, and nothing else (the words time, clock, date, day, horas, hora, data or dia are said);
   abrir_editor = open VS Code or the editor in a project;
   abrir_pasta = open the folder of a project;
   calar = stop talking / be quiet;
   dormir = go to sleep / standby;
   acordar = wake up;
+  pergunta_geral = a general knowledge or current-affairs question that is not about any project and is not a local command: weather, temperature, sports, games, news, facts, people, places, definitions (for example "what's the temperature in Porto today", "what football games are on today", "quem ganhou o jogo ontem"). A question that only mentions "today" is pergunta_geral, not horas;
   desconhecido = unintelligible, empty, meaningless fragments (for example a garbled wake word), or none of the above.
 - "projeto": one name from this list, only if the user said it (possibly misspelled by speech recognition): {projetos}. Use "" when no listed project was named, or when several were named as alternatives or together ("in X or Y", "in X and Y") so the target is unclear. Never pick a project the user did not say.
-- "prompt": only for ditar_prompt, conversa and lancar_run: the user's request rewritten as one clear instruction to Claude Code, in the SAME language the user spoke, in the imperative, starting with a capital letter and ending with punctuation. Drop fillers, repetitions, the name "jarvis", phrases that only address it ("tell claude", "diz ao claude") and the address to the project ("tell X to", "ask X to", "in X", "for project X", "diz ao X para", "no X"), even when the project name is misheard: the project is sent separately. Fix a speech-recognition error only when the programming context makes the intended words unambiguous; otherwise keep the words as heard. Keep every request, detail, name, number and constraint the user gave. Never add requests, steps, tests, commits, files or explanations the user did not say, and never answer the request. For every other intent use "".
+- "prompt": only for ditar_prompt, conversa and lancar_run: the user's request rewritten as one clear instruction to Claude Code, in the SAME language the user spoke, in the imperative, starting with a capital letter and ending with punctuation. Drop fillers, repetitions, the name "jarvis", phrases that only address it ("tell claude", "diz ao claude") and the address to the project ("tell X to", "ask X to", "in X", "for project X", "diz ao X para", "no X"), even when the project name is misheard: the project is sent separately. Fix a speech-recognition error only when the programming context makes the intended words unambiguous; otherwise keep the words as heard. Keep every request, detail, name, number and constraint the user gave. Never add requests, steps, tests, commits, files or explanations the user did not say, and never answer the request. For pergunta_geral: the user's question rewritten as one clear question in the SAME language, without fillers or repeated words, never answered. For every other intent use "".
 - "financeiro": true when the user asks for anything with money or financial markets: buying, selling or trading shares, stocks, funds, ETFs, bonds, gold, crypto or any company; putting, placing, investing or betting an amount of money; paying, sending or transferring money; opening a position (long, short) or an order; asking for prices or quotes of assets. false for software work, even when the code or the project name is about finance (for example fixing a chart in a project called "bolsa-radar").
 
-The example turns before the transcript show how to write "prompt"; their project names are only examples, and "projeto" must still come from the list above.
+The example turns before the transcript show how to write "prompt"; their project names are only examples, and "projeto" must still come from the list above. Answer with the JSON object only.
 """
 
 
@@ -1301,11 +1380,28 @@ _EXEMPLOS_DE_PROMPT: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+#: Uma pergunta geral por lingua, com hesitacoes e uma palavra repetida, que
+#: vai antes dos ditados: mostra que a pergunta so e limpa, nunca respondida.
+_EXEMPLOS_DE_PERGUNTA: dict[str, tuple[str, str]] = {
+    "en": ("uh what's the uh weather gonna be in lisbon tomorrow", "What's the weather going to be in Lisbon tomorrow?"),
+    "pt": ("hum quem é que ganhou o o jogo do benfica ontem", "Quem é que ganhou o jogo do Benfica ontem?"),
+}
+
+
+def _exemplos_da_lingua(lingua: str) -> list[tuple[str, str, str]]:
+    """(frase, prompt, intencao) de cada exemplo da lingua, pela ordem enviada."""
+    lingua = lingua if lingua in _EXEMPLOS_DE_PROMPT else "en"
+    return [
+        (*_EXEMPLOS_DE_PERGUNTA[lingua], INTENCAO_PERGUNTA_GERAL),
+        *((frase, prompt, "ditar_prompt") for frase, prompt in _EXEMPLOS_DE_PROMPT[lingua]),
+    ]
+
+
 def _turnos_de_exemplo(lingua: str) -> list[dict]:
     """Os exemplos da lingua como pares utilizador/assistente, na resposta JSON do esquema."""
     turnos: list[dict] = []
-    for frase, prompt in _EXEMPLOS_DE_PROMPT.get(lingua, _EXEMPLOS_DE_PROMPT["en"]):
-        resposta = {"intencao": "ditar_prompt", "projeto": "", "prompt": prompt, "financeiro": False}
+    for frase, prompt, intencao in _exemplos_da_lingua(lingua):
+        resposta = {"intencao": intencao, "projeto": "", "prompt": prompt, "financeiro": False}
         turnos.append({"role": "user", "content": frase})
         turnos.append({"role": "assistant", "content": json.dumps(resposta, ensure_ascii=False)})
     return turnos
@@ -1426,6 +1522,127 @@ def pergunta_de_projeto(candidatos: tuple[str, ...], lingua: str) -> str:
 
 
 _PADRAO_DATA = re.compile(r"\b(data|dia|date|day|mes|month)\b")
+
+
+# --- Guardas dos comandos locais e das perguntas gerais --------------------------
+
+#: As palavras de cada comando local imediato, depois de `_normalizar`. Vindo
+#: do LLM, o comando so conta quando a frase tem as palavras dele: uma
+#: pergunta sobre a temperatura "de hoje" nunca e respondida com as horas.
+#: "hoje"/"today" sozinhos nao sao palavras de data.
+_PALAVRAS_DO_COMANDO: dict[str, re.Pattern] = {
+    "horas": re.compile(r"\b(?:horas?|que\s+dia|data|relogio|time|clock|date|what\s+day)\b"),
+    "calar": re.compile(
+        r"\b(?:cala|calar|calate|te\s+calas|silencio|chiu|quieto|chega|para\s+de\s+falar"
+        r"|quiet|shut|silence|hush|enough|stop\s+talking)\b"
+    ),
+    "dormir": re.compile(
+        r"\b(?:dorme|dormir|descansa|descansar|pausa|repouso"
+        r"|sleep|standby|stand\s+by|break|rest|pause)\b"
+    ),
+    "acordar": re.compile(r"\b(?:acorda|acordar|desperta|despertar|wake|awake)\b"),
+}
+
+#: "not the time", "nao as horas": a frase diz que NAO quer as horas.
+_HORAS_NEGADAS = re.compile(
+    r"\b(?:not|nao)\s+(?:about\s+|sobre\s+)?(?:the\s+|as\s+|a\s+)?(?:time|date|horas?|data)\b"
+)
+
+#: As palavras que um pedido de horas ou data pode ter alem das proprias
+#: palavras de horas. Outra palavra ("what time does the game start") faz da
+#: frase uma pergunta sobre outra coisa, e a resposta nao sao as horas.
+_PALAVRAS_DE_PEDIR_HORAS = frozenset(
+    {
+        # ingles
+        "what", "whats", "s", "is", "it", "its", "the", "a", "time", "clock", "date", "day", "today",
+        "todays", "now", "right", "current", "currently", "exact", "exactly", "tell", "me", "please",
+        "could", "can", "would", "you", "do", "know", "give", "say", "of", "oclock", "o", "at", "this",
+        "moment", "so", "and", "i", "need", "want", "to", "check", "hey", "jarvis", "okay", "ok",
+        "uh", "um", "uhm", "er", "ah", "hmm",
+        # portugues
+        "que", "horas", "hora", "sao", "e", "as", "os", "dia", "data", "hoje", "agora", "diz", "diga",
+        "sabes", "sabe", "dizer", "olha", "qual", "em", "estamos", "do", "da", "de", "mes", "ano",
+        "semana", "relogio", "certas", "certa", "certo", "exata", "exatas", "atual", "por", "favor",
+        "tens", "tem", "temos", "serao", "pode", "podes", "boas", "ja", "entao", "la", "hum", "eh",
+        # um projeto dito junto ao pedido de horas nao muda o pedido
+        "projeto", "no", "na", "in", "on", "for",
+    }
+)
+
+#: Hesitacoes e respostas soltas, sem conteudo para perguntar a ninguem.
+_PALAVRAS_SEM_CONTEUDO = frozenset(
+    {
+        "uh", "um", "uhm", "er", "erm", "ah", "eh", "hmm", "hum", "oh", "hey", "jarvis", "boas",
+        "yes", "yeah", "yep", "yup", "no", "nope", "nah", "ok", "okay", "sure", "fine", "right",
+        "alright", "correct", "thanks", "thank", "you", "please", "well", "so", "and",
+        "sim", "nao", "claro", "certo", "isso", "pois", "obrigado", "obrigada", "boa", "olha",
+        "entao", "e", "depois", "exato", "ta", "esta", "bem",
+    }
+)
+
+#: Hesitacoes antes da primeira palavra que conta.
+_HESITACOES = frozenset({"uh", "um", "uhm", "er", "erm", "ah", "eh", "hmm", "hum", "oh", "olha", "well", "so"})
+
+#: Primeiras palavras de uma resposta a uma pergunta do Claude.
+_INICIO_DE_RESPOSTA = frozenset(
+    {"yes", "yeah", "yep", "no", "nope", "ok", "okay", "sure", "sim", "nao", "claro", "certo"}
+)
+
+#: Uma mensagem dirigida ao Claude ("tell it...", "answer that...",
+#: "diz-lhe que...", "responde ao claude..."): e conversa com uma sessao de
+#: projeto, nunca uma pergunta para pesquisar.
+_DIRIGIDA_AO_CLAUDE = re.compile(
+    r"\bclaude\b"
+    r"|^(?:tell|ask|answer|reply|respond|say)\s+(?:to\s+)?(?:it|him|her|them|that)\b"
+    r"|^(?:diz|diga|responde|responda|pergunta|pergunte)\s+(?:lhe|que)\b"
+)
+
+#: Hesitacoes que saem do texto literal de uma pergunta, por lingua. "um" e
+#: um artigo em portugues, por isso so sai em ingles.
+_HESITACOES_NO_TEXTO = {
+    "en": re.compile(r"\b(?:uh+|um+|uhm+|erm?|ah+|hmm+)\b[,.]?\s*", re.IGNORECASE),
+    "pt": re.compile(r"\b(?:hum+|uh+|eh+|ah+|hmm+)\b[,.]?\s*", re.IGNORECASE),
+}
+_PALAVRA_REPETIDA = re.compile(r"\b(\w+)(?:\s+\1\b)+", re.IGNORECASE)
+
+
+def sem_conteudo(frase: str) -> bool:
+    """A frase so tem hesitacoes ou respostas soltas ("sim", "ok", "uh")."""
+    return all(palavra in _PALAVRAS_SEM_CONTEUDO for palavra in _normalizar(frase).split())
+
+
+def comando_local_dito(intencao: str, frase: str, nomes: tuple[str, ...] | list[str] = ()) -> bool:
+    """A frase tem as palavras do comando local imediato que o LLM escolheu.
+
+    Para as horas, a frase tambem nao pode negar as horas nem falar de outra
+    coisa alem de pedir as horas ou a data (um nome de projeto nao conta).
+    """
+    padrao = _PALAVRAS_DO_COMANDO.get(intencao)
+    normalizada = _sem_nomes_de_projeto(frase, nomes)
+    if padrao is None or not padrao.search(normalizada):
+        return False
+    if intencao != "horas":
+        return True
+    if _HORAS_NEGADAS.search(normalizada):
+        return False
+    return all(palavra in _PALAVRAS_DE_PEDIR_HORAS for palavra in normalizada.split())
+
+
+def resposta_ao_claude(frase: str) -> bool:
+    """A frase responde a uma pergunta do Claude ou e dirigida a ele."""
+    palavras = _normalizar(frase).split()
+    while palavras and palavras[0] in _HESITACOES:
+        palavras = palavras[1:]
+    if not palavras:
+        return False
+    return palavras[0] in _INICIO_DE_RESPOSTA or bool(_DIRIGIDA_AO_CLAUDE.search(" ".join(palavras)))
+
+
+def pergunta_literal(frase: str, lingua: str) -> str:
+    """A pergunta como foi dita, sem hesitacoes nem palavras repetidas."""
+    hesitacoes = _HESITACOES_NO_TEXTO.get(lingua, _HESITACOES_NO_TEXTO["en"])
+    limpa = limpar_texto(_PALAVRA_REPETIDA.sub(r"\1", hesitacoes.sub("", frase)))
+    return limpa if _PALAVRA_ORIGINAL.search(limpa) else frase
 
 
 # --- Interprete ---------------------------------------------------------------
@@ -1661,6 +1878,7 @@ class Interprete:
         motivos = [f"LLM {self.modelo}"]
         ditos = projetos_mencionados(frase, self._nomes)
         em_alternativa = projetos_em_alternativa(frase, self._nomes)
+        intencao, prompt = self._guardar_intencao(frase, intencao, prompt, ditos, motivos)
         if projeto_llm is not None and projeto_llm not in ditos:
             motivos.append(f"projeto '{projeto_llm}' do LLM nao foi dito: ignorado")
             projeto_llm = None
@@ -1684,7 +1902,7 @@ class Interprete:
 
         if intencao in INTENCOES_COM_PROMPT:
             if not prompt:
-                prompt = frase
+                prompt = pergunta_literal(frase, self.lingua) if intencao == INTENCAO_PERGUNTA_GERAL else frase
                 motivos.append("prompt vazio: fica o texto literal")
             elif len(prompt.split()) > len(frase.split()) * FATOR_DE_PALAVRAS + FOLGA_DE_PALAVRAS:
                 prompt = frase
@@ -1723,6 +1941,40 @@ class Interprete:
             so_confirmacao=intencao == "desconhecido",
             modelo=self.modelo,
         )
+
+    def _guardar_intencao(
+        self, frase: str, intencao: str, prompt: str, ditos: tuple[str, ...], motivos: list[str]
+    ) -> tuple[str, str]:
+        """Nunca responde a coisa errada: a intencao do LLM so fica se a frase a suporta.
+
+        Um comando local imediato sem as palavras dele passa a pergunta geral;
+        uma conversa sem projeto dito tambem, a nao ser que responda ao Claude
+        ou lhe seja dirigida (essa continua a pedir o projeto). Uma pergunta
+        geral que diz um projeto e um pedido a esse projeto. Sem conteudo
+        nenhum ("sim", "ok", "hum"), a frase fica `desconhecido`.
+        """
+        if intencao in _PALAVRAS_DO_COMANDO and not comando_local_dito(intencao, frase, self._nomes):
+            if sem_conteudo(frase):
+                motivos.append(f"{intencao} do LLM sem as palavras do comando e sem conteudo")
+                return "desconhecido", ""
+            motivos.append(f"{intencao} do LLM sem as palavras do comando: pergunta geral")
+            return INTENCAO_PERGUNTA_GERAL, pergunta_literal(frase, self.lingua)
+        if intencao == "conversa" and not ditos:
+            if sem_conteudo(frase):
+                motivos.append("conversa sem projeto e sem conteudo")
+                return "desconhecido", ""
+            if resposta_ao_claude(frase):
+                return intencao, prompt
+            motivos.append("conversa sem projeto dito: pergunta geral")
+            return INTENCAO_PERGUNTA_GERAL, prompt
+        if intencao == INTENCAO_PERGUNTA_GERAL:
+            if sem_conteudo(frase):
+                motivos.append("pergunta geral sem conteudo")
+                return "desconhecido", ""
+            if ditos:
+                motivos.append("pergunta que diz um projeto: pedido a esse projeto")
+                return "ditar_prompt", prompt
+        return intencao, prompt
 
     # -- correcao antes da confirmacao --
 

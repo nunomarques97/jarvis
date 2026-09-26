@@ -199,7 +199,9 @@ class TestPoliticaDeConfirmacao(Base):
         exigidas = {"ditar_prompt", "abrir_editor", "abrir_pasta", "lancar_run", "retomar_run", "parar_run", "conversa"}
         self.assertTrue(exigidas <= INTENCOES_COM_EFEITO)
         self.assertEqual(INTENCOES_SEM_EFEITO, {"horas", "calar", "dormir", "acordar"})
-        self.assertEqual(INTENCOES_COM_EFEITO | INTENCOES_SEM_EFEITO | {"desconhecido"}, set(INTENCOES))
+        self.assertEqual(
+            INTENCOES_COM_EFEITO | INTENCOES_SEM_EFEITO | {"desconhecido", "pergunta_geral"}, set(INTENCOES)
+        )
 
     def test_cem_por_cento_das_intencoes_com_efeito_esperam_pelo_sim(self) -> None:
         for lingua in ("pt", "en"):

@@ -20,6 +20,13 @@ O CAMINHO VIVO de cada frase:
               de um "sim"; "nao, muda X para Y", "acrescenta ..." e
               "cancela" corrigem ou cancelam. Horas/data, calar, dormir e
               acordar correm logo.
+  perguntas   uma pergunta geral ou de atualidade (tempo, desporto,
+              noticias, factos) que nao e sobre um projeto corre logo, sem
+              recap: o jarvis diz "Let me check." e passa-a ao Claude Code
+              headless numa pasta neutra, so com pesquisa na web
+              (`jarvis.pergunta_geral`); a resposta passa pelo filtro da
+              resposta falada. "cala-te", Ctrl+C, "dorme" ou um pedido novo
+              descartam a resposta que ainda nao chegou.
   executor    as accoes locais (`jarvis.acoes_locais`), o estado e os runs
               FORJA do projeto (`jarvis.forja_voz`) ou o canal para a
               sessao do Claude Code do projeto (`jarvis.sessoes`): o prompt
@@ -56,7 +63,10 @@ Silencio: Ctrl+C, fechar a janela e "cala-te" passam todos por
 `jarvis.voz.calar_agora`. "cala-te" dito por cima da voz cala-a logo que a
 frase e transcrita, sem esperar pela vez dela.
 
-Nada disto envia texto para fora do PC antes do "sim": o interprete corre no
+Nada disto envia texto para fora do PC antes do "sim", com uma excecao: as
+perguntas gerais saem do PC sem "sim" (so leem, nao fazem nada) para o
+Claude Code com pesquisa na web, e gastam quota da subscricao Claude. Pedidos
+de dinheiro ou de bolsa sao recusados antes de sair. O interprete corre no
 Ollama local e o canal so recebe o prompt que o utilizador confirmou.
 
 Uso:
@@ -94,7 +104,7 @@ from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigError, carregar_c
 from jarvis.confirmacao import Confirmacao, Desfecho, Pedido
 from jarvis.consola import forcar_consola_utf8
 from jarvis.forja_voz import INTENCOES_POR_VOZ, ForjaPorVoz
-from jarvis.interprete import Interpretacao, Interprete, medir_vram
+from jarvis.interprete import INTENCAO_PERGUNTA_GERAL, Interpretacao, Interprete, medir_vram
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
@@ -114,6 +124,7 @@ from jarvis.ouvido import (
     palavra_de_ativacao,
     pcm_do_wav,
 )
+from jarvis.pergunta_geral import Consulta, PerguntasGerais
 from jarvis.resposta_falada import (
     FRASE_RECURSO_SEM_CORTE_SEGURO,
     MAXIMO_ABSOLUTO_FALADO,
@@ -183,6 +194,10 @@ _TEXTOS = {
         "sem_canal": "O canal para o Claude Code não está disponível. Não enviei nada.",
         "sem_resposta": "Não recebi resposta do {projeto}. Os detalhes estão no ecrã.",
         "conversa_fim": "Saí da conversa.",
+        "a_verificar": "Deixa-me ver.",
+        "pergunta_falhou": "Não consegui obter resposta a isso.",
+        "pergunta_recusada": "Isso não faço por voz: pedidos de dinheiro ou de bolsa ficam de fora.",
+        "sem_perguntas": "As perguntas gerais não estão disponíveis.",
     },
     "en": {
         "calado": "I'll be quiet.",
@@ -195,6 +210,10 @@ _TEXTOS = {
         "sem_canal": "The Claude Code channel is not available. Nothing was sent.",
         "sem_resposta": "I got no answer from {projeto}. The details are on screen.",
         "conversa_fim": "Left the conversation.",
+        "a_verificar": "Let me check.",
+        "pergunta_falhou": "I couldn't get an answer to that.",
+        "pergunta_recusada": "I don't do that by voice: money and trading requests are off limits.",
+        "sem_perguntas": "General questions are not available.",
     },
 }
 
@@ -642,6 +661,7 @@ class Jarvis:
         interprete: Interprete,
         canal: CanalParaSessoes | None = None,
         forja: ForjaPorVoz | None = None,
+        perguntas: PerguntasGerais | None = None,
         falar: Callable[[str], voz.ResultadoFala] = _falar_com_som,
         calar: Callable[..., voz.ResultadoSilencio] = voz.calar_agora,
         executar_local: Callable[..., acoes_locais.ResultadoAcao] = acoes_locais.executar_pedido,
@@ -657,6 +677,7 @@ class Jarvis:
         self.interprete = interprete
         self.canal = canal
         self.forja = forja
+        self.perguntas = perguntas
         self.lingua ="en" if config.ouvido.lingua == "en" else "pt"
         self._falar = falar
         self._calar = calar
@@ -700,6 +721,11 @@ class Jarvis:
         #: O ouvido tem (ou teve ha pouco) uma escuta sem palavra de ativacao
         #: aberta para a resposta ao recap pendente.
         self._a_ouvir_o_recap = False
+        #: A pergunta geral em curso e a thread que espera pela resposta. So a
+        #: consulta mais recente pode ser dita.
+        self._tranca_da_pergunta = threading.Lock()
+        self._consulta: Consulta | None = None
+        self._fio_da_pergunta: threading.Thread | None = None
 
     # -- textos
 
@@ -721,6 +747,7 @@ class Jarvis:
         self.painel.mudar(self._estado_de_repouso())
 
     def fechar(self) -> None:
+        self._cancelar_pergunta("o jarvis vai fechar")
         if self.vigia is not None:
             self.vigia.parar()
         self.avisos.parar()
@@ -873,6 +900,8 @@ class Jarvis:
             desfecho = self.confirmacao.correcao_sem_pedido()
         else:
             self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
+            # Um pedido novo: a resposta de uma pergunta anterior ja nao se diz.
+            self._cancelar_pergunta("pedido novo")
             if self.confirmacao.a_espera and rapida == "dormir":
                 self.confirmacao.cancelar("o jarvis foi dormir")
             interpretacao = self.interprete.interpretar(frase.texto)
@@ -1097,6 +1126,7 @@ class Jarvis:
             self._dizer(self._texto("calado"))
             return "calado"
         if intencao == "dormir":
+            self._cancelar_pergunta("a dormir")
             self.avisos.descartar("a dormir")
             self._fechar_conversa("a dormir")
             self.estado.adormecido = True
@@ -1126,6 +1156,8 @@ class Jarvis:
                 self.log.linha(f"ecra | {linha}")
             self._dizer(resposta.falado)
             return resposta
+        if intencao == INTENCAO_PERGUNTA_GERAL:
+            return self._perguntar(pedido.prompt)
         if intencao in INTENCOES_DO_CANAL and pedido.projeto:
             if self.canal is None:
                 self.log.linha("canal | indisponivel: o prompt confirmado NAO foi enviado")
@@ -1177,6 +1209,90 @@ class Jarvis:
                 self._atualizar_escuta_do_recap()
             self.painel.mudar(self._estado_de_repouso())
 
+    # -- perguntas gerais (Claude Code com pesquisa na web)
+
+    def _perguntar(self, pergunta: str) -> Consulta | None:
+        """Diz que vai ver e pergunta em segundo plano; a resposta chega por `_consultar`."""
+        if self.perguntas is None:
+            self.log.linha("pergunta | indisponivel: a pergunta NAO foi feita")
+            self._dizer(self._texto("sem_perguntas"))
+            return None
+        termo = self.perguntas.recusar(pergunta)
+        if termo is not None:
+            self.log.linha(f"pergunta | recusada (pedido financeiro, '{termo}'): nada saiu do PC")
+            self._dizer(self._texto("pergunta_recusada"))
+            return None
+        consulta = self.perguntas.nova(pergunta)
+        fio = threading.Thread(target=self._consultar, args=(consulta,), name="jarvis-pergunta", daemon=True)
+        with self._tranca_da_pergunta:
+            anterior, self._consulta = self._consulta, consulta
+            self._fio_da_pergunta = fio
+        if anterior is not None and anterior.cancelar():
+            self.log.linha("pergunta | a anterior foi substituida por uma nova; a resposta dela nao se diz")
+        self.log.linha(
+            f"pergunta | ao Claude Code ({self.perguntas.config.modelo}, so pesquisa na web, "
+            f"limite {self.perguntas.config.limite_s:g} s): {consulta.pergunta!r}"
+        )
+        fio.start()
+        self._dizer(self._texto("a_verificar"))
+        return consulta
+
+    def _consultar(self, consulta: Consulta) -> None:
+        """Thread da pergunta: espera pela resposta e di-la se ainda for a mais recente."""
+        try:
+            resultado = consulta.correr()
+        except Exception as erro:  # noqa: BLE001 - uma pergunta falhada nunca para o jarvis
+            self.log.linha(f"pergunta | ERRO: {erro!r}")
+            resultado = None
+        estado = resultado.estado if resultado is not None else "falhou"
+        motivo = resultado.motivo if resultado is not None else "erro"
+        duracao = resultado.duracao_s if resultado is not None else 0.0
+        # A resposta inteira fica so no log (pasta ignorada); a voz so diz o
+        # que passa o filtro da resposta falada.
+        self.log.linha(
+            f"pergunta | {estado} em {duracao:.1f} s ({motivo})"
+            + (f": {resultado.texto!r}" if resultado is not None and resultado.respondida else "")
+        )
+        if estado == "cancelada":
+            return
+        if estado == "respondida":
+            falar = resumo_falado(resultado.texto)
+        elif estado == "recusada":
+            falar = self._texto("pergunta_recusada")
+        else:
+            falar = self._texto("pergunta_falhou")
+        with self._tranca:
+            with self._tranca_da_pergunta:
+                vigente = self._consulta is consulta and not consulta.cancelada
+                if vigente:
+                    self._consulta = None
+            if not vigente:
+                self.log.linha("pergunta | resposta descartada: ja houve silencio ou um pedido novo")
+                return
+            if self.estado.adormecido:
+                return
+            self._local.registo = None
+            self._local.medida = None
+            self._dizer(falar)
+            self._atualizar_escuta_do_recap()
+            self.painel.mudar(self._estado_de_repouso())
+
+    def _cancelar_pergunta(self, motivo: str) -> None:
+        """A pergunta em curso deixa de ser dita e o processo dela e morto."""
+        with self._tranca_da_pergunta:
+            consulta, self._consulta = self._consulta, None
+        if consulta is not None and consulta.cancelar():
+            self.log.linha(f"pergunta | cancelada ({motivo}); a resposta nao se diz")
+
+    def esperar_pergunta(self, limite_s: float) -> bool:
+        """Espera que a thread da ultima pergunta acabe (para os testes e o modo ficheiro)."""
+        with self._tranca_da_pergunta:
+            fio = self._fio_da_pergunta
+        if fio is None:
+            return True
+        fio.join(limite_s)
+        return not fio.is_alive()
+
     # -- prazo da confirmacao e silencio
 
     def verificar_tempo(self) -> None:
@@ -1209,6 +1325,7 @@ class Jarvis:
         self, motivo: str, *, definitivo: bool, ja_calado: bool = False
     ) -> voz.ResultadoSilencio:
         """Cala a voz JA pelo mecanismo unico de `jarvis.voz` e regista as duas linhas."""
+        self._cancelar_pergunta(motivo)
         return self._calar(motivo, definitivo=definitivo, registar=None if ja_calado else self.log.linha)
 
 
@@ -1431,6 +1548,7 @@ def correr(
             jarvis.verificar_tempo()
         # Fonte acabada (modo ficheiro): as frases ja entregues ainda acabam.
         jarvis.esperar_ocioso(ESPERA_ENTRE_FICHEIROS_S)
+        jarvis.esperar_pergunta(ESPERA_ENTRE_FICHEIROS_S)
     except KeyboardInterrupt:
         log.bruto("")
         # Calar primeiro; so depois desligar o microfone.
@@ -1509,11 +1627,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     interprete = Interprete(config)
     forja = ForjaPorVoz(config)
+    perguntas = PerguntasGerais(
+        config.perguntas,
+        lingua,
+        pastas_proibidas=[RAIZ, *(projeto.caminho for projeto in config.projetos)],
+        nomes_de_projeto=[projeto.nome for projeto in config.projetos],
+    )
     jarvis = Jarvis(
         config,
         log,
         interprete=interprete,
         forja=forja,
+        perguntas=perguntas,
         com_voz=com_voz,
         painel=Painel(log.linha, titulo=not modo_ficheiro),
     )

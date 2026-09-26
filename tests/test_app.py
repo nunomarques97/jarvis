@@ -12,6 +12,9 @@ falso) e sem som (a voz e uma funcao que so regista o texto). O que protegem:
   * "cala-te" dito por cima da voz cala logo, dormir ignora frases, o canal
     em baixo nunca envia nada;
   * a resposta do Claude passa pelo filtro da voz e fica inteira so no log;
+  * as perguntas gerais vao ao Claude Code (processo falso) sem recap, sem
+    sessao de projeto e sem horas por engano; cala-te, Ctrl+C, dormir e um
+    pedido novo descartam a resposta pendente;
   * o arranque em paralelo e o canal real com pecas falsas;
   * o RealtimeSTT ja nao e importado pelo caminho vivo.
 
@@ -33,7 +36,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from jarvis import acoes_locais, app, voz
+from jarvis import acoes_locais, app, pergunta_geral, voz
 from jarvis.acoes_locais import AcaoError, ResultadoAcao
 from jarvis.app import (
     A_DORMIR,
@@ -63,6 +66,7 @@ from jarvis.resposta_falada import FRASE_RECURSO_SO_TECNICO, PREFIXO_DA_RESPOSTA
 from jarvis.sessoes import Entrega
 from jarvis.stt import MotorBase, MotorIndisponivel as SttIndisponivel
 from jarvis.voz import ResultadoFala
+from tests.test_pergunta_geral import ArranqueFalso, perguntas_de_teste, saida_json
 
 RAIZ = Path(__file__).resolve().parent.parent
 NOMES = ("atlas", "orbita")
@@ -166,6 +170,7 @@ class Montagem:
         relogio=None,
         primeiro_audio_depois_s: float = 0.1,
         nomes: tuple[str, ...] = NOMES,
+        perguntas=None,
         **ajustes,
     ) -> None:
         self.log = LogFalso()
@@ -204,6 +209,7 @@ class Montagem:
             self.log,
             interprete=self.interprete,
             canal=self.canal,
+            perguntas=perguntas,
             falar=falar,
             calar=calar,
             executar_local=executar_local,
@@ -650,6 +656,186 @@ class TestRespostaDoCanal(unittest.TestCase):
         m.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Feito."))
         self.assertEqual(m.falados, [])
         self.assertIn("'Feito.'", m.log.texto())
+
+
+# --- Perguntas gerais pelo Claude Code com pesquisa na web -------------------------
+
+
+#: As frases do teste ao vivo e o que o LLM respondeu (ou devia responder).
+FRASES_DO_TESTE_AO_VIVO = (
+    ("Uh what uh temperature is in Porto today?", resposta_llm("horas")),
+    ("I asked about the temperature, not the time.", resposta_llm("conversa", "", "I asked about the temperature.")),
+    ("Uh tell me the temperature in Porto.", resposta_llm("conversa", "", "Tell me the temperature in Porto.")),
+    (
+        "I'm asking about the the temperature in Porto, not about a project.",
+        resposta_llm("conversa", "", "What is the temperature in Porto?"),
+    ),
+    (
+        "Uh what football games uh is gonna be uh on today?",
+        resposta_llm("pergunta_geral", "", "What football games are on today?"),
+    ),
+)
+
+
+class TestPerguntasGerais(unittest.TestCase):
+    def setUp(self) -> None:
+        temporaria = tempfile.TemporaryDirectory()
+        self.addCleanup(temporaria.cleanup)
+        self.pasta = Path(temporaria.name) / "jarvis-perguntas"
+
+    def montagem(self, respostas_llm=None, *comportamentos, lingua: str = "en", **kw) -> Montagem:
+        self.arranque = ArranqueFalso(*comportamentos)
+        perguntas = perguntas_de_teste(self.arranque, self.pasta, lingua=lingua)
+        m = Montagem(respostas_llm, lingua=lingua, perguntas=perguntas, **kw)
+        self.addCleanup(m.jarvis.fechar)
+        return m
+
+    def esperar(self, m: Montagem) -> None:
+        self.assertTrue(m.jarvis.esperar_pergunta(5.0), "a thread da pergunta nao acabou")
+
+    def test_as_frases_do_teste_ao_vivo_vao_para_o_claude_e_a_resposta_e_falada(self) -> None:
+        for frase, llm in FRASES_DO_TESTE_AO_VIVO:
+            with self.subTest(frase=frase):
+                m = self.montagem([llm], saida_json("It is 22 degrees and sunny in Porto today."))
+                m.ouvir(frase)
+                self.esperar(m)
+                self.assertEqual(
+                    m.falados,
+                    ["Let me check.", f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} It is 22 degrees and sunny in Porto today."],
+                )
+                self.assertNotIn("Tell me which project the conversation is for.", m.falados)
+                self.assertEqual(m.locais, [], "nunca as horas")
+                self.assertEqual(m.canal.recebidos, [], "nunca uma sessao de projeto")
+                self.assertFalse(m.jarvis.confirmacao.a_espera, "sem recap")
+                self.assertEqual(len(self.arranque.processos), 1)
+                pergunta = self.arranque.ultimo.entrada.split("Question: ")[1]
+                self.assertIn("temperature" if "temperature" in frase else "football", pergunta)
+                self.assertIn("pergunta | respondida", m.log.texto())
+
+    def test_what_time_is_it_continua_a_dar_as_horas(self) -> None:
+        m = self.montagem()
+        m.ouvir("what time is it")
+        self.assertEqual(m.locais, [("horas", None, "horas")])
+        self.assertEqual(m.falados, ["São 15 horas e 30 minutos."])
+        self.assertEqual(self.arranque.processos, [])
+
+    def test_resposta_tecnica_passa_pelo_filtro_e_fica_inteira_no_log(self) -> None:
+        tecnica = "Corri `curl https://x.y/z`:\n```bash\nrm -rf /\n```"
+        m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], saida_json(tecnica))
+        m.ouvir(FRASES_DO_TESTE_AO_VIVO[4][0])
+        self.esperar(m)
+        self.assertEqual(m.falados, ["Let me check.", FRASE_RECURSO_SO_TECNICO])
+        self.assertIn(repr(tecnica), m.log.texto())
+
+    def test_falha_e_tempo_esgotado_dizem_so_uma_frase_curta(self) -> None:
+        for comportamento in ("demora", "isto nao e JSON", saida_json(is_error=True), saida_json("")):
+            with self.subTest(comportamento=comportamento[:30]):
+                m = self.montagem([FRASES_DO_TESTE_AO_VIVO[0][1]], comportamento)
+                m.ouvir(FRASES_DO_TESTE_AO_VIVO[0][0])
+                self.esperar(m)
+                self.assertEqual(m.falados, ["Let me check.", "I couldn't get an answer to that."])
+
+    def test_em_portugues(self) -> None:
+        m = self.montagem(
+            [resposta_llm("pergunta_geral", "", "Que tempo faz hoje no Porto?")],
+            saida_json("Hoje está sol no Porto."),
+            lingua="pt",
+        )
+        m.ouvir("que tempo faz hoje no porto")
+        self.esperar(m)
+        self.assertEqual(m.falados, ["Deixa-me ver.", f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Hoje está sol no Porto."])
+        self.assertIn("Answer in European Portuguese", self.arranque.ultimo.entrada)
+
+    def test_precos_de_cripto_e_acoes_continuam_recusados_sem_processo(self) -> None:
+        for frase, llm in (
+            ("what is the price of bitcoin today", None),
+            ("how much is Tesla stock worth right now", None),
+            ("how are the markets doing", resposta_llm("pergunta_geral", "", "What is the Tesla share price?")),
+        ):
+            with self.subTest(frase=frase):
+                m = self.montagem([llm] if llm else None)
+                m.ouvir(frase)
+                self.esperar(m)
+                self.assertEqual(self.arranque.processos, [], "nada sai do PC")
+                self.assertNotIn("Let me check.", m.falados)
+                self.assertEqual(len(m.falados), 1)
+                self.assertFalse(m.jarvis.confirmacao.a_espera)
+
+    def _pergunta_pendente(self, m: Montagem) -> None:
+        m.ouvir(FRASES_DO_TESTE_AO_VIVO[4][0])
+        self.assertTrue(self.arranque.a_correr.wait(5.0))
+        self.assertEqual(m.falados, ["Let me check."])
+
+    def _nada_mais_dito(self, m: Montagem, antes: list[str]) -> None:
+        self.esperar(m)
+        self.assertTrue(self.arranque.ultimo.morto.is_set(), "o processo foi morto")
+        self.assertEqual(m.falados, antes)
+        self.assertIn("pergunta | cancelada", m.log.texto())
+
+    def test_cala_te_mata_o_processo_e_a_resposta_nunca_e_dita(self) -> None:
+        m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], "bloqueia")
+        self._pergunta_pendente(m)
+        m.ouvir("cala-te")
+        self._nada_mais_dito(m, ["Let me check."])
+
+    def test_ctrl_c_mata_o_processo_e_a_resposta_nunca_e_dita(self) -> None:
+        self.addCleanup(voz.retomar_a_voz)
+        m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], "bloqueia")
+        self._pergunta_pendente(m)
+        m.jarvis.calar_agora("Ctrl+C", definitivo=True)
+        self._nada_mais_dito(m, ["Let me check."])
+
+    def test_dormir_mata_o_processo_e_a_resposta_nunca_e_dita(self) -> None:
+        m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], "bloqueia")
+        self._pergunta_pendente(m)
+        m.ouvir("go to sleep")
+        self.assertTrue(m.jarvis.estado.adormecido)
+        self._nada_mais_dito(m, list(m.falados))
+
+    def test_pergunta_nova_substitui_a_antiga(self) -> None:
+        m = self.montagem(
+            [FRASES_DO_TESTE_AO_VIVO[4][1], FRASES_DO_TESTE_AO_VIVO[0][1]],
+            "bloqueia",
+            saida_json("It is 22 degrees in Porto."),
+        )
+        self._pergunta_pendente(m)
+        antiga = self.arranque.ultimo
+        m.ouvir(FRASES_DO_TESTE_AO_VIVO[0][0])
+        self.esperar(m)
+        self.assertTrue(antiga.morto.is_set())
+        self.assertEqual(len(self.arranque.processos), 2)
+        self.assertEqual(
+            m.falados, ["Let me check.", "Let me check.", f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} It is 22 degrees in Porto."]
+        )
+
+    def test_resposta_que_chega_depois_do_cancelamento_nunca_e_dita(self) -> None:
+        # O processo acabou com uma resposta valida, mas ja depois de cancelado.
+        m = self.montagem()
+        consulta = m.jarvis.perguntas.nova("what football games are on today")
+        m.jarvis._consulta = consulta
+        consulta.correr = lambda: pergunta_geral.ResultadoDaPergunta("respondida", "Benfica plays tonight.")
+        m.jarvis._cancelar_pergunta("pedido novo")
+        m.jarvis._consultar(consulta)
+        self.assertEqual(m.falados, [])
+        self.assertIn("resposta descartada", m.log.texto())
+
+    def test_horas_depois_de_uma_pergunta_descartam_a_resposta_pendente(self) -> None:
+        m = self.montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], "bloqueia")
+        self._pergunta_pendente(m)
+        m.ouvir("what time is it")
+        self._nada_mais_dito(m, ["Let me check.", "São 15 horas e 30 minutos."])
+
+    def test_sem_perguntas_configuradas_diz_que_nao_esta_disponivel(self) -> None:
+        m = Montagem([FRASES_DO_TESTE_AO_VIVO[4][1]], lingua="en")
+        m.ouvir(FRASES_DO_TESTE_AO_VIVO[4][0])
+        self.assertEqual(m.falados, ["General questions are not available."])
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_sim_sozinho_sem_nada_pendente_nao_gasta_quota(self) -> None:
+        m = self.montagem([resposta_llm("conversa", "", "Yes.")])
+        m.ouvir("yes")
+        self.esperar(m)
+        self.assertEqual(self.arranque.processos, [])
 
 
 # --- Canal real, com as pecas do Claude Code falsas -------------------------------

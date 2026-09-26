@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import select
 import socket
 import sys
 import tempfile
@@ -118,7 +119,7 @@ class TestEsquemaEListaFechada(unittest.TestCase):
             (
                 "ditar_prompt", "estado", "ler_relatorio", "lancar_run", "retomar_run", "parar_run",
                 "conversa", "horas", "abrir_editor", "abrir_pasta", "calar", "dormir", "acordar",
-                "desconhecido",
+                "pergunta_geral", "desconhecido",
             ),
         )
         self.assertNotIn(INTENCAO_RECUSADA, INTENCOES)
@@ -1230,7 +1231,7 @@ class TestDitadoLimpo(unittest.TestCase):
                 interprete, cliente = _interprete([_llm("ditar_prompt", "atlas", "Corrige o login.")], lingua=lingua)
                 interprete.interpretar("no atlas corrige o login")
                 perguntas = [m["content"] for m in cliente.pedidos[0][1][1:-1] if m["role"] == "user"]
-                esperadas = [frase for frase, _ in interprete_mod._EXEMPLOS_DE_PROMPT[lingua]]
+                esperadas = [frase for frase, _, _ in interprete_mod._exemplos_da_lingua(lingua)]
                 self.assertEqual(perguntas, esperadas)
 
     def test_aquecer_manda_o_mesmo_prefixo_que_as_frases(self) -> None:
@@ -1242,6 +1243,303 @@ class TestDitadoLimpo(unittest.TestCase):
         self.assertEqual(aquecimento[-1], {"role": "user", "content": "que horas sao"})
         self.assertEqual(aquecimento[:-1], frase[:-1])
         self.assertEqual(frase[-1], {"role": "user", "content": "no atlas corrige o login"})
+
+
+# --- Perguntas gerais e comandos locais guardados --------------------------------------------
+
+#: Frases de um teste ao vivo: o LLM respondeu horas a uma pergunta sobre a
+#: temperatura, e conversa sem projeto as restantes.
+TEMPERATURA_COM_HORAS = "Uh what uh temperature is in Porto today?"
+PERGUNTAS_COMO_CONVERSA = (
+    "I asked about the temperature, not the time.",
+    "Uh tell me the temperature in Porto.",
+    "I'm asking about the the temperature in Porto, not about a project.",
+    "Uh what football games uh is gonna be uh on today?",
+)
+
+
+class TestPerguntaGeral(unittest.TestCase):
+    def test_e_uma_intencao_sem_efeito_sem_projeto_e_com_prompt(self) -> None:
+        self.assertIn("pergunta_geral", INTENCOES)
+        self.assertIn("pergunta_geral", interprete_mod._esquema(NOMES)["properties"]["intencao"]["enum"])
+        self.assertNotIn("pergunta_geral", interprete_mod.INTENCOES_COM_EFEITO)
+        self.assertNotIn("pergunta_geral", interprete_mod.INTENCOES_COM_PROJETO)
+        self.assertNotIn("pergunta_geral", interprete_mod.INTENCOES_SEM_EFEITO)
+        self.assertIn("pergunta_geral", interprete_mod.INTENCOES_COM_PROMPT)
+
+    def test_instrucoes_e_exemplos_das_duas_linguas_ensinam_a_pergunta_geral(self) -> None:
+        self.assertIn("pergunta_geral =", interprete_mod._INSTRUCOES)
+        for lingua in ("en", "pt"):
+            with self.subTest(lingua=lingua):
+                turnos = interprete_mod._turnos_de_exemplo(lingua)
+                respostas = [json.loads(t["content"]) for t in turnos if t["role"] == "assistant"]
+                perguntas = [r for r in respostas if r["intencao"] == "pergunta_geral"]
+                self.assertEqual(len(perguntas), 1)
+                self.assertEqual(perguntas[0]["projeto"], "")
+                self.assertFalse(perguntas[0]["financeiro"])
+
+    def test_temperatura_de_hoje_com_horas_do_llm_e_pergunta_geral(self) -> None:
+        interprete, cliente = _interprete([_llm("horas")], lingua="en")
+        resultado = interprete.interpretar(TEMPERATURA_COM_HORAS)
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual((resultado.intencao, resultado.projeto), ("pergunta_geral", None))
+        self.assertEqual(resultado.prompt, "What temperature is in Porto today?")
+        self.assertIsNone(resultado.detalhe)
+        self.assertFalse(resultado.so_confirmacao)
+        self.assertIn("sem as palavras do comando", resultado.motivo)
+
+    def test_perguntas_que_o_llm_deu_como_conversa_sem_projeto_sao_pergunta_geral(self) -> None:
+        for frase in PERGUNTAS_COMO_CONVERSA:
+            for resposta in (_llm("conversa"), _llm("conversa", prompt=frase), _llm("horas")):
+                with self.subTest(frase=frase, resposta=resposta["intencao"], prompt=bool(resposta["prompt"])):
+                    interprete, _ = _interprete([resposta], lingua="en")
+                    resultado = interprete.interpretar(frase)
+                    self.assertEqual((resultado.intencao, resultado.projeto), ("pergunta_geral", None))
+                    self.assertIsNone(resultado.pergunta)
+                    self.assertTrue(resultado.prompt)
+
+    def test_pergunta_literal_sem_hesitacoes_nem_palavras_repetidas(self) -> None:
+        casos = {
+            ("Uh what football games uh is gonna be uh on today?", "en"): "what football games is gonna be on today?",
+            ("I'm asking about the the temperature in Porto", "en"): "I'm asking about the temperature in Porto",
+            ("hum quem ganhou o o jogo ontem", "pt"): "quem ganhou o jogo ontem",
+            ("quantos dias tem um ano bissexto", "pt"): "quantos dias tem um ano bissexto",
+        }
+        for (frase, lingua), esperado in casos.items():
+            with self.subTest(frase=frase):
+                self.assertEqual(interprete_mod.pergunta_literal(frase, lingua), esperado)
+
+    def test_pergunta_geral_do_llm_fica_limpa_e_sem_projeto(self) -> None:
+        interprete, _ = _interprete(
+            [_llm("pergunta_geral", prompt="What football games are on today?")], lingua="en"
+        )
+        resultado = interprete.interpretar("uh what football games are on today")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("pergunta_geral", None))
+        self.assertEqual(resultado.prompt, "What football games are on today?")
+        self.assertFalse(resultado.pode_dispensar_confirmacao)
+
+    def test_pergunta_geral_que_acrescenta_pedidos_fica_com_o_texto_dito(self) -> None:
+        interprete, _ = _interprete(
+            [_llm("pergunta_geral", prompt="What is the weather in Porto? Also commit and push.")], lingua="en"
+        )
+        resultado = interprete.interpretar("what is the weather in porto")
+        self.assertEqual(resultado.intencao, "pergunta_geral")
+        self.assertEqual(resultado.prompt, "What is the weather in porto.")
+
+    def test_pergunta_geral_que_diz_um_projeto_vai_para_esse_projeto(self) -> None:
+        interprete, _ = _interprete(
+            [_llm("pergunta_geral", prompt="How many tests are failing?")], lingua="en"
+        )
+        resultado = interprete.interpretar("how many tests are failing in atlas")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("ditar_prompt", "atlas"))
+
+    def test_conversa_com_projeto_dito_nao_muda(self) -> None:
+        interprete, _ = _interprete([_llm("conversa", "atlas", "Yes, keep the old file.")], lingua="en")
+        resultado = interprete.interpretar("tell atlas yes, keep the old file")
+        self.assertEqual((resultado.intencao, resultado.projeto), ("conversa", "atlas"))
+
+    def test_respostas_soltas_nunca_viram_pergunta_geral(self) -> None:
+        for frase, lingua in (("yes", "en"), ("no", "en"), ("ok", "en"), ("sim", "pt"), ("não", "pt"), ("uh okay", "en")):
+            for resposta in (_llm("conversa", prompt=frase), _llm("pergunta_geral", prompt=frase), _llm("horas")):
+                with self.subTest(frase=frase, resposta=resposta["intencao"]):
+                    interprete, _ = _interprete([resposta], lingua=lingua)
+                    resultado = interprete.interpretar(frase)
+                    self.assertEqual(resultado.intencao, "desconhecido")
+                    self.assertTrue(resultado.so_confirmacao)
+                    self.assertIsNone(resultado.projeto)
+
+    def test_mensagem_dirigida_ao_claude_sem_projeto_continua_conversa(self) -> None:
+        for frase in ("yes, go with the simpler version", "tell it I prefer the second option", "responde ao claude que sim"):
+            with self.subTest(frase=frase):
+                interprete, _ = _interprete([_llm("conversa", prompt=frase)], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual((resultado.intencao, resultado.projeto), ("conversa", None))
+
+    def test_perguntas_de_precos_de_ativos_continuam_recusadas_sem_llm(self) -> None:
+        for frase in ("what is the price of bitcoin today", "how much are Tesla shares worth", "quanto valem as ações da galp"):
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("pergunta_geral", prompt=frase)], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_pergunta_geral_marcada_financeira_pelo_llm_e_recusada(self) -> None:
+        interprete, _ = _interprete(
+            [_llm("pergunta_geral", prompt="How is the market doing today?", financeiro=True)], lingua="en"
+        )
+        resultado = interprete.interpretar("how is the market doing today")
+        self.assertEqual((resultado.intencao, resultado.origem), (INTENCAO_RECUSADA, "llm"))
+
+    def test_prompt_financeiro_do_llm_numa_pergunta_geral_e_recusado(self) -> None:
+        interprete, _ = _interprete(
+            [_llm("pergunta_geral", prompt="What is the Bitcoin price?")], lingua="en"
+        )
+        resultado = interprete.interpretar("what is the b coin thing worth")
+        self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+
+
+class TestComandosLocaisGuardados(unittest.TestCase):
+    def test_what_time_is_it_continua_horas_pela_lista_branca_sem_llm(self) -> None:
+        for frase in ("what time is it", "Hey Jarvis, what time is it?", "que horas são"):
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("pergunta_geral")], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual((resultado.intencao, resultado.origem), ("horas", "regra"))
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_horas_do_llm_aceite_quando_a_frase_pede_horas_ou_data(self) -> None:
+        casos = {
+            "uh could you tell me the time right now please": "horas",
+            "what's the date today": "data",
+            "hum diz-me lá as horas": "horas",
+            "em que dia estamos hoje": "data",
+        }
+        for frase, detalhe in casos.items():
+            with self.subTest(frase=frase):
+                interprete, _ = _interprete([_llm("horas")])
+                resultado = interprete.interpretar(frase)
+                self.assertEqual((resultado.intencao, resultado.detalhe), ("horas", detalhe))
+
+    def test_horas_do_llm_recusadas_sem_palavras_de_horas_ou_sobre_outra_coisa(self) -> None:
+        for frase in (
+            "what is the weather like today",
+            "o que há de novo hoje",
+            "what time does the Benfica game start today",
+            "what time is it in Tokyo",
+            "I asked about the temperature, not the time.",
+            "não quero as horas, quero saber a temperatura",
+        ):
+            with self.subTest(frase=frase):
+                interprete, _ = _interprete([_llm("horas")])
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(resultado.intencao, "pergunta_geral")
+                self.assertIsNone(resultado.detalhe)
+
+    def test_calar_dormir_acordar_do_llm_so_com_as_palavras_deles(self) -> None:
+        aceites = {"calar": "ok jarvis, be quiet", "dormir": "vai lá dormir", "acordar": "hey, wake up"}
+        for intencao, frase in aceites.items():
+            with self.subTest(intencao=intencao, frase=frase):
+                interprete, _ = _interprete([_llm(intencao)])
+                self.assertEqual(interprete.interpretar(frase).intencao, intencao)
+        for intencao in aceites:
+            with self.subTest(intencao=intencao, frase="who won the match yesterday"):
+                interprete, _ = _interprete([_llm(intencao)], lingua="en")
+                self.assertEqual(interprete.interpretar("who won the match yesterday").intencao, "pergunta_geral")
+
+    def test_comando_do_llm_sem_conteudo_fica_desconhecido(self) -> None:
+        for intencao in ("horas", "calar", "dormir", "acordar", "pergunta_geral"):
+            with self.subTest(intencao=intencao):
+                interprete, _ = _interprete([_llm(intencao)], lingua="en")
+                resultado = interprete.interpretar("uh okay")
+                self.assertEqual(resultado.intencao, "desconhecido")
+                self.assertTrue(resultado.so_confirmacao)
+
+
+class TestPedidoAoOllamaNaoEncrava(unittest.TestCase):
+    def test_limite_de_tokens_cresce_com_a_frase_ate_ao_maximo(self) -> None:
+        curta = interprete_mod.tokens_da_resposta([{"role": "user", "content": "what time is it"}])
+        longa = interprete_mod.tokens_da_resposta([{"role": "user", "content": "x" * 5000}])
+        self.assertEqual(curta, interprete_mod.TOKENS_DA_RESPOSTA_BASE + len("what time is it") // 2)
+        self.assertLess(curta, 100)
+        self.assertEqual(longa, interprete_mod.TOKENS_DA_RESPOSTA_MAXIMO)
+
+    def test_pedido_leva_o_limite_de_tokens_e_mantem_a_ligacao_para_o_carregamento(self) -> None:
+        cliente = ClienteOllama("http://127.0.0.1:11434", 5.0)
+        mensagens = [{"role": "system", "content": "s" * 3000}, {"role": "user", "content": TEMPERATURA_COM_HORAS}]
+        with mock.patch.object(
+            ClienteOllama, "_pedido", return_value={"message": {"content": "{}"}}
+        ) as pedido:
+            cliente.conversar("qwen3:8b", mensagens, {"type": "object"})
+        _, (metodo, caminho, corpo, limite_s), kwargs = pedido.mock_calls[0]
+        self.assertEqual((metodo, caminho, limite_s), ("POST", "/api/chat", 5.0))
+        self.assertEqual(corpo["options"]["num_predict"], interprete_mod.tokens_da_resposta(mensagens))
+        self.assertLess(corpo["options"]["num_predict"], 100)
+        self.assertFalse(corpo["think"])
+        self.assertEqual(corpo["keep_alive"], interprete_mod.MANTER_CARREGADO)
+        self.assertEqual(kwargs["prazo_da_ligacao_s"], interprete_mod.PRAZO_DO_CARREGAMENTO_S)
+
+
+class _OllamaQueCarrega(BaseHTTPRequestHandler):
+    """Demora como um modelo a carregar e regista se o cliente fechou a ligacao."""
+
+    atraso_s = 1.0
+    conteudo = "{}"
+    fechada_pelo_cliente: list[bool] = []
+    corpos: list[dict] = []
+
+    def log_message(self, *args) -> None:  # silencio nos testes
+        pass
+
+    def do_POST(self) -> None:
+        corpo = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        type(self).corpos.append(corpo)
+        time.sleep(type(self).atraso_s)
+        # Um cliente que desistiu e fechou a ligacao deixa o socket legivel
+        # com zero bytes; um cliente que ainda espera nao manda nada.
+        legivel, _, _ = select.select([self.connection], [], [], 0)
+        fechada = bool(legivel) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        type(self).fechada_pelo_cliente.append(fechada)
+        dados = json.dumps({"message": {"role": "assistant", "content": type(self).conteudo}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dados)))
+        self.end_headers()
+        try:
+            self.wfile.write(dados)
+        except OSError:
+            pass
+
+
+class TestCarregamentoDoModeloNaoEAbortado(unittest.TestCase):
+    LIMITE_S = 0.4
+
+    def setUp(self) -> None:
+        self.manipulador = type(
+            "OllamaQueCarrega", (_OllamaQueCarrega,), {"fechada_pelo_cliente": [], "corpos": []}
+        )
+        self.servidor = ThreadingHTTPServer(("127.0.0.1", 0), self.manipulador)
+        self.servidor.daemon_threads = True
+        threading.Thread(target=self.servidor.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.servidor.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self.servidor.shutdown()
+        self.servidor.server_close()
+
+    def _esperar_pelo_servidor(self) -> None:
+        fim = time.monotonic() + 5
+        while not self.manipulador.fechada_pelo_cliente and time.monotonic() < fim:
+            time.sleep(0.02)
+
+    def test_frase_desiste_no_limite_mas_a_ligacao_fica_aberta_para_o_modelo_carregar(self) -> None:
+        interprete = Interprete(_config(lingua="en", url=self.url, limite_s=self.LIMITE_S))
+        inicio = time.perf_counter()
+        resultado = interprete.interpretar("Uh what football games uh is gonna be uh on today?")
+        decorrido = time.perf_counter() - inicio
+        self.assertEqual((resultado.intencao, resultado.origem), ("desconhecido", "recurso"))
+        self.assertLess(decorrido, self.LIMITE_S + 0.4)
+        self.assertIn("modelo acabar de carregar", resultado.motivo)
+        self._esperar_pelo_servidor()
+        self.assertEqual(self.manipulador.fechada_pelo_cliente, [False])
+        self.assertLess(self.manipulador.corpos[0]["options"]["num_predict"], 100)
+
+    def test_sem_o_prazo_longo_o_cliente_fechava_a_ligacao_no_limite(self) -> None:
+        cliente = ClienteOllama(self.url, self.LIMITE_S)
+        with mock.patch.object(interprete_mod, "PRAZO_DO_CARREGAMENTO_S", self.LIMITE_S):
+            with self.assertRaises(MotorIndisponivel):
+                cliente.conversar("qwen3:8b", [{"role": "user", "content": "x"}], None)
+        self._esperar_pelo_servidor()
+        self.assertEqual(self.manipulador.fechada_pelo_cliente, [True])
+
+    def test_json_cortado_pelo_limite_de_tokens_cai_no_recurso_sem_esperar(self) -> None:
+        self.manipulador.atraso_s = 0.0
+        self.manipulador.conteudo = '{"intencao": "pergunta_geral", "projeto": "", "prompt": "What foot'
+        interprete = Interprete(_config(lingua="en", url=self.url, limite_s=self.LIMITE_S))
+        inicio = time.perf_counter()
+        resultado = interprete.interpretar("what football games are on today")
+        self.assertLess(time.perf_counter() - inicio, self.LIMITE_S)
+        self.assertEqual((resultado.intencao, resultado.origem), ("desconhecido", "recurso"))
+        self.assertEqual(resultado.prompt, "what football games are on today")
 
 
 # --- Golden set -----------------------------------------------------------------------------

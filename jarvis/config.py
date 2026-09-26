@@ -35,6 +35,11 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     perfil = "D:/caminho/para/perfil.json"    # --config dos runs lancados
     provider = "claude"                       # claude ou codex
 
+    [perguntas]                   # opcional; sem ela valem os valores por omissao
+    modelo = "claude-haiku-4-5"   # modelo do Claude Code para as perguntas gerais
+    limite_s = 60                 # espera maxima pela resposta (10 a 300)
+    localizacao = "Portugal"      # onde o utilizador esta, para o tempo e as noticias
+
 `carregar_config()` le com `tomllib` (biblioteca padrao do Python 3.11+, sem
 dependencia nova), valida a estrutura E os caminhos no disco (um caminho
 de configuracao e entrada externa e verifica-se na leitura, nao se aceita em
@@ -124,6 +129,23 @@ SUBCAMINHO_DA_FORJA = ("bin", "forja.mjs")
 #: Nome de modelo do Ollama ("familia:etiqueta"), sem espacos nem caminhos.
 _PADRAO_NOME_DE_MODELO = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}(?::[a-z0-9][a-z0-9._-]{0,63})?")
 
+#: Nome ou alias de modelo do Claude Code ("claude-haiku-4-5", "sonnet"). Vai
+#: para a linha de comandos, por isso comeca por uma letra (nunca um "-" que
+#: seria lido como opcao) e so tem letras minusculas, digitos, "." e "-".
+_PADRAO_MODELO_DO_CLAUDE = re.compile(r"[a-z][a-z0-9.-]{1,63}")
+
+#: Respostas a perguntas gerais: modelo rapido e limites da espera.
+MODELO_DAS_PERGUNTAS = "claude-haiku-4-5"
+LIMITE_DAS_PERGUNTAS_S = 60.0
+LIMITE_DAS_PERGUNTAS_MINIMO_S = 10.0
+LIMITE_DAS_PERGUNTAS_MAXIMO_S = 300.0
+LOCALIZACAO_PADRAO = "Portugal"
+LOCALIZACAO_MAXIMA = 80
+
+#: Uma localizacao e so uma linha curta de texto ("Porto, Portugal"): letras,
+#: digitos, espacos e pontuacao simples. Vai no pedido ao modelo.
+_PADRAO_LOCALIZACAO = re.compile(r"[^\W_](?:[\w .,'()-]*[^\W_])?")
+
 
 class ConfigError(Exception):
     """Configuracao em falta, mal formada, ou com um caminho que nao existe."""
@@ -183,6 +205,20 @@ class ConfigForja:
 
 
 @dataclass(frozen=True)
+class ConfigPerguntas:
+    """Como o jarvis responde a perguntas gerais pelo Claude Code com pesquisa na web.
+
+    `modelo` vai para `--model`; `limite_s` e a espera maxima pela resposta;
+    `localizacao` diz ao modelo onde o utilizador esta quando a pergunta nao
+    diz (o tempo, os jogos e as noticias de hoje).
+    """
+
+    modelo: str = MODELO_DAS_PERGUNTAS
+    limite_s: float = LIMITE_DAS_PERGUNTAS_S
+    localizacao: str = LOCALIZACAO_PADRAO
+
+
+@dataclass(frozen=True)
 class Projeto:
     """Um projeto conhecido: o nome que o utilizador diz e o caminho no disco."""
 
@@ -200,6 +236,7 @@ class Config:
     interprete: ConfigInterprete = ConfigInterprete()
     #: None quando o config.toml nao tem a tabela [forja].
     forja: ConfigForja | None = None
+    perguntas: ConfigPerguntas = ConfigPerguntas()
 
     def encontrar_projeto(self, nome: str) -> Projeto | None:
         """Devolve o Projeto com este nome exato (case-insensitive), ou None."""
@@ -425,6 +462,59 @@ def _validar_forja(bruto: dict, caminho: Path, validar_caminhos: bool) -> Config
     return forja
 
 
+def _validar_perguntas(bruto: dict, caminho: Path) -> ConfigPerguntas:
+    """A tabela [perguntas], opcional: modelo do Claude Code, limite e localizacao."""
+    if "perguntas" not in bruto:
+        return ConfigPerguntas()
+    tabela = bruto["perguntas"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [perguntas] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    permitidas = ("modelo", "limite_s", "localizacao")
+    desconhecidas = sorted(set(tabela) - set(permitidas))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [perguntas] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(permitidas)})."
+        )
+    valores: dict[str, object] = {}
+    if "modelo" in tabela:
+        modelo = tabela["modelo"]
+        if not isinstance(modelo, str) or not _PADRAO_MODELO_DO_CLAUDE.fullmatch(modelo.strip()):
+            raise ConfigError(
+                f"'{caminho}': [perguntas].modelo = {modelo!r} nao e um nome de modelo do Claude Code "
+                f"(por exemplo \"{MODELO_DAS_PERGUNTAS}\" ou \"sonnet\")."
+            )
+        valores["modelo"] = modelo.strip()
+    if "limite_s" in tabela:
+        limite = tabela["limite_s"]
+        if (
+            isinstance(limite, bool)
+            or not isinstance(limite, (int, float))
+            or not LIMITE_DAS_PERGUNTAS_MINIMO_S <= limite <= LIMITE_DAS_PERGUNTAS_MAXIMO_S
+        ):
+            raise ConfigError(
+                f"'{caminho}': [perguntas].limite_s = {limite!r} nao e valido; tem de ser um numero "
+                f"entre {LIMITE_DAS_PERGUNTAS_MINIMO_S:g} e {LIMITE_DAS_PERGUNTAS_MAXIMO_S:g}."
+            )
+        valores["limite_s"] = float(limite)
+    if "localizacao" in tabela:
+        local = tabela["localizacao"]
+        texto = " ".join(local.split()) if isinstance(local, str) else ""
+        if (
+            not isinstance(local, str)
+            or not local.isprintable()
+            or len(texto) > LOCALIZACAO_MAXIMA
+            or not _PADRAO_LOCALIZACAO.fullmatch(texto)
+        ):
+            raise ConfigError(
+                f"'{caminho}': [perguntas].localizacao nao e valida; tem de ser uma linha de texto "
+                f"com ate {LOCALIZACAO_MAXIMA} caracteres, so letras, digitos, espacos e , . ' ( ) - "
+                "(por exemplo \"Porto, Portugal\")."
+            )
+        valores["localizacao"] = texto
+    return ConfigPerguntas(**valores)
+
+
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
     """Resolve e valida o caminho de um projeto no disco.
 
@@ -506,6 +596,7 @@ def carregar_config(
         ouvido=_validar_ouvido(bruto, caminho),
         interprete=_validar_interprete(bruto, caminho),
         forja=_validar_forja(bruto, caminho, validar_caminhos),
+        perguntas=_validar_perguntas(bruto, caminho),
     )
 
 

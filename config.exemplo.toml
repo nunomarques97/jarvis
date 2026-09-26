@@ -64,3 +64,17 @@ confirmacao_s = 30.0
 # caminho = "D:/caminho/para/forja"
 # perfil = "D:/caminho/para/perfil-forja.json"
 # provider = "claude"
+
+# Opcional: perguntas gerais e de atualidade ("que tempo faz hoje", "quem
+# ganhou o jogo") respondidas pelo Claude Code com pesquisa na web. A pergunta
+# sai do PC sem "sim" (so le, nao faz nada) e gasta quota da tua subscricao
+# Claude. Sem esta tabela valem estes mesmos valores.
+# modelo: modelo do Claude Code (um rapido chega; "sonnet" tambem serve).
+# limite_s: espera maxima pela resposta (entre 10 e 300); acima disso o jarvis
+#   diz que nao conseguiu.
+# localizacao: onde estas, para o tempo, os jogos e as noticias de hoje quando
+#   a pergunta nao diz (uma linha curta, por exemplo "Porto, Portugal").
+[perguntas]
+modelo = "claude-haiku-4-5"
+limite_s = 60
+localizacao = "Portugal"
