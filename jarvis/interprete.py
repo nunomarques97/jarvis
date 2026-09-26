@@ -60,6 +60,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Literal
@@ -175,6 +176,10 @@ _ACOES_FINANCEIRAS = (
     + _CONTEXTOS_DE_PROGRAMACAO + r")"
 )
 _MOEDA = r"(?:euros?|eur|dolares?|dollars?|usd|bucks|libras?|pounds?|gbp)"
+#: As palavras cripto reais e as suas flexoes. Uma palavra composta que comece
+#: por crypto/cripto ("cryptoradar", "Crypto-Tracker") so conta depois de
+#: `_sem_compostos_cripto` a classificar.
+_CRIPTO = r"(?:crypto(?:s|currency|currencies)?|cripto(?:s|moedas?)?)"
 #: Ativos onde se aplica dinheiro. "fundo" so conta sem complemento ("o fundo
 #: da pagina" e o fundo de um ecra) ou como fundo de investimento.
 _ATIVO = (
@@ -182,7 +187,7 @@ _ATIVO = (
     + r"|shares|stocks?|etfs?|funds?|bonds?|obrigac(?:ao|oes)|ouro|gold"
     r"|fundos?\s+de\s+(?:investimento|indice|pensoes|reforma)"
     r"|fundos?(?!\s+(?:da|do|das|dos|de)\b)"
-    r"|cripto(?!graf)\w*|crypto(?!graph)\w*|bitcoins?)"
+    r"|" + _CRIPTO + r"|bitcoins?)"
 )
 _NUMERO = (
     r"(?:\d+|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|quinze|vinte"
@@ -222,7 +227,7 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
     r"|bolsas?(?!\s+de\s+estudos?)"
     r"|(?:minhas|nossas|tuas)\s+acoes|acoes\s+(?:da|na|de)\s+bolsa"
     r"|invest(?:e|es|em|ir|i|iu|imos|imento|imentos|idor|idores|a|as|am)"
-    r"|cripto(?!graf)\w*|bitcoins?|ethereum|altcoins?|dogecoin|stablecoins?"
+    r"|" + _CRIPTO + r"|bitcoins?|ethereum|altcoins?|dogecoin|stablecoins?"
     r"|carteira\s+(?:digital|de\s+cripto\w*|de\s+bitcoin|de\s+investimentos?)"
     r"|trading|traders?|day\s+trade"
     r"|dividendos?|cotac(?:ao|oes)|forex|cambio"
@@ -242,13 +247,85 @@ PADRAO_PEDIDO_FINANCEIRO = re.compile(
     r"|acquir(?:e|es|ed|ing)(?!\s+(?:(?:the|a|an)\s+)?" + _OBJETOS_DE_SINCRONIZACAO + r")"
     r"|stocks?|stock\s+market|shares\s+(?:of|in)|my\s+shares"
     r"|" + _QUANTIDADE_EN + r"\s+shares"
-    r"|crypto(?!graph)\w*|trades?(?!\s+offs?\b)|traded"
+    r"|trades?(?!\s+offs?\b)|traded"
     r"|dividends?|exchange\s+rate"
     r"|(?:limit|market|stop)\s+orders?|stop\s+loss"
     r"|(?:pay|pays|paying|payment|payments|wire|transfer|transfers|send|deposit|withdraw)\b.*"
     r"\b(?:dollars?|euros?|pounds?|money|usd|eur|funds)"
     r")\b"
 )
+
+#: Uma palavra que comeca por crypto/cripto, com o resto colado, em CamelCase
+#: ou depois de hifens ("CryptoRouter", "cryptoradar", "Crypto-Tracker").
+#: Procurada no texto so sem acentos, antes de `_normalizar` trocar os hifens
+#: por espacos e juntar as maiusculas as minusculas.
+_COMPOSTO_CRIPTO = re.compile(
+    r"(?<![a-z0-9])(cr[iy]pto)((?:[-_‐-―]*[a-z0-9])*)", re.IGNORECASE
+)
+_LIGACOES_DO_COMPOSTO = re.compile(r"[-_‐-―]+")
+_PALAVRAS_DO_RESTO = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+_FLEXOES_CRIPTO = re.compile(_CRIPTO)
+#: Inicios do resto que o tornam financeiro: os nomes do mercado cripto
+#: (moeda, ativo, corretora, carteira, token, mercado) e os radicais de
+#: negociar, comprar, vender, investir e pagar. Na duvida o composto conta.
+_RESTO_FINANCEIRO = re.compile(
+    r"(?:coin|currenc|moeda|asset|ativo|exchang|wallet|carteira|token|market|mercado"
+    r"|trad|buy|sell|invest|bitcoin|stock|share|fund|bond|gold|money|cash|pay|broker"
+    r"|corretor|compr|vend|bolsa|dinheiro)"
+)
+
+
+def _resto_e_financeiro(resto: str) -> bool:
+    """O resto de um composto cripto e ele proprio financeiro.
+
+    Conta quando a regra o apanha, partido nas palavras do CamelCase e dos
+    hifens ou todo junto, ou quando uma dessas palavras comeca por um termo
+    de `_RESTO_FINANCEIRO`. Um resto sem letras ("crypto-", "crypto2") conta.
+    """
+    partes = [
+        palavra.lower()
+        for bocado in _LIGACOES_DO_COMPOSTO.split(resto)
+        for palavra in _PALAVRAS_DO_RESTO.findall(bocado)
+    ]
+    junto = "".join(partes)
+    if not re.search(r"[a-z]", junto):
+        return True
+    return bool(
+        PADRAO_PEDIDO_FINANCEIRO.search(" ".join(partes))
+        or PADRAO_PEDIDO_FINANCEIRO.search(junto)
+        or any(_RESTO_FINANCEIRO.match(palavra) for palavra in (*partes, junto))
+    )
+
+
+def _sem_compostos_cripto(texto: str) -> str:
+    """O texto sem acentos, com cada composto cripto ja classificado.
+
+    Uma flexao real ("Cryptos", "criptomoedas") fica como esta. Um composto
+    cujo resto e financeiro ("CryptoTrader", "Crypto-Currency", "criptoativos")
+    fica "crypto <resto>", que a regra apanha. Um composto cujo resto nao e
+    financeiro ("CryptoRouter", "Crypto-Tracker") fica uma so palavra em
+    minusculas ("cryptotracker"), que a regra nao apanha. Palavras soltas
+    ("crypto router") nao sao compostos e continuam a contar.
+    """
+    sem_acentos = "".join(
+        c for c in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(c)
+    )
+
+    def classificar(composto: re.Match) -> str:
+        prefixo, resto = composto.group(1), composto.group(2)
+        palavra = (prefixo + _LIGACOES_DO_COMPOSTO.sub("", resto)).lower()
+        if not resto or _FLEXOES_CRIPTO.fullmatch(palavra):
+            return composto.group(0)
+        if _resto_e_financeiro(resto):
+            return f"{prefixo} {_LIGACOES_DO_COMPOSTO.sub(' ', resto)}"
+        return palavra
+
+    return _COMPOSTO_CRIPTO.sub(classificar, sem_acentos)
+
+
+def _termo_financeiro(texto: str) -> re.Match | None:
+    """O primeiro termo financeiro do texto, com os compostos cripto classificados."""
+    return PADRAO_PEDIDO_FINANCEIRO.search(_normalizar(_sem_compostos_cripto(texto)))
 
 
 # --- Nomes de projeto ditos, tambem mal ouvidos --------------------------------
@@ -348,10 +425,10 @@ def _troco_e_o_nome(troco: list[str], alvo: list[str]) -> bool:
     "CryptoRather" e "crypto-radar", "crypto trader" e "crypto rate" nao sao.
     Na duvida o troco nao e o nome e a frase segue para a regra financeira.
     """
-    if not PADRAO_PEDIDO_FINANCEIRO.search(" ".join(troco)):
+    if not _termo_financeiro(" ".join(troco)):
         return True
     resto, resto_do_nome = _sem_as_palavras_financeiras_do_nome(troco, alvo)
-    if PADRAO_PEDIDO_FINANCEIRO.search(resto):
+    if _termo_financeiro(resto):
         return False
     if not resto_do_nome or not resto:
         return resto == resto_do_nome
@@ -487,8 +564,12 @@ def _sem_nomes_de_projeto(texto: str, nomes: tuple[str, ...] | list[str]) -> str
 
 
 def pedido_financeiro(texto: str, nomes_de_projeto: tuple[str, ...] | list[str] = ()) -> str | None:
-    """O termo financeiro encontrado no texto, ou None. Deterministico."""
-    procurado = _sem_nomes_de_projeto(texto or "", nomes_de_projeto)
+    """O termo financeiro encontrado no texto, ou None. Deterministico.
+
+    Os compostos cripto sao classificados antes de tirar os nomes de projeto,
+    para que a decisao nunca dependa de o nome estar na configuracao.
+    """
+    procurado = _sem_nomes_de_projeto(_sem_compostos_cripto(texto or ""), nomes_de_projeto)
     encontrado = PADRAO_PEDIDO_FINANCEIRO.search(procurado)
     if encontrado is None:
         return None

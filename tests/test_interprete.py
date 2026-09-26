@@ -554,6 +554,148 @@ class TestNomesMalOuvidos(unittest.TestCase):
         )
 
 
+# --- Palavras compostas que comecam por crypto/cripto ------------------------------
+
+#: Compostos colados, em CamelCase ou com hifen cujo resto nao e financeiro:
+#: nomes mal ouvidos que nenhuma lista consegue prever.
+COMPOSTOS_NAO_FINANCEIROS = (
+    "tell CryptoRouter to add tests to the configuration module",
+    "tell CryptoRather to add tests to the configuration module",
+    "tell Crypto-Tracker to add tests to the configuration module",
+    "in cryptoradar add tests",
+    "in crypto-radar add tests",
+    "tell CryptoRouter to attest to the configuration model",
+)
+
+#: Palavras financeiras reais e as suas flexoes, sozinhas ou ao lado de um composto.
+CRIPTO_FINANCEIRAS = (
+    "buy bitcoin",
+    "sell my crypto",
+    "buy some cryptos",
+    "invest in cryptocurrency",
+    "tell crypto-radar to buy bitcoin",
+    "tell CryptoRouter to sell my crypto",
+    "place an order on binance",
+    "compra bitcoin",
+    "vende as minhas criptomoedas",
+    "what about cryptocurrencies",
+    "fala-me de criptos",
+    "uma criptomoeda nova",
+    "mil euros em criptomoedas",
+    "cryptos for a thousand dollars",
+)
+
+#: Compostos cujo resto e ele proprio financeiro, e palavras soltas: na duvida, recusar.
+COMPOSTOS_FINANCEIROS = (
+    "tell CryptoTrader to add tests",
+    "in cryptotrading add tests",
+    "in Crypto-Currency add tests",
+    "in CryptoExchange add tests",
+    "compra criptoativos",
+    "in CRYPTOTRADER add tests",
+    "tell CryptoWallet to add tests",
+    "in cryptocoins add tests",
+    "tell crypto trader to add tests",
+    "tell crypto wallet to add tests",
+    "crypto router",
+)
+
+
+class TestCompostosCripto(unittest.TestCase):
+    def test_composto_com_resto_nao_financeiro_nao_e_pedido_financeiro(self) -> None:
+        for texto in COMPOSTOS_NAO_FINANCEIROS:
+            for nomes in ((), NOMES_COM_CRIPTO):
+                with self.subTest(texto=texto, nomes=nomes):
+                    self.assertIsNone(pedido_financeiro(texto, nomes))
+
+    def test_palavras_cripto_reais_continuam_financeiras(self) -> None:
+        for texto in CRIPTO_FINANCEIRAS:
+            for nomes in ((), NOMES_COM_CRIPTO):
+                with self.subTest(texto=texto, nomes=nomes):
+                    self.assertIsNotNone(pedido_financeiro(texto, nomes))
+
+    def test_composto_com_resto_financeiro_continua_recusado(self) -> None:
+        for texto in COMPOSTOS_FINANCEIROS:
+            for nomes in ((), NOMES_COM_CRIPTO):
+                with self.subTest(texto=texto, nomes=nomes):
+                    self.assertIsNotNone(pedido_financeiro(texto, nomes))
+
+    def test_criptografia_continua_de_fora(self) -> None:
+        for texto in ("adiciona criptografia às passwords", "in nimbus add cryptography", "encrypt the file"):
+            with self.subTest(texto=texto):
+                self.assertIsNone(pedido_financeiro(texto, ()))
+
+    def test_composto_nao_financeiro_segue_para_o_llm(self) -> None:
+        for texto in COMPOSTOS_NAO_FINANCEIROS[:3]:
+            with self.subTest(texto=texto):
+                interprete, cliente = _interprete_com_cripto(
+                    [_llm("ditar_prompt", "crypto-radar", "Add tests to the configuration module.")]
+                )
+                resultado = interprete.interpretar(texto)
+                self.assertEqual(len(cliente.pedidos), 1)
+                self.assertNotEqual(resultado.intencao, INTENCAO_RECUSADA)
+
+    def test_pedidos_cripto_sao_recusados_antes_do_llm(self) -> None:
+        for texto in (*CRIPTO_FINANCEIRAS[:9], *COMPOSTOS_FINANCEIROS):
+            with self.subTest(texto=texto):
+                interprete, cliente = _interprete_com_cripto([_llm("ditar_prompt", "crypto-radar", "Add tests.")])
+                resultado = interprete.interpretar(texto)
+                self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+                self.assertIn("antes do LLM", resultado.motivo)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_marca_financeira_do_llm_continua_a_recusar(self) -> None:
+        interprete, cliente = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Add tests to the configuration module.", financeiro=True)]
+        )
+        resultado = interprete.interpretar("tell CryptoRouter to add tests to the configuration module")
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual((resultado.intencao, resultado.origem), (INTENCAO_RECUSADA, "llm"))
+
+    def test_prompt_reescrito_financeiro_e_recusado_depois_do_llm(self) -> None:
+        interprete, cliente = _interprete_com_cripto(
+            [_llm("ditar_prompt", "crypto-radar", "Tell CryptoRouter to buy bitcoin.")]
+        )
+        resultado = interprete.interpretar("tell CryptoRouter to add tests to the configuration module")
+        self.assertEqual(len(cliente.pedidos), 1)
+        self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+        self.assertIn("depois do LLM", resultado.motivo)
+
+    def _pedido_anterior(self, respostas) -> tuple[Interprete, ClienteFalso, Interpretacao]:
+        interprete, cliente = _interprete_com_cripto([_llm("ditar_prompt", "atlas", "Add tests."), *respostas])
+        anterior = interprete.interpretar("in atlas add tests")
+        self.assertEqual((anterior.intencao, anterior.projeto), ("ditar_prompt", "atlas"))
+        return interprete, cliente, anterior
+
+    def test_correcao_que_so_diz_um_composto_nao_e_recusada(self) -> None:
+        interprete, cliente, anterior = self._pedido_anterior([_llm("ditar_prompt", "crypto-radar", "Add tests.")])
+        corrigido = interprete.corrigir(anterior, "no, change atlas to CryptoRouter", "corrigir")
+        self.assertEqual(len(cliente.pedidos), 2)
+        self.assertEqual((corrigido.intencao, corrigido.projeto), ("ditar_prompt", "crypto-radar"))
+
+    def test_correcao_financeira_continua_recusada(self) -> None:
+        for texto in ("no, tell CryptoRouter to sell my crypto", "no, change atlas to CryptoTrader"):
+            with self.subTest(texto=texto):
+                interprete, cliente, anterior = self._pedido_anterior([_llm("ditar_prompt", "atlas", "Add tests.")])
+                corrigido = interprete.corrigir(anterior, texto, "corrigir")
+                self.assertEqual(corrigido.intencao, INTENCAO_RECUSADA)
+                self.assertIn("na correcao", corrigido.motivo)
+                self.assertEqual(len(cliente.pedidos), 1)
+
+    def test_prompt_financeiro_depois_da_correcao_e_recusado(self) -> None:
+        interprete, cliente, anterior = self._pedido_anterior(
+            [_llm("ditar_prompt", "crypto-radar", "Tell CryptoRouter to buy bitcoin.")]
+        )
+        corrigido = interprete.corrigir(anterior, "no, change atlas to CryptoRouter", "corrigir")
+        self.assertEqual(len(cliente.pedidos), 2)
+        self.assertEqual(corrigido.intencao, INTENCAO_RECUSADA)
+        self.assertIn("depois da correcao", corrigido.motivo)
+
+    def test_nome_mal_ouvido_continua_a_escolher_o_projeto(self) -> None:
+        self.assertEqual(projetos_mencionados("tell CryptoRouter to add tests", NOMES_COM_CRIPTO), ("crypto-radar",))
+        self.assertEqual(projetos_mencionados("tell CryptoTrader to add tests", NOMES_COM_CRIPTO), ())
+
+
 # --- LLM indisponivel, lento ou invalido --------------------------------------------
 
 
