@@ -2,6 +2,10 @@
 
 Planned work that is not implemented yet. Every option listed here is free and runs locally; each one still has to be measured on the Sponsor's own voice before it is adopted, and nothing is installed without the Sponsor's approval.
 
+## Natural conversation
+
+Goal: make talking to jarvis feel natural: no robotic fixed phrases, no unnecessary questions, interrupting it by speaking, fewer listening rules and shorter pauses. The research on how the most natural voice assistants do it, what runs locally and for free on this PC, the numeric targets measured with the Sponsor's own voice and the ordered list of changes are in [NATURALNESS.md](NATURALNESS.md).
+
 ## European Portuguese
 
 Goal: talk to jarvis in European Portuguese (pt-PT) as well as in English. Parts of Portuguese already exist (`[ouvido] lingua = "pt"`, the Piper pt-PT voice, the wake-word trainer), but it is not usable day to day yet. The earlier measurement with the Sponsor's voice gave a word error rate of 38-46% in Portuguese, which is too high for dictation.

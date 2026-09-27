@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import random
 import sys
 import tempfile
 import threading
@@ -50,6 +51,7 @@ from jarvis.avisos import (
     evento_do_hook,
     frase_do_aviso,
 )
+from jarvis.persona import Variantes
 from jarvis.canal_mcp import TIPO_EVENTO, EnderecoIpc, escrever_endereco, gerar_segredo, linha_de_mensagem
 from jarvis.config import Projeto
 from jarvis.sessoes import CentralDoCanal
@@ -339,8 +341,18 @@ class TestFilaDeAvisos(unittest.TestCase):
         self.assertEqual(self.voz.ditos, ["atlas acabou.", "orbita está à espera de ti."])
 
     def test_em_ingles(self) -> None:
-        self.assertEqual(frase_do_aviso(EVENTO_ACABOU, "atlas", "en"), "atlas is done.")
-        self.assertEqual(frase_do_aviso(EVENTO_ESPERA, "atlas", "en"), "atlas is waiting for you.")
+        variantes = Variantes()
+        self.assertEqual(frase_do_aviso(EVENTO_ACABOU, "atlas", "en", variantes), "atlas is done.")
+        self.assertEqual(frase_do_aviso(EVENTO_ESPERA, "atlas", "en", variantes), "atlas is waiting for you.")
+
+    def test_em_ingles_nunca_repete_a_mesma_forma_seguida(self) -> None:
+        variantes = Variantes(random.Random(7))
+        for evento in (EVENTO_ACABOU, EVENTO_ESPERA, avisos.RUN_TERMINADO, avisos.RUN_FALHOU, avisos.RUN_BLOQUEADO):
+            with self.subTest(evento=evento):
+                ditas = [frase_do_aviso(evento, "atlas", "en", variantes) for _ in range(30)]
+                self.assertTrue(all(a != b for a, b in zip(ditas, ditas[1:])), ditas)
+                self.assertGreaterEqual(len(set(ditas)), 2)
+                self.assertTrue(all("atlas" in dita for dita in ditas))
 
     def test_ocupado_espera_na_fila_pela_ordem(self) -> None:
         self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)

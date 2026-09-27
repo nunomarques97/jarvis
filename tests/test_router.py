@@ -637,5 +637,136 @@ class TestRegraDasDuasListasD58b(BaseRouter):
         self.assertEqual(router._acoes_bare_que_batem("uma frase qualquer"), [])
 
 
+class TestFormasCorteses(BaseRouter):
+    """Pedidos comuns ditos com cortesia continuam na lista branca, sem o LLM."""
+
+    def test_horas_pedidas_com_cortesia(self) -> None:
+        for frase in (
+            "can you tell me what time it is",
+            "hey could you tell me what time it is right now",
+            "what is the time",
+            "podes dizer-me que horas são",
+            "olha sabes-me dizer que horas são agora",
+        ):
+            with self.subTest(frase=frase):
+                resultado = encaminhar(frase, self.config)
+                self.assertEqual((resultado.tipo, resultado.nome_acao, resultado.argumento), ("local", "horas_e_data", "horas"))
+
+    def test_data_calar_e_acordar_com_as_formas_comuns(self) -> None:
+        casos = {
+            "em que dia do mês estamos": ("horas_e_data", "data"),
+            "enough, i've heard enough": ("calar", None),
+            "shut up": ("calar", None),
+            "that's enough": ("calar", None),
+            "chega já ouvi o suficiente": ("calar", None),
+            "wake up i'm back": ("acordar", None),
+            "acorda que já voltei": ("acordar", None),
+            "go to sleep now": ("adormecer", None),
+        }
+        for frase, (acao, argumento) in casos.items():
+            with self.subTest(frase=frase):
+                resultado = encaminhar(frase, self.config)
+                self.assertEqual((resultado.tipo, resultado.nome_acao, resultado.argumento), ("local", acao, argumento))
+
+    def test_dizer_a_outro_continua_a_ir_para_claude(self) -> None:
+        for frase in (
+            "podes dizer ao claude que horas são",
+            "sabes dizer ao claude que horas são",
+            "sabes-me dizer ao claude que horas são",
+            "manda-me dizer ao claude as horas",
+            "can you tell claude what time it is",
+        ):
+            with self.subTest(frase=frase):
+                self.assertVaiParaClaude(frase)
+
+    def test_a_lista_branca_continua_com_as_mesmas_acoes(self) -> None:
+        acoes = {acao for _p, acao, _a in router._ACOES_BARE_PT + router._ACOES_BARE_EN}
+        acoes |= {acao for _p, acao, _e in router._ACOES_COM_PROJETO}
+        self.assertEqual(acoes, {"horas_e_data", "calar", "adormecer", "acordar", "abrir_vscode", "abrir_pasta"})
+        for frase in ("what's the status of exemplo-um", "read the exemplo-um report", "what's the weather in porto"):
+            with self.subTest(frase=frase):
+                self.assertEqual(encaminhar(frase, self.config).tipo, "claude")
+
+
+class TestCaminhoRapido(BaseRouter):
+    """Estado e relatorio de um projeto dito, e perguntas gerais claras."""
+
+    def test_estado_de_um_projeto_dito(self) -> None:
+        for frase in (
+            "what's the status of exemplo-um",
+            "hey jarvis, what's the status of exemplo um",
+            "how is the exemplo-um run going",
+            "how's exemplo-um doing",
+            "has the exemplo-um run finished",
+            "exemplo-um status",
+            "qual é o estado do exemplo-um",
+            "como está o run do exemplo-um",
+            "em que ponto está o exemplo-um",
+            "o run do exemplo-um já acabou",
+        ):
+            with self.subTest(frase=frase):
+                pedido = router.pedido_do_projeto(frase, self.config)
+                self.assertIsNotNone(pedido)
+                self.assertEqual((pedido.intencao, pedido.projeto.nome), ("estado", "exemplo-um"))
+
+    def test_relatorio_de_um_projeto_dito(self) -> None:
+        for frase in (
+            "read the exemplo-dois report",
+            "read me the summary of the last exemplo-dois run",
+            "what does the exemplo-dois report say",
+            "lê o relatório do exemplo-dois",
+            "lê-me o resumo do último run do exemplo-dois",
+            "o que diz o relatório do exemplo-dois",
+        ):
+            with self.subTest(frase=frase):
+                pedido = router.pedido_do_projeto(frase, self.config)
+                self.assertIsNotNone(pedido)
+                self.assertEqual((pedido.intencao, pedido.projeto.nome), ("ler_relatorio", "exemplo-dois"))
+
+    def test_sem_projeto_conhecido_ou_com_duvida_nao_ha_caminho_rapido(self) -> None:
+        for frase in (
+            "how is the run going",
+            "read the report",
+            "what's the status of exemplo-tres",
+            "what's the status of exemplo dos",
+            "how is the weather going",
+            "isn't the exemplo-um run finished",
+            "what's the status of exemplo-um and add a test",
+            "tell exemplo-um to show its status",
+        ):
+            with self.subTest(frase=frase):
+                self.assertIsNone(router.pedido_do_projeto(frase, self.config))
+
+    def test_pergunta_geral_clara(self) -> None:
+        for frase in (
+            "what's the weather in porto",
+            "uh who won the champions league last year",
+            "what football games are on today",
+            "what's the capital of australia",
+            "will it rain tomorrow",
+            "vai chover amanhã em lisboa",
+            "quem ganhou o jogo ontem",
+            "como está o tempo hoje",
+        ):
+            with self.subTest(frase=frase):
+                pedido = router.pergunta_geral_clara(frase)
+                self.assertIsNotNone(pedido)
+                self.assertEqual((pedido.intencao, pedido.projeto), ("pergunta_geral", None))
+
+    def test_sem_abertura_ou_sem_tema_ou_com_duvida_vai_ao_llm(self) -> None:
+        for frase in (
+            "i asked about the temperature, not the time",
+            "what tests are failing",
+            "the weather in porto",
+            "don't tell me the weather",
+            "tell claude what the weather is",
+            "quanto tempo demora a compilar",
+            "quem ganhou mais com as ações da galp",
+            "what's the weather " + "and more " * 10,
+        ):
+            with self.subTest(frase=frase):
+                self.assertIsNone(router.pergunta_geral_clara(frase))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from jarvis.persona import VARIANTES
 from jarvis.canal_claude import ambiente_para_filho, verificar_executavel_seguro
 from jarvis.config import Config, ConfigForja, Projeto
 from jarvis.estado import (
@@ -115,28 +116,70 @@ _FRASES = {
         "motivo_erro_forja": "a FORJA deu um erro; os detalhes estão no ecrã.",
     },
     "en": {
-        "sem_forja": "FORJA is not configured in jarvis. I did nothing.",
-        "projeto_desconhecido": "I don't know that project. I did nothing.",
-        "objetivo_vazio": "The run needs a goal. Nothing was started.",
-        "objetivo_invalido": "That goal can't go to FORJA. Nothing was started.",
-        "run_ativo": "Not started: there is already an active run on {p}.",
-        "run_por_acabar": "Not started: the run on {p} is unfinished; resume or close it first.",
-        "alteracoes": "Not started: {p} has uncommitted changes.",
-        "sem_git": "Not started: I couldn't check the Git changes of {p}.",
-        "nao_confirmei": "Not started: I couldn't confirm that {p} has no active run. {motivo}",
-        "lancado": "I started the run on {p}. Ask me for the status whenever you want.",
-        "retomado": "I resumed the run on {p}.",
-        "nao_arrancou": "The run on {p} did not start: {motivo}",
-        "falhou_arranque": "I couldn't start FORJA on {p}.",
-        "sem_run": "There is no run on {p} to resume.",
-        "run_terminado": "The run on {p} already ended; there is nothing to resume.",
-        "a_correr": "The run on {p} is already running.",
-        "decisao_pendente": "The run on {p} is waiting for your technology decision; decide first, then resume.",
-        "nao_confirmei_retoma": "Not resumed: I couldn't read the run status of {p}. {motivo}",
-        "nao_e_meu": "I only stop a run I started or resumed, and none is running on {p}.",
-        "paragem_falhou": "The request to stop the run on {p} failed; the run continues.",
-        "parado": "I stopped the run on {p}. The work is kept; say resume the run when you want.",
-        "a_parar": "I asked the run on {p} to stop; it is still closing.",
+        "sem_forja": (
+            "FORJA isn't set up in jarvis, so I didn't do anything.",
+            "FORJA isn't configured here; I didn't do anything.",
+        ),
+        "projeto_desconhecido": (
+            "I don't know that project, so I didn't do anything.",
+            "That's not a project I know; I didn't do anything.",
+        ),
+        "objetivo_vazio": ("The run needs a goal, so I didn't start it.", "I need a goal for the run; nothing started."),
+        "objetivo_invalido": (
+            "That goal can't go to FORJA, so I didn't start anything.",
+            "I can't pass that goal to FORJA; nothing started.",
+        ),
+        "run_ativo": (
+            "{p} already has an active run, so I didn't start another.",
+            "There's already a run going on {p}; I didn't start another.",
+        ),
+        "run_por_acabar": (
+            "I didn't start: the run on {p} isn't finished; resume or close it first.",
+            "{p} has an unfinished run; resume or close it first.",
+        ),
+        "alteracoes": ("I didn't start: {p} has uncommitted changes.", "{p} has uncommitted changes, so I didn't start."),
+        "sem_git": (
+            "I didn't start: I couldn't check the Git changes of {p}.",
+            "I couldn't check {p} in Git, so I didn't start.",
+        ),
+        "nao_confirmei": (
+            "I didn't start: I couldn't confirm {p} has no active run. {motivo}",
+            "I couldn't confirm {p} is free of runs, so I didn't start. {motivo}",
+        ),
+        "lancado": (
+            "Run started on {p}. Ask me for the status any time.",
+            "The {p} run is going. Ask me how it's doing whenever you like.",
+        ),
+        "retomado": ("Resumed the run on {p}.", "The {p} run is going again."),
+        "nao_arrancou": ("The run on {p} didn't start: {motivo}", "{p}'s run failed to start: {motivo}"),
+        "falhou_arranque": ("I couldn't start FORJA on {p}.", "FORJA wouldn't start on {p}."),
+        "sem_run": ("There's no run on {p} to resume.", "{p} has no run to resume."),
+        "run_terminado": (
+            "The run on {p} already ended; there's nothing to resume.",
+            "{p}'s run is already over, so there's nothing to resume.",
+        ),
+        "a_correr": ("The run on {p} is already running.", "{p}'s run is already going."),
+        "decisao_pendente": (
+            "The run on {p} needs your technology decision first; decide, then resume.",
+            "{p}'s run is waiting for your technology decision; decide first, then resume.",
+        ),
+        "nao_confirmei_retoma": (
+            "I didn't resume: I couldn't read the run status of {p}. {motivo}",
+            "I couldn't read {p}'s run status, so I didn't resume. {motivo}",
+        ),
+        "nao_e_meu": (
+            "I only stop runs I started or resumed, and none is running on {p}.",
+            "No run of mine is going on {p}, and I only stop my own.",
+        ),
+        "paragem_falhou": (
+            "Stopping the run on {p} failed; it's still going.",
+            "I couldn't stop the {p} run; it's still going.",
+        ),
+        "parado": (
+            "Stopped the run on {p}. The work is kept; say resume the run when you want.",
+            "The {p} run is stopped and the work is kept; say resume the run to carry on.",
+        ),
+        "a_parar": ("I asked the run on {p} to stop; it's still closing.", "The {p} run is stopping; it's still closing down."),
         "motivo_alteracoes": "there are uncommitted changes.",
         "motivo_run_ativo": "there is already an active run.",
         "motivo_run_terminado": "the run had already ended.",
@@ -149,7 +192,8 @@ _FRASES = {
 
 
 def _frase(chave: str, lingua: str, **valores: object) -> str:
-    return _FRASES["en" if lingua == "en" else "pt"][chave].format(**valores)
+    """Uma frase fixa numa das suas formas, nunca a mesma duas vezes seguidas."""
+    return VARIANTES.escolher(f"forja_voz.{chave}", _FRASES["en" if lingua == "en" else "pt"][chave]).format(**valores)
 
 
 # --- Argumentos fixos -------------------------------------------------------

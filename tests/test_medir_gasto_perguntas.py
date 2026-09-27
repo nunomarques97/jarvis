@@ -280,10 +280,10 @@ class TestMain(_ComPasta):
         self.assertEqual(codigo, 0, saida)
         self.assertEqual(len(arranque.processos), 3)
         ficticia = mg.configuracao_ficticia(config_privada(self.pasta).perguntas)
+        self.assertEqual(ficticia.limite_s, 45.0)
         cenarios = self.cenarios()
         for processo, cenario in zip(arranque.processos, cenarios):
             self.assertIn("claude-haiku-4-5", processo.argv)
-            self.assertEqual(processo.limite, 45.0)
             self.assertNotIn(LOCAL_PRIVADO, processo.entrada)
             self.assertNotIn(PROJETO_PRIVADO, processo.entrada)
             self.assertNotIn("Microfone privado", processo.entrada)

@@ -22,6 +22,8 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     device = "cpu"
     lingua = "pt"
     limiar_ativacao = 0.6         # limiar da palavra de ativacao (0 a 1)
+    fim_de_turno = "silencio"     # "smart-turn" (modelo depois de um silencio curto) ou "silencio" (0.6 s fixos)
+    fim_de_turno_maximo_s = 1.5   # com o smart-turn, espera maxima por uma frase inacabada (0.6 a 5)
 
     [interprete]                  # opcional; sem ela valem os valores por omissao
     url = "http://127.0.0.1:11434"  # Ollama local; so localhost e aceite
@@ -30,6 +32,7 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     limite_s = 5.0                # acima disto a frase fica "desconhecido"
     carregamento_s = 20.0         # sem modelo carregado: espera enquanto o Ollama o carrega
     confirmacao_s = 30.0          # espera pelo "sim"; depois cancela sem enviar
+    ultimo_projeto_min = 10.0     # sem projeto dito, assume o ultimo usado ha menos disto; 0 desliga
 
     [forja]                       # opcional; sem ela nao ha runs FORJA por voz
     caminho = "D:/caminho/para/forja"         # instalacao (tem bin/forja.mjs)
@@ -43,6 +46,8 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
 
     [voz]                         # opcional; sem ela vale a voz por omissao
     nome = "bm_fable"             # voz inglesa do Kokoro (lista fechada VOZES_INGLESAS)
+    velocidade = 1.2              # opcional, 0.8 a 1.3; sem ela cada voz fala a sua velocidade
+    frases_geradas = true         # respostas sociais e "nao percebi" escritas pelo LLM local
 
     [adaptacao]                   # opcional; sem ela a transcricao nao e adaptada
     reforco = false               # reforco das frases de comando e nomes de projeto
@@ -53,6 +58,10 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     seguimento_s = 8.0            # escuta sem palavra de ativacao depois de o jarvis falar (3 a 30)
     sons = true                   # som curto quando essa escuta abre e outro quando fecha
     volume = 0.15                 # volume desses sons (maior do que 0, no maximo 1)
+    interromper = true            # falar por cima do jarvis pausa-o (e para-o se for a serio)
+
+    [descoberta]                  # opcional; sem ela procura em Desktop/Repositorios da pasta pessoal
+    pastas = ["D:/caminho/para/repositorios"]  # raizes; [] desliga a descoberta
 
     [memoria]                     # opcional; sem ela valem os valores por omissao
     trocas = 10                   # perguntas e respostas lembradas nas perguntas gerais (1 a 10)
@@ -126,6 +135,18 @@ DEVICES_DO_OUVIDO = ("cpu", "cuda")
 #: [ouvido].limiar_ativacao a partir da curva limiar -> detecao/falsos.
 LIMIAR_DE_ATIVACAO_PADRAO = 0.6
 
+#: Como se decide que o utilizador acabou de falar ([ouvido].fim_de_turno):
+#: "smart-turn" pergunta ao modelo Smart Turn depois de um silencio curto;
+#: "silencio" espera sempre o mesmo silencio fixo. O valor por omissao sai dos
+#: numeros de `scripts/avaliar_fim_de_turno.py` nas gravacoes reais.
+FINS_DE_TURNO = ("smart-turn", "silencio")
+FIM_DE_TURNO_PADRAO = "silencio"
+#: Com o Smart Turn, o silencio maximo quando o modelo diz que a frase ainda
+#: nao acabou ([ouvido].fim_de_turno_maximo_s).
+FIM_DE_TURNO_MAXIMO_S = 1.5
+FIM_DE_TURNO_MAXIMO_MINIMO_S = 0.6
+FIM_DE_TURNO_MAXIMO_MAXIMO_S = 5.0
+
 
 #: O interprete fala com o Ollama por HTTP e so aceita este computador: o
 #: texto ditado nunca sai do PC antes de o utilizador o confirmar.
@@ -146,6 +167,10 @@ ESPERA_DO_CARREGAMENTO_MAXIMA_S = 60.0
 ESPERA_DA_CONFIRMACAO_S = 30.0
 ESPERA_DA_CONFIRMACAO_MINIMA_S = 3.0
 ESPERA_DA_CONFIRMACAO_MAXIMA_S = 120.0
+#: Minutos depois do ultimo pedido num projeto em que um ditado sem projeto o
+#: assume (sempre com recap e "sim"); 0 desliga e o jarvis pergunta sempre.
+ULTIMO_PROJETO_MIN = 10.0
+ULTIMO_PROJETO_MAXIMO_MIN = 240.0
 
 #: Providers que um run FORJA lancado por voz pode usar (lista fechada).
 PROVIDERS_DA_FORJA = ("claude", "codex")
@@ -183,6 +208,9 @@ VOZES_INGLESAS = ("af_heart", "bm_george", "bm_lewis", "bm_daniel", "bm_fable")
 #: Voz inglesa por omissao: masculina britanica, escolhida pelos numeros em
 #: docs/MODELOS.md (latencia ate ao primeiro audio nao pior do que af_heart).
 VOZ_INGLESA_PADRAO = "bm_fable"
+#: Limites de `[voz] velocidade` (o `speed` do Kokoro; 1.0 e o ritmo normal da voz).
+VELOCIDADE_MINIMA = 0.8
+VELOCIDADE_MAXIMA = 1.3
 
 
 #: Forca do reforco de frases na transcricao (bonus somado ao logit de cada
@@ -190,9 +218,9 @@ VOZ_INGLESA_PADRAO = "bm_fable"
 BONUS_DE_REFORCO_PADRAO = 1.5
 BONUS_DE_REFORCO_MAXIMO = 10.0
 
-#: Quanto tempo o jarvis continua a ouvir sem palavra de ativacao depois de
-#: acabar de falar, e o intervalo aceite.
-SEGUIMENTO_S = 8.0
+#: Quanto tempo de silencio o jarvis espera, sem palavra de ativacao, depois
+#: de acabar de falar (o modo de conversa), e o intervalo aceite.
+SEGUIMENTO_S = 15.0
 SEGUIMENTO_MINIMO_S = 3.0
 SEGUIMENTO_MAXIMO_S = 30.0
 
@@ -229,6 +257,8 @@ class ConfigOuvido:
     device: str = "cpu"
     lingua: str = "pt"
     limiar_ativacao: float = LIMIAR_DE_ATIVACAO_PADRAO
+    fim_de_turno: str = FIM_DE_TURNO_PADRAO
+    fim_de_turno_maximo_s: float = FIM_DE_TURNO_MAXIMO_S
 
     @property
     def codigo_da_tecla(self) -> int:
@@ -251,6 +281,9 @@ class ConfigInterprete:
     carregamento_s: float = ESPERA_DO_CARREGAMENTO_S
     #: Espera pela confirmacao de um pedido recapitulado; depois cancela.
     confirmacao_s: float = ESPERA_DA_CONFIRMACAO_S
+    #: Um ditado ou uma leitura sem projeto dito assume o ultimo projeto
+    #: usado ate estes minutos depois; 0 desliga.
+    ultimo_projeto_min: float = ULTIMO_PROJETO_MIN
 
 
 @dataclass(frozen=True)
@@ -287,9 +320,16 @@ class ConfigPerguntas:
 
 @dataclass(frozen=True)
 class ConfigVoz:
-    """Que voz fala as respostas em ingles (nome de uma voz do Kokoro)."""
+    """Que voz fala as respostas em ingles (nome de uma voz do Kokoro) e como.
+
+    `velocidade` e a velocidade do Kokoro (None: a de cada voz, como sempre);
+    `frases_geradas` deixa o LLM local escrever as respostas sociais curtas e
+    o "nao percebi" (desligado: so as frases fixas).
+    """
 
     nome: str = VOZ_INGLESA_PADRAO
+    velocidade: float | None = None
+    frases_geradas: bool = True
 
 
 @dataclass(frozen=True)
@@ -308,14 +348,18 @@ class ConfigAdaptacao:
 class ConfigEscuta:
     """A escuta sem palavra de ativacao depois de o jarvis falar, e os seus sons.
 
-    `seguimento_s` e quanto tempo se pode continuar sem "hey jarvis"; `sons`
-    liga os sons de abertura e fecho dessa escuta; `volume` e a amplitude
-    maxima desses sons, em fracao da escala completa.
+    `seguimento_s` e quanto tempo de silencio fecha a conversa sem "hey
+    jarvis" (recomeca depois de cada resposta); `sons` liga o som de quando
+    essa escuta abre pela primeira vez e o de quando fecha; `volume` e a amplitude
+    maxima desses sons, em fracao da escala completa. `interromper` deixa
+    falar por cima do jarvis: a voz pausa logo e a frase dita decide se para
+    de vez ou continua (ver `jarvis.ouvido`).
     """
 
     seguimento_s: float = SEGUIMENTO_S
     sons: bool = True
     volume: float = VOLUME_DOS_SONS_PADRAO
+    interromper: bool = True
 
 
 @dataclass(frozen=True)
@@ -335,6 +379,18 @@ class ConfigMemoria:
     factos: int = FACTOS_MAXIMOS
     caracteres: int = CARACTERES_DOS_FACTOS_MAXIMOS
     frases_interprete: int = FRASES_DO_INTERPRETE_MAXIMAS
+
+
+@dataclass(frozen=True)
+class ConfigDescoberta:
+    """Onde procurar repositorios git para juntar aos projetos (ver `jarvis.projetos`).
+
+    `pastas` None (sem a tabela) quer dizer a raiz por omissao,
+    Desktop/Repositorios dentro da pasta pessoal; uma tupla vazia desliga a
+    descoberta.
+    """
+
+    pastas: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -360,6 +416,7 @@ class Config:
     adaptacao: ConfigAdaptacao = ConfigAdaptacao()
     escuta: ConfigEscuta = ConfigEscuta()
     memoria: ConfigMemoria = ConfigMemoria()
+    descoberta: ConfigDescoberta = ConfigDescoberta()
 
     def encontrar_projeto(self, nome: str) -> Projeto | None:
         """Devolve o Projeto com este nome exato (case-insensitive), ou None."""
@@ -428,14 +485,29 @@ def _validar_ouvido(bruto: dict, caminho: Path) -> ConfigOuvido:
         "motor": MOTORES,
         "device": DEVICES_DO_OUVIDO,
         "lingua": LINGUAS_DO_OUVIDO,
+        "fim_de_turno": FINS_DE_TURNO,
     }
-    desconhecidas = sorted(set(tabela) - set(permitidas) - {"limiar_ativacao"})
+    numericas = ("limiar_ativacao", "fim_de_turno_maximo_s")
+    desconhecidas = sorted(set(tabela) - set(permitidas) - set(numericas))
     if desconhecidas:
         raise ConfigError(
             f"'{caminho}': [ouvido] tem chaves desconhecidas: {', '.join(desconhecidas)} "
-            f"(so {', '.join(permitidas)}, limiar_ativacao)."
+            f"(so {', '.join((*permitidas, *numericas))})."
         )
     valores: dict[str, object] = {}
+    if "fim_de_turno_maximo_s" in tabela:
+        maximo = tabela["fim_de_turno_maximo_s"]
+        if (
+            isinstance(maximo, bool)
+            or not isinstance(maximo, (int, float))
+            or not FIM_DE_TURNO_MAXIMO_MINIMO_S <= maximo <= FIM_DE_TURNO_MAXIMO_MAXIMO_S
+        ):
+            raise ConfigError(
+                f"'{caminho}': [ouvido].fim_de_turno_maximo_s = {maximo!r} nao e valido; tem de ser um "
+                f"numero de segundos entre {FIM_DE_TURNO_MAXIMO_MINIMO_S:g} e {FIM_DE_TURNO_MAXIMO_MAXIMO_S:g} "
+                f"(por omissao {FIM_DE_TURNO_MAXIMO_S:g})."
+            )
+        valores["fim_de_turno_maximo_s"] = float(maximo)
     if "limiar_ativacao" in tabela:
         limiar = tabela["limiar_ativacao"]
         if isinstance(limiar, bool) or not isinstance(limiar, (int, float)) or not 0 < limiar < 1:
@@ -490,7 +562,9 @@ def _validar_interprete(bruto: dict, caminho: Path) -> ConfigInterprete:
     tabela = bruto["interprete"]
     if not isinstance(tabela, dict):
         raise ConfigError(f"'{caminho}': [interprete] tem de ser uma tabela, nao {type(tabela).__name__}.")
-    permitidas = ("url", "modelo", "modelo_alternativo", "limite_s", "carregamento_s", "confirmacao_s")
+    permitidas = (
+        "url", "modelo", "modelo_alternativo", "limite_s", "carregamento_s", "confirmacao_s", "ultimo_projeto_min"
+    )
     desconhecidas = sorted(set(tabela) - set(permitidas))
     if desconhecidas:
         raise ConfigError(
@@ -550,6 +624,18 @@ def _validar_interprete(bruto: dict, caminho: Path) -> ConfigInterprete:
                 f"numero entre {ESPERA_DA_CONFIRMACAO_MINIMA_S:g} e {ESPERA_DA_CONFIRMACAO_MAXIMA_S:g}."
             )
         valores["confirmacao_s"] = float(espera)
+    if "ultimo_projeto_min" in tabela:
+        minutos = tabela["ultimo_projeto_min"]
+        if (
+            isinstance(minutos, bool)
+            or not isinstance(minutos, (int, float))
+            or not 0 <= minutos <= ULTIMO_PROJETO_MAXIMO_MIN
+        ):
+            raise ConfigError(
+                f"'{caminho}': [interprete].ultimo_projeto_min = {minutos!r} nao e valido; tem de ser um "
+                f"numero entre 0 (desliga) e {ULTIMO_PROJETO_MAXIMO_MIN:g}."
+            )
+        valores["ultimo_projeto_min"] = float(minutos)
     return ConfigInterprete(**valores)
 
 
@@ -652,28 +738,48 @@ def _validar_perguntas(bruto: dict, caminho: Path) -> ConfigPerguntas:
 
 
 def _validar_voz(bruto: dict, caminho: Path) -> ConfigVoz:
-    """A tabela [voz], opcional: o nome da voz inglesa, so da lista fechada."""
+    """A tabela [voz], opcional: a voz inglesa (lista fechada), a velocidade e as frases geradas."""
     if "voz" not in bruto:
         return ConfigVoz()
     tabela = bruto["voz"]
     if not isinstance(tabela, dict):
         raise ConfigError(f"'{caminho}': [voz] tem de ser uma tabela, nao {type(tabela).__name__}.")
-    permitidas = ("nome",)
+    permitidas = ("nome", "velocidade", "frases_geradas")
     desconhecidas = sorted(set(tabela) - set(permitidas))
     if desconhecidas:
         raise ConfigError(
             f"'{caminho}': [voz] tem chaves desconhecidas: {', '.join(desconhecidas)} "
             f"(so {', '.join(permitidas)})."
         )
-    if "nome" not in tabela:
-        return ConfigVoz()
-    nome = tabela["nome"]
-    if not isinstance(nome, str) or nome.strip() not in VOZES_INGLESAS:
-        raise ConfigError(
-            f"'{caminho}': [voz].nome = {nome!r} nao e uma voz conhecida; tem de ser uma de "
-            f"{', '.join(VOZES_INGLESAS)} (por omissao \"{VOZ_INGLESA_PADRAO}\")."
-        )
-    return ConfigVoz(nome=nome.strip())
+    valores: dict[str, object] = {}
+    if "nome" in tabela:
+        nome = tabela["nome"]
+        if not isinstance(nome, str) or nome.strip() not in VOZES_INGLESAS:
+            raise ConfigError(
+                f"'{caminho}': [voz].nome = {nome!r} nao e uma voz conhecida; tem de ser uma de "
+                f"{', '.join(VOZES_INGLESAS)} (por omissao \"{VOZ_INGLESA_PADRAO}\")."
+            )
+        valores["nome"] = nome.strip()
+    if "velocidade" in tabela:
+        velocidade = tabela["velocidade"]
+        if (
+            isinstance(velocidade, bool)
+            or not isinstance(velocidade, (int, float))
+            or not VELOCIDADE_MINIMA <= velocidade <= VELOCIDADE_MAXIMA
+        ):
+            raise ConfigError(
+                f"'{caminho}': [voz].velocidade = {velocidade!r} nao e valida; tem de ser um numero entre "
+                f"{VELOCIDADE_MINIMA:g} e {VELOCIDADE_MAXIMA:g} (sem ela, cada voz fala a sua velocidade)."
+            )
+        valores["velocidade"] = float(velocidade)
+    if "frases_geradas" in tabela:
+        if not isinstance(tabela["frases_geradas"], bool):
+            raise ConfigError(
+                f"'{caminho}': [voz].frases_geradas = {tabela['frases_geradas']!r} nao e valido; "
+                "tem de ser true ou false."
+            )
+        valores["frases_geradas"] = tabela["frases_geradas"]
+    return ConfigVoz(**valores)
 
 
 def _validar_adaptacao(bruto: dict, caminho: Path) -> ConfigAdaptacao:
@@ -720,7 +826,7 @@ def _validar_escuta(bruto: dict, caminho: Path) -> ConfigEscuta:
     tabela = bruto["escuta"]
     if not isinstance(tabela, dict):
         raise ConfigError(f"'{caminho}': [escuta] tem de ser uma tabela, nao {type(tabela).__name__}.")
-    permitidas = ("seguimento_s", "sons", "volume")
+    permitidas = ("seguimento_s", "sons", "volume", "interromper")
     desconhecidas = sorted(set(tabela) - set(permitidas))
     if desconhecidas:
         raise ConfigError(
@@ -747,6 +853,13 @@ def _validar_escuta(bruto: dict, caminho: Path) -> ConfigEscuta:
                 f"'{caminho}': [escuta].sons = {tabela['sons']!r} nao e valido; tem de ser true ou false."
             )
         valores["sons"] = tabela["sons"]
+    if "interromper" in tabela:
+        if not isinstance(tabela["interromper"], bool):
+            raise ConfigError(
+                f"'{caminho}': [escuta].interromper = {tabela['interromper']!r} nao e valido; "
+                "tem de ser true ou false."
+            )
+        valores["interromper"] = tabela["interromper"]
     if "volume" in tabela:
         volume = tabela["volume"]
         if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not 0 < volume <= 1:
@@ -795,6 +908,45 @@ def _validar_memoria(bruto: dict, caminho: Path) -> ConfigMemoria:
             )
         valores[chave] = valor if inteiro else float(valor)
     return ConfigMemoria(**valores)
+
+
+def _validar_descoberta(bruto: dict, caminho: Path) -> ConfigDescoberta:
+    """A tabela [descoberta], opcional: a lista de raizes onde procurar repositorios.
+
+    Uma raiz tem de ser um caminho absoluto (aceita "~"); nao tem de existir,
+    porque uma raiz em falta so fica no log quando se procura.
+    """
+    if "descoberta" not in bruto:
+        return ConfigDescoberta()
+    tabela = bruto["descoberta"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [descoberta] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    desconhecidas = sorted(set(tabela) - {"pastas"})
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [descoberta] tem chaves desconhecidas: {', '.join(desconhecidas)} (so pastas)."
+        )
+    if "pastas" not in tabela:
+        return ConfigDescoberta()
+    pastas = tabela["pastas"]
+    if not isinstance(pastas, list):
+        raise ConfigError(
+            f"'{caminho}': [descoberta].pastas tem de ser uma lista de caminhos ([] desliga a descoberta)."
+        )
+    raizes: list[Path] = []
+    for indice, valor in enumerate(pastas):
+        if not isinstance(valor, str) or not valor.strip() or "\x00" in valor:
+            raise ConfigError(f"'{caminho}': [descoberta].pastas[{indice}] tem de ser um caminho nao vazio.")
+        bruto_da_raiz = Path(valor.strip()).expanduser()
+        if not bruto_da_raiz.is_absolute():
+            raise ConfigError(
+                f"'{caminho}': [descoberta].pastas[{indice}] = {valor!r} tem de ser um caminho absoluto "
+                '(por exemplo "D:/caminho/para/repositorios" ou "~/Desktop/Repositorios").'
+            )
+        raiz = bruto_da_raiz.resolve(strict=False)
+        if raiz not in raizes:
+            raizes.append(raiz)
+    return ConfigDescoberta(pastas=tuple(raizes))
 
 
 def _resolver_caminho_do_projeto(nome: str, valor: str, caminho_config: Path) -> Path:
@@ -883,6 +1035,7 @@ def carregar_config(
         adaptacao=_validar_adaptacao(bruto, caminho),
         escuta=_validar_escuta(bruto, caminho),
         memoria=_validar_memoria(bruto, caminho),
+        descoberta=_validar_descoberta(bruto, caminho),
     )
 
 
@@ -1063,13 +1216,13 @@ def _autoteste() -> int:
             carregar_config(caminho, validar_caminhos=False).escuta,
             ConfigEscuta(),
         )
-        caminho.write_text(base + "[escuta]\nseguimento_s = 5\nsons = false\nvolume = 0.1\n", encoding="utf-8")
+        caminho.write_text(base + "[escuta]\nseguimento_s = 5\nsons = false\nvolume = 0.1\ninterromper = false\n", encoding="utf-8")
         verificar(
             "[escuta] valida: lida",
             carregar_config(caminho, validar_caminhos=False).escuta,
-            ConfigEscuta(seguimento_s=5.0, sons=False, volume=0.1),
+            ConfigEscuta(seguimento_s=5.0, sons=False, volume=0.1, interromper=False),
         )
-        for texto in ("seguimento_s = 1", "seguimento_s = 31", 'sons = "sim"', "volume = 0", "volume = 1.5", "outra = 1"):
+        for texto in ("seguimento_s = 1", "seguimento_s = 31", 'sons = "sim"', "volume = 0", "volume = 1.5", "interromper = 1", "outra = 1"):
             caminho.write_text(base + "[escuta]\n" + texto + "\n", encoding="utf-8")
             verificar(
                 f"[escuta] {texto}: recusado",

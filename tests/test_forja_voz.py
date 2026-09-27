@@ -17,6 +17,7 @@ from unittest import mock
 from jarvis import acoes_locais
 from jarvis.confirmacao import Pedido
 from jarvis.forja_voz import (
+    _FRASES,
     INTENCOES_POR_VOZ,
     SUBCOMANDOS_PERMITIDOS,
     Controlador,
@@ -29,6 +30,7 @@ from jarvis.forja_voz import (
     validar_objetivo,
 )
 from jarvis.interprete import INTENCOES
+from jarvis.persona import VARIANTES, opcoes_da_frase
 from tests.test_app import Montagem, resposta_llm
 from tests.test_estado import SEM_RUN, _ComCLIsFalsos, estado_json
 
@@ -216,10 +218,18 @@ class TestLancar(_Base):
 
     def test_em_ingles(self) -> None:
         self.cenario(git=" M a.py\n")
+        VARIANTES.esquecer()  # a primeira forma de cada frase
         self.assertEqual(
             self.forja().executar("lancar_run", "atlas", OBJETIVO, "en").falado,
-            "Not started: atlas has uncommitted changes.",
+            "I didn't start: atlas has uncommitted changes.",
         )
+
+    def test_em_ingles_nunca_repete_a_mesma_forma_seguida(self) -> None:
+        self.cenario(git=" M a.py\n")
+        ditas = [self.forja().executar("lancar_run", "atlas", OBJETIVO, "en").falado for _ in range(12)]
+        self.assertTrue(all(a != b for a, b in zip(ditas, ditas[1:])), ditas)
+        formas = {forma.format(p="atlas") for forma in opcoes_da_frase(_FRASES["en"]["alteracoes"])}
+        self.assertEqual(set(ditas), formas)
 
 
 class TestControladorQueRecusaLogo(_Base):

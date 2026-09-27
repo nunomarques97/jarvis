@@ -24,6 +24,7 @@ from unittest import mock
 from jarvis import ouvido as ouvido_mod
 from jarvis.audio_util import escrever_wav_pcm16
 from jarvis.config import TECLAS_DE_FALAR, ConfigError, ConfigOuvido, carregar_config
+from jarvis.fim_de_turno import FimDeTurno
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
@@ -825,6 +826,103 @@ class TestAltGrNoOuvido(Base):
         self.assertFalse(any("atalho de teclado" in linha for linha in self.linhas))
 
 
+class VadQueRebenta:
+    def e_fala(self, pedaco: bytes) -> bool:
+        raise RuntimeError("vad partido")
+
+
+class TestUltimaVoz(Base):
+    """O instante do ultimo chunk com voz: o fim verdadeiro da fala, antes do silencio final."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.agora = 100.0
+
+    def relogio(self) -> float:
+        return self.agora
+
+    def dar(self, ouvido: Ouvido, valor: int, n: int, premida: bool = False) -> list[float]:
+        """Alimenta n chunks, com o relogio a andar um chunk antes de cada; devolve os instantes."""
+        instantes = []
+        for _ in range(n):
+            self.agora += DURACAO_DO_CHUNK_S
+            instantes.append(self.agora)
+            ouvido.processar(chunk(valor), premida)
+        return instantes
+
+    def test_maos_livres_marca_o_ultimo_chunk_com_voz_e_nao_o_fecho_do_vad(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), detetor=DetetorFalso(), vad=VadFalso(), relogio=self.relogio)
+        self.dar(ouvido, ATIVACAO, 1)
+        fala = self.dar(ouvido, 0x55, 20)
+        self.dar(ouvido, SILENCIO, chunks_em(SILENCIO_FINAL_S))
+        ouvido.transcrever_pendentes()
+        frase = self.frases[0]
+        self.assertEqual(frase.ultima_voz, fala[-1])
+        self.assertLess(frase.ultima_voz, frase.fim_da_escuta)
+        self.assertAlmostEqual(frase.ms_da_ultima_voz_ao_fim, SILENCIO_FINAL_S * 1000, delta=DURACAO_DO_CHUNK_S * 1000)
+
+    def test_uma_pausa_curta_a_meio_nao_conta_como_fim(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), detetor=DetetorFalso(), vad=VadFalso(), relogio=self.relogio)
+        self.dar(ouvido, ATIVACAO, 1)
+        self.dar(ouvido, 0x55, 10)
+        self.dar(ouvido, SILENCIO, 5)
+        fala = self.dar(ouvido, 0x56, 10)
+        self.dar(ouvido, SILENCIO, chunks_em(SILENCIO_FINAL_S))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(self.frases[0].ultima_voz, fala[-1])
+
+    def test_janela_sem_ativacao_ignora_a_voz_do_jarvis_na_guarda(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), detetor=DetetorFalso(), vad=VadFalso(), relogio=self.relogio)
+        self.assertTrue(ouvido.abrir_escuta(5.0))
+        self.dar(ouvido, SILENCIO, 1)  # abre a janela
+        self.dar(ouvido, 0x66, chunks_em(ouvido_mod.GUARDA_APOS_A_VOZ_S))  # fim da voz do jarvis
+        fala = self.dar(ouvido, 0x55, 15)
+        self.dar(ouvido, SILENCIO, chunks_em(SILENCIO_FINAL_S))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(self.frases[0].ultima_voz, fala[-1])
+
+    def test_tecla_com_vad_marca_a_voz_e_nao_o_soltar(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), vad=VadFalso(), relogio=self.relogio)
+        fala = self.dar(ouvido, 0x22, 15, premida=True)
+        self.dar(ouvido, SILENCIO, 10, premida=True)  # ainda com a tecla, ja calado
+        soltar = self.dar(ouvido, SILENCIO, 1)
+        ouvido.transcrever_pendentes()
+        frase = self.frases[0]
+        self.assertEqual(frase.ultima_voz, fala[-1])
+        self.assertEqual(frase.fim_da_escuta, soltar[0])
+        self.assertAlmostEqual(frase.ms_da_ultima_voz_ao_fim, 11 * DURACAO_DO_CHUNK_S * 1000)
+
+    def test_tecla_sem_vad_nao_inventa_a_ultima_voz(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), relogio=self.relogio)
+        self.dar(ouvido, 0x22, 15, premida=True)
+        self.dar(ouvido, SILENCIO, 1)
+        ouvido.transcrever_pendentes()
+        self.assertIsNone(self.frases[0].ultima_voz)
+        self.assertIsNone(self.frases[0].ms_da_ultima_voz_ao_fim)
+
+    def test_a_frase_seguinte_nao_herda_a_ultima_voz_da_anterior(self) -> None:
+        vad = mock.Mock()
+        vad.e_fala.side_effect = lambda pedaco: pedaco[0] == 0x22
+        ouvido = self.ouvido(MotorFalso(), vad=vad, relogio=self.relogio)
+        self.dar(ouvido, 0x22, 15, premida=True)
+        self.dar(ouvido, SILENCIO, 3)
+        self.dar(ouvido, 0x07, 15, premida=True)  # tecla premida, so ruido sem voz
+        self.dar(ouvido, SILENCIO, 1)
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 2)
+        self.assertIsNotNone(self.frases[0].ultima_voz)
+        self.assertIsNone(self.frases[1].ultima_voz)
+
+    def test_vad_que_falha_com_a_tecla_nunca_perde_a_frase(self) -> None:
+        motor = MotorFalso()
+        ouvido = self.ouvido(motor, vad=VadQueRebenta(), relogio=self.relogio)
+        self.dar(ouvido, 0x22, 15, premida=True)
+        self.dar(ouvido, SILENCIO, 1)
+        ouvido.transcrever_pendentes()
+        self.assertEqual(motor.recebidos, [chunk(0x22) * 15])
+        self.assertIsNone(self.frases[0].ultima_voz)
+
+
 class TestConfigDoOuvido(unittest.TestCase):
     def escrever(self, pasta: str, extra: str) -> Path:
         caminho = Path(pasta) / "config.toml"
@@ -906,6 +1004,158 @@ class TestAutoteste(unittest.TestCase):
     def test_cli_exige_um_modo(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             ouvido_mod.construir_parser().parse_args([])
+
+
+
+class TestInterromperNoOuvido(Base):
+    """A escuta por cima da voz nao muda nada do que o ouvido ja fazia."""
+
+    def ouvido_com_interrupcao(self, **kwargs) -> tuple[Ouvido, list[str]]:
+        eventos: list[str] = []
+        ouvido = self.ouvido(
+            MotorFalso("stop"),
+            detetor=DetetorFalso(),
+            vad=VadFalso(),
+            vad_da_interrupcao=VadFalso(),
+            ao_interromper=lambda evento, _instante: eventos.append(evento),
+            **kwargs,
+        )
+        return ouvido, eventos
+
+    def test_com_a_voz_calada_a_palavra_de_ativacao_funciona_como_antes(self) -> None:
+        ouvido, eventos = self.ouvido_com_interrupcao()
+        self.alimentar(ouvido, 0x44, 20)  # fala sem ativacao e sem voz do jarvis: nada
+        self.assertEqual((ouvido.estado, eventos), ("repouso", []))
+        self.alimentar(ouvido, ATIVACAO, 1)
+        self.assertEqual(ouvido.estado, "ativado")
+
+    def test_a_fala_por_cima_da_voz_nunca_toca_o_bip(self) -> None:
+        ouvido, eventos = self.ouvido_com_interrupcao(com_som=True)
+        ouvido.definir_voz_a_falar(True)
+        self.alimentar(ouvido, 0x44, 10)
+        self.alimentar(ouvido, SILENCIO, chunks_em(SILENCIO_FINAL_S))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(eventos, ["pausar"])
+        self.assertEqual(self.bips, [])
+        self.assertEqual(self.frases[0].gatilho, "interrupcao")
+
+    def test_a_fala_por_cima_conta_como_alguem_a_falar(self) -> None:
+        ouvido, _eventos = self.ouvido_com_interrupcao()
+        ouvido.definir_voz_a_falar(True)
+        self.assertFalse(ouvido.a_ouvir_alguem)
+        self.alimentar(ouvido, 0x44, 4)
+        self.assertTrue(ouvido.a_ouvir_alguem)
+        self.assertEqual(ouvido.interrupcoes, 1)
+
+
+class JuizFalso:
+    """Probabilidade fixa de a frase estar acabada; guarda o audio de cada pedido."""
+
+    def __init__(self, probabilidade: float) -> None:
+        self.valor = probabilidade
+        self.audios: list[bytes] = []
+
+    def probabilidade(self, pcm16: bytes) -> float:
+        self.audios.append(pcm16)
+        return self.valor
+
+
+class TestFimDeTurnoNoOuvido(TestUltimaVoz):
+    """O silencio que fecha a frase das maos-livres vem do fim de turno."""
+
+    # Nas maos-livres a voz dos primeiros 0,25 s (a surdez) nao comeca a frase:
+    # com 30 chunks ficam mais de 0,3 s de voz na frase, o minimo para o modelo.
+
+    def ouvido_com(self, juiz, **kwargs) -> Ouvido:
+        fim = FimDeTurno(juiz, em_fundo=False, escrever=self.linhas.append, **kwargs)
+        return self.ouvido(MotorFalso(), detetor=DetetorFalso(), vad=VadFalso(), relogio=self.relogio, fim_de_turno=fim)
+
+    def test_sem_fim_de_turno_dado_fica_o_silencio_fixo(self) -> None:
+        ouvido = self.ouvido(MotorFalso(), detetor=DetetorFalso(), vad=VadFalso())
+        self.assertEqual(ouvido.fim_de_turno.metodo, "silencio")
+        self.assertEqual(SILENCIO_FINAL_S, 0.6)
+
+    def test_frase_acabada_fecha_aos_0_3_s(self) -> None:
+        juiz = JuizFalso(0.9)
+        ouvido = self.ouvido_com(juiz)
+        self.dar(ouvido, ATIVACAO, 1)
+        self.dar(ouvido, 0x55, 30)
+        self.dar(ouvido, SILENCIO, chunks_em(0.3))
+        self.assertEqual(ouvido.estado, "repouso")
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 1)
+        self.assertAlmostEqual(self.frases[0].ms_da_ultima_voz_ao_fim, 300, delta=DURACAO_DO_CHUNK_S * 1000 / 2)
+        self.assertTrue(any("fim do turno (Smart Turn 0.90)" in linha for linha in self.linhas), self.linhas)
+        # O modelo ouviu a frase desde a ativacao ate ao silencio do pedido (0,2 s).
+        self.assertEqual(juiz.audios, [chunk(0x55) * 30 + chunk(SILENCIO) * 7])
+
+    def test_pausa_numa_frase_inacabada_nao_corta(self) -> None:
+        motor = MotorFalso()
+        fim = FimDeTurno(JuizFalso(0.1), em_fundo=False, escrever=self.linhas.append)
+        ouvido = self.ouvido(motor, detetor=DetetorFalso(), vad=VadFalso(), relogio=self.relogio, fim_de_turno=fim)
+        self.dar(ouvido, ATIVACAO, 1)
+        self.dar(ouvido, 0x55, 30)
+        self.dar(ouvido, SILENCIO, chunks_em(0.9))  # mais do que os 0,6 s fixos
+        self.assertEqual(ouvido.estado, "a_falar")
+        self.dar(ouvido, 0x56, 20)
+        self.dar(ouvido, SILENCIO, chunks_em(1.5))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 1)
+        self.assertEqual(motor.recebidos, [chunk(0x55) * 30 + chunk(SILENCIO) * 30 + chunk(0x56) * 20 + chunk(SILENCIO) * 50])
+        self.assertAlmostEqual(self.frases[0].ms_da_ultima_voz_ao_fim, 1500, delta=DURACAO_DO_CHUNK_S * 1000 / 2)
+
+    def test_voz_curta_demais_fica_com_o_silencio_fixo(self) -> None:
+        juiz = JuizFalso(0.9)
+        ouvido = self.ouvido_com(juiz)
+        self.dar(ouvido, ATIVACAO, 1)
+        self.dar(ouvido, 0x55, 12)  # 3 chunks comecam a frase, so 0,03 s de voz dentro dela
+        self.dar(ouvido, SILENCIO, chunks_em(0.3))
+        self.assertEqual(ouvido.estado, "a_falar")
+        self.dar(ouvido, SILENCIO, chunks_em(0.3))
+        self.assertEqual(ouvido.estado, "repouso")
+        self.assertEqual(juiz.audios, [])
+
+    def test_o_maximo_do_config_manda(self) -> None:
+        ouvido = self.ouvido_com(JuizFalso(0.1), maximo_s=0.9)
+        self.dar(ouvido, ATIVACAO, 1)
+        self.dar(ouvido, 0x55, 30)
+        self.dar(ouvido, SILENCIO, chunks_em(0.9))
+        self.assertEqual(ouvido.estado, "repouso")
+
+    def test_cada_frase_comeca_sem_o_veredicto_da_anterior(self) -> None:
+        juiz = JuizFalso(0.9)
+        ouvido = self.ouvido_com(juiz)
+        for marca in (0x55, 0x56):
+            self.dar(ouvido, ATIVACAO, 1)
+            self.dar(ouvido, marca, 30)
+            self.dar(ouvido, SILENCIO, chunks_em(0.3))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 2)
+        self.assertEqual(len(juiz.audios), 2, "um pedido por frase")
+        self.assertTrue(juiz.audios[1].startswith(chunk(0x56)))
+
+    def test_janela_sem_ativacao_usa_o_mesmo_fim_de_turno(self) -> None:
+        ouvido = self.ouvido_com(JuizFalso(0.9))
+        self.assertTrue(ouvido.abrir_escuta(5.0))
+        self.dar(ouvido, SILENCIO, 1)
+        self.dar(ouvido, SILENCIO, chunks_em(ouvido_mod.GUARDA_APOS_A_VOZ_S))
+        self.dar(ouvido, 0x55, 15)
+        self.dar(ouvido, SILENCIO, chunks_em(0.3))
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 1)
+        self.assertEqual(self.frases[0].gatilho, "janela")
+
+    def test_tecla_nao_passa_pelo_fim_de_turno(self) -> None:
+        juiz = JuizFalso(0.9)
+        ouvido = self.ouvido(MotorFalso(), vad=VadFalso(), relogio=self.relogio,
+                             fim_de_turno=FimDeTurno(juiz, em_fundo=False, escrever=self.linhas.append))
+        self.dar(ouvido, 0x22, 15, premida=True)
+        self.dar(ouvido, SILENCIO, 20, premida=True)  # silencio com a tecla premida nao fecha
+        self.assertEqual(ouvido.estado, "tecla")
+        self.dar(ouvido, SILENCIO, 1)
+        ouvido.transcrever_pendentes()
+        self.assertEqual(len(self.frases), 1)
+        self.assertEqual(juiz.audios, [])
 
 
 if __name__ == "__main__":

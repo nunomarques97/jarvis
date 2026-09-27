@@ -40,6 +40,14 @@ pedido entre cada um. Com `definitivo=True` (Ctrl+C, saida) o modulo fica
 calado e `falar()` passa a recusar tudo: nada novo e dito, nem o resto da
 frase, nem uma despedida, nem a resposta que estivesse a chegar do Claude Code.
 
+PAUSA (interromper o jarvis a falar): `pausar_agora()` para a frase em curso
+sem a matar: a reproducao deixa de escrever, o que ja estava no buffer da
+placa de som e deitado fora (o dispositivo fecha e reabre ao retomar) e a
+chamada devolve o instante em que a voz parou. `retomar_agora()` continua a
+mesma frase um pouco antes de onde parou (`RECUO_AO_RETOMAR_S`); um
+`calar_agora()` durante a pausa acaba-a de vez. Quem decide entre retomar e
+calar e o `jarvis.app`, pela frase que o utilizador disse por cima.
+
 TESTES SILENCIOSOS POR OMISSAO: `falar()` NUNCA abre
 um dispositivo de audio sem opt-in explicito. Chamado sem `ficheiro=` e sem
 `com_som=True`, recusa-se a tocar e devolve um erro claro (`falou=False`,
@@ -109,7 +117,7 @@ from jarvis.audio_util import (  # noqa: E402
     garantir_pasta,
     ler_wav_pcm16,
 )
-from jarvis.config import VOZ_INGLESA_PADRAO, VOZES_INGLESAS  # noqa: E402
+from jarvis.config import VELOCIDADE_MAXIMA, VELOCIDADE_MINIMA, VOZ_INGLESA_PADRAO, VOZES_INGLESAS  # noqa: E402
 from jarvis.consola import forcar_consola_utf8  # noqa: E402
 
 #: A voz escolhida para o produto. Nao mudar sem voltar a medir.
@@ -449,6 +457,40 @@ VELOCIDADE_DAS_VOZES = {
 }
 
 
+#: A velocidade escolhida no config (`[voz] velocidade`) para todas as vozes;
+#: None: cada voz fala a sua (`VELOCIDADE_DAS_VOZES`).
+_velocidade_configurada: float | None = None
+
+
+def _validar_velocidade(velocidade: float) -> float:
+    if (
+        isinstance(velocidade, bool)
+        or not isinstance(velocidade, (int, float))
+        or not VELOCIDADE_MINIMA <= velocidade <= VELOCIDADE_MAXIMA
+    ):
+        raise ValueError(
+            f"velocidade da voz invalida: {velocidade!r} (entre {VELOCIDADE_MINIMA:g} e {VELOCIDADE_MAXIMA:g})"
+        )
+    return float(velocidade)
+
+
+def velocidade_da_voz(nome: str) -> float:
+    """A velocidade do Kokoro para a voz `nome`: a do config ou a da propria voz."""
+    if _velocidade_configurada is not None:
+        return _velocidade_configurada
+    return VELOCIDADE_DAS_VOZES[_validar_voz_inglesa(nome)]
+
+
+def definir_velocidade(velocidade: float | None) -> None:
+    """Fixa a velocidade de todas as vozes (None volta a de cada voz); se mudar, o motor ingles e esquecido."""
+    global _velocidade_configurada
+    nova = None if velocidade is None else _validar_velocidade(velocidade)
+    with _TRANCA_DO_MOTOR:
+        if nova != _velocidade_configurada:
+            _motores_residentes.pop("en", None)
+        _velocidade_configurada = nova
+
+
 def lingua_do_fonemizador(nome: str) -> str:
     """"en-gb" para as vozes britanicas do Kokoro (b...), "en-us" para as americanas (a...)."""
     return "en-gb" if nome.startswith("b") else "en-us"
@@ -462,6 +504,14 @@ BLOCO_DE_REPRODUCAO_S = 0.05
 #: Quanto `FalaResidente.stop()` espera, no maximo, pelo fim da reproducao.
 #: Fica abaixo da fasquia do silencio para `calar_agora()` nunca a passar a espera.
 ESPERA_DO_STOP_S = 0.4
+
+#: Quanto `pausar_agora()` espera, no maximo, que a reproducao pare de facto.
+ESPERA_DA_PAUSA_S = 0.25
+#: Ao retomar depois de uma pausa, a frase recua isto (sem sair do bloco em
+#: curso): o que estava no buffer da placa de som quando pausou nunca se ouviu.
+RECUO_AO_RETOMAR_S = 0.5
+#: Ritmo a que uma frase em pausa verifica se foi retomada ou calada.
+PASSO_DA_PAUSA_S = 0.01
 
 #: Uma primeira frase mais comprida do que isto e partida na primeira virgula
 #: (depois do minimo), para o primeiro audio nao esperar pela frase inteira.
@@ -548,7 +598,7 @@ class MotorKokoro:
         vozes = Path(vozes or VOZES_KOKORO)
         self.voz = _validar_voz_inglesa(voz or voz_inglesa())
         self.lingua_do_fonemizador = lingua_do_fonemizador(self.voz)
-        self.velocidade = VELOCIDADE_DAS_VOZES[self.voz]
+        self.velocidade = velocidade_da_voz(self.voz)
         try:
             import kokoro_onnx
         except ImportError as erro:
@@ -591,7 +641,16 @@ class MotorKokoro:
         outro = copy.copy(self)
         outro.voz = nome
         outro.lingua_do_fonemizador = lingua_do_fonemizador(nome)
-        outro.velocidade = VELOCIDADE_DAS_VOZES[nome]
+        outro.velocidade = velocidade_da_voz(nome)
+        outro._descrever()
+        return outro
+
+    def com_velocidade(self, velocidade: float) -> "MotorKokoro":
+        """Outro motor com a mesma voz a `velocidade` (0.8 a 1.3), com o modelo ja carregado."""
+        import copy
+
+        outro = copy.copy(self)
+        outro.velocidade = _validar_velocidade(velocidade)
         outro._descrever()
         return outro
 
@@ -693,6 +752,22 @@ class _SaidaDeSom:
             stream = self._stream
         stream.write(dados)
 
+    def descartar(self) -> None:
+        """Fecha o dispositivo SEM tocar o que ainda estava no buffer (a escrita seguinte reabre).
+
+        `Pa_CloseStream` com o stream ativo deita fora o que falta tocar, ao
+        contrario de `stop_stream`, que espera que acabe. So a thread que
+        escreve chama isto, por isso nunca fecha a meio de uma escrita.
+        """
+        with self._tranca:
+            stream, self._stream = self._stream, None
+            self._taxa = 0
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 - pausar nunca pode levantar
+                pass
+
     def _fechar_stream(self) -> None:
         if self._stream is not None:
             try:
@@ -735,7 +810,9 @@ class FalaResidente:
     `play()`, `stop()` e um `engine` com `matar_agora()`. A sintese corre numa
     thread que enche uma fila; `play()` tira blocos da fila e toca-os ou
     escreve-os. Um pedido de silencio para os dois lados: a sintese deixa de
-    produzir e a reproducao nao escreve mais nenhum bloco.
+    produzir e a reproducao nao escreve mais nenhum bloco. Uma pausa so para
+    a reproducao (a sintese continua a encher a fila) ate `retomar()` ou a um
+    silencio.
     """
 
     def __init__(self, motor, saida_de_som: _SaidaDeSom | None = None) -> None:
@@ -750,6 +827,12 @@ class FalaResidente:
         #: `perf_counter()` do instante em que o primeiro bloco de audio saiu
         #: (entregue ao dispositivo ou escrito no WAV). None se nada saiu.
         self.instante_do_primeiro_audio: float | None = None
+        #: Pausa pedida, pausa em vigor (a reproducao ja parou) e o pedido de retomar.
+        self._pausa = threading.Event()
+        self._em_pausa = threading.Event()
+        self._retomar = threading.Event()
+        #: `perf_counter()` do instante em que a ultima pausa parou a voz.
+        self.instante_da_pausa: float | None = None
 
     def feed(self, texto: str) -> None:
         self._textos.append(texto)
@@ -768,6 +851,49 @@ class FalaResidente:
         self._calado = True
         self._parar.set()
         return estava
+
+    def pausar(self, limite_s: float = ESPERA_DA_PAUSA_S) -> float | None:
+        """Pausa a reproducao; devolve o instante em que a voz parou, ou None.
+
+        None quando a frase ja nao esta a tocar ou nao parou dentro de
+        `limite_s`; nesse caso a pausa e desfeita, para a frase nunca ficar
+        parada sem ninguem saber.
+        """
+        if not self._a_falar.is_set() or self._parar.is_set():
+            return None
+        if self._em_pausa.is_set():
+            return self.instante_da_pausa
+        self._retomar.clear()
+        self._pausa.set()
+        if self._fio_que_toca is not threading.current_thread() and self._em_pausa.wait(limite_s):
+            return self.instante_da_pausa
+        self.retomar()
+        return None
+
+    def retomar(self) -> bool:
+        """Continua a frase em pausa; False se nao havia pausa pedida."""
+        if not self._pausa.is_set():
+            return False
+        self._pausa.clear()
+        self._retomar.set()
+        return True
+
+    @property
+    def em_pausa(self) -> bool:
+        return self._pausa.is_set()
+
+    def _esperar_em_pausa(self, soou: bool) -> None:
+        """Na thread que toca: deita fora o buffer do dispositivo e espera por retomar ou calar."""
+        if soou:
+            self._saida.descartar()
+        self.instante_da_pausa = time.perf_counter()
+        self._em_pausa.set()
+        try:
+            while not self._parar.is_set() and not self._retomar.wait(PASSO_DA_PAUSA_S):
+                pass
+        finally:
+            self._em_pausa.clear()
+            self._retomar.clear()
 
     def stop(self) -> None:
         """Para a reproducao e espera (no maximo `ESPERA_DO_STOP_S`) que pare mesmo.
@@ -807,8 +933,12 @@ class FalaResidente:
         )
         produtor.start()
         wav = None
+        soou = False
         try:
             while not self._parar.is_set():
+                if self._pausa.is_set():
+                    self._esperar_em_pausa(soou)
+                    continue
                 try:
                     bloco = fila.get(timeout=BLOCO_DE_REPRODUCAO_S)
                 except queue.Empty:
@@ -827,19 +957,56 @@ class FalaResidente:
                     wav.writeframes(bloco)
                 if not muted:
                     passo = max(2, int(taxa * BLOCO_DE_REPRODUCAO_S) * 2)
-                    for inicio in range(0, len(bloco), passo):
+                    recuo = int(taxa * RECUO_AO_RETOMAR_S) * 2
+                    inicio = 0
+                    while inicio < len(bloco):
                         if self._parar.is_set():
                             break
+                        if self._pausa.is_set():
+                            self._esperar_em_pausa(soou)
+                            inicio = max(0, inicio - recuo)
+                            continue
                         pedaco = bloco[inicio : inicio + passo]
                         _avisar_ouvinte_da_voz(pedaco)
                         self._saida.escrever(taxa, pedaco)
+                        soou = True
                         self._marcar_primeiro_audio()
+                        inicio += passo
                 else:
                     self._marcar_primeiro_audio()
         finally:
             self._a_falar.clear()
             if wav is not None:
                 wav.close()
+
+
+def pausar_agora(limite_s: float = ESPERA_DA_PAUSA_S) -> float | None:
+    """Pausa a frase que esta a tocar; devolve o instante (`perf_counter`) em que a voz parou.
+
+    None quando nada esta a tocar (ou a frase nao parou a tempo). Nunca levanta.
+    """
+    with _TRANCA_DA_VOZ:
+        stream = _stream_ativo
+    pausar = getattr(stream, "pausar", None)
+    if not callable(pausar):
+        return None
+    try:
+        return pausar(limite_s)
+    except Exception:  # noqa: BLE001 - pausar nunca pode levantar
+        return None
+
+
+def retomar_agora() -> bool:
+    """Retoma a frase em pausa; False se nao havia nenhuma. Nunca levanta."""
+    with _TRANCA_DA_VOZ:
+        stream = _stream_ativo
+    retomar = getattr(stream, "retomar", None)
+    if not callable(retomar):
+        return False
+    try:
+        return bool(retomar())
+    except Exception:  # noqa: BLE001 - retomar nunca pode levantar
+        return False
 
 
 def _construir_stream():

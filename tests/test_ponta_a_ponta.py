@@ -42,7 +42,7 @@ from jarvis.audio_util import escrever_wav_pcm16
 from jarvis.ouvido import MODELO_ATIVACAO, BYTES_POR_CHUNK, FonteDeFicheiro, TeclaDoFicheiro
 from jarvis.stt import MotorBase
 from scripts import medir_ponta_a_ponta
-from tests.test_app import CanalFalso, Montagem, _TeclaSolta, resposta_llm
+from tests.test_app import CanalFalso, Montagem, RelogioFalso, _TeclaSolta, resposta_llm
 
 TAXA = 16000
 
@@ -112,7 +112,7 @@ class TestDitadoConfirmado(_Base):
         self.assertEqual(m.canal.recebidos, [("orbita", PROMPT)])
         texto = m.log.texto()
         # O recap mostrou o mesmo prompt que chegou ao canal, antes do "sim".
-        self.assertIn(PROMPT, m.falados[0])
+        self.assertIn(PROMPT.rstrip("."), m.falados[0])
         self.assertLess(texto.index("ecra | "), texto.index("prompt confirmado entregue ao canal do orbita"))
         self.assertEqual(m.falados[-1], "Enviado para o orbita.")
 
@@ -239,6 +239,73 @@ class TestCanalFalsoEOProjetoCerto(_Base):
         self.assertIn("o prompt confirmado NAO foi enviado", m.log.texto())
 
 
+class TestCaminhoRapidoSemLLM(_Base):
+    """Os pedidos comuns inequivocos respondem sem chamar o LLM, e cada resposta diz onde foi o tempo."""
+
+    FRASES_RAPIDAS = ("qual é o estado do orbita", "vai chover amanhã em lisboa", "que horas são")
+
+    def test_pedidos_comuns_nao_chamam_o_llm(self) -> None:
+        m = self.correr_ficheiros(list(self.FRASES_RAPIDAS), [])
+
+        self.assertEqual(m.llm.pedidos, [], "o caminho rapido nunca chama o LLM")
+        self.assertEqual(
+            [medida.intencao for medida in m.jarvis.medidas], ["estado", "pergunta_geral", "horas"]
+        )
+        texto = m.log.texto()
+        for numero in (1, 2, 3):
+            linha = next(l for l in texto.splitlines() if f"frase #{numero} | etapa 3/5 interprete" in l)
+            self.assertIn("origem=regra", linha)
+        self.assertEqual(m.canal.recebidos, [])
+
+    def test_cada_resposta_regista_os_tempos_por_etapa(self) -> None:
+        m = self.correr_ficheiros(list(self.FRASES_RAPIDAS) + [DITADO], [RESPOSTA_DO_DITADO])
+
+        self.assertEqual(len(m.llm.pedidos), 1, "so o ditado vai ao LLM")
+        origens = [medida.tempos.origem for medida in m.jarvis.medidas]
+        self.assertEqual(origens, ["regra", "regra", "regra", "llm"])
+        for medida in m.jarvis.medidas:
+            tempos = medida.tempos
+            self.assertIsNotNone(tempos.interprete_ms)
+            for valor in (tempos.stt_ms, tempos.interprete_ms, tempos.resto_ms, tempos.voz_ms):
+                self.assertGreaterEqual(valor, 0.0)
+            self.assertAlmostEqual(tempos.total_ms, medida.primeira_fala_ms, delta=1.0)
+        texto = m.log.texto()
+        for numero in range(1, 5):
+            self.assertIn(f"frase #{numero} | tempos ate a primeira voz: fim de turno", texto)
+
+
+class TestTemposDesdeAUltimaVoz(unittest.TestCase):
+    def test_decomposicao_desde_o_ultimo_chunk_com_voz(self) -> None:
+        m = Montagem([], relogio=RelogioFalso(), primeiro_audio_depois_s=0.1)
+        agora = m.relogio()
+        fim = agora - 0.5
+        m.ouvir("what time is it", fim=fim, ultima_voz=fim - 0.6)
+
+        tempos = m.jarvis.medidas[-1].tempos
+        self.assertEqual(tempos.origem, "regra")
+        self.assertAlmostEqual(tempos.fim_de_turno_ms, 600.0)
+        self.assertAlmostEqual(tempos.stt_ms, 200.0)
+        self.assertAlmostEqual(tempos.interprete_ms, 0.0)
+        self.assertAlmostEqual(tempos.voz_ms, 100.0)
+        self.assertAlmostEqual(tempos.total_ms, 1200.0)
+        self.assertAlmostEqual(tempos.resto_ms, 300.0)
+        self.assertIn(
+            "tempos ate a primeira voz: fim de turno 600 ms | stt 200 ms | interprete 0 ms (origem=regra) "
+            "| resto 300 ms | voz 100 ms | total 1200 ms desde a ultima voz",
+            m.log.texto(),
+        )
+
+    def test_sem_ultima_voz_conta_desde_o_fim_da_escuta(self) -> None:
+        tempos = app.tempos_da_resposta(
+            fim_da_escuta=10.0, texto_pronto=10.25, primeiro_audio=10.9, inicio_da_voz=10.7, interprete=None
+        )
+        self.assertIsNone(tempos.fim_de_turno_ms)
+        self.assertAlmostEqual(tempos.total_ms, 900.0)
+        self.assertAlmostEqual(tempos.resto_ms, 450.0)
+        self.assertIn("fim de turno ? | stt 250 ms | interprete nao usado", tempos.linha())
+        self.assertTrue(tempos.linha().endswith("total 900 ms desde o fim da escuta"))
+
+
 # --- scripts/medir_ponta_a_ponta.py: as metas e a classificacao, sem motores --------
 
 
@@ -297,6 +364,32 @@ class TestMetasDaMedicao(unittest.TestCase):
         self.assertEqual(resultado.confirmados, 1)
         self.assertEqual(len(resultado.nao_percebidas), 1)
         self.assertEqual(resultado.sinal_de_vida_ms, [100.0, 120.0, 90.0, 110.0])
+
+    def test_resumo_mostra_os_tempos_por_etapa(self) -> None:
+        def tempos(interprete_ms, origem):
+            return app.TemposDaResposta(
+                fim_de_turno_ms=600.0, stt_ms=200.0, interprete_ms=interprete_ms, origem=origem,
+                resto_ms=10.0, voz_ms=150.0, total_ms=960.0 + interprete_ms,
+            )
+
+        def medida(numero, **campos):
+            return app.MedidaDaFrase(numero=numero, texto="t", gatilho="tecla", fim_da_fala=0.0, **campos)
+
+        medidas = [
+            medida(1, primeira_fala_ms=900.0, intencao="horas", tempos=tempos(2.0, "regra")),
+            medida(2, primeira_fala_ms=1500.0, intencao="ditar_prompt", projeto="atlas", desfecho="pendente",
+                   tempos=tempos(700.0, "llm")),
+        ]
+        resultado = medir_ponta_a_ponta.classificar(medidas, voltas=1)
+        self.assertEqual([t.origem for t in resultado.tempos_horas], ["regra"])
+        self.assertEqual([t.origem for t in resultado.tempos_recap], ["llm"])
+        resumo = "\n".join(medir_ponta_a_ponta.linhas_do_resumo(resultado))
+        self.assertIn("horas, por etapa", resumo)
+        self.assertIn("fim de turno 600 ms | stt 200 ms | interprete 2 ms (regra 1)", resumo)
+        self.assertIn("interprete 700 ms (llm 1)", resumo)
+        self.assertIn("voz 150 ms", resumo)
+        vazio = medir_ponta_a_ponta.linhas_do_resumo(medir_ponta_a_ponta.classificar([], voltas=1))
+        self.assertTrue(any("por etapa" in linha and "sem amostras" in linha for linha in vazio))
 
     def test_percentil_sem_interpolar(self) -> None:
         self.assertEqual(medir_ponta_a_ponta.percentil([1.0, 2.0, 3.0, 4.0], 50), 2.0)

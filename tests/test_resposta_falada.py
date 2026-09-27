@@ -26,12 +26,13 @@ from jarvis.resposta_falada import (
     MAXIMO_CARACTERES_POR_LINHA,
     MAXIMO_CARACTERES_POR_PALAVRA,
     MAXIMO_FRASES_FALADAS,
-    PREFIXO_DA_RESPOSTA_DO_CLAUDE,
+    ROTULO_DA_RESPOSTA_DO_CLAUDE,
+    ResumoEmFluxo,
     cortar_no_limite,
     dividir_em_frases,
     frase_de_recurso,
-    prefixo_da_resposta,
     resumo_falado,
+    rotulo_da_origem,
     tem_pergunta,
     texto_falavel,
     texto_proibido,
@@ -169,7 +170,7 @@ class TestLimitesDeCaracteres(unittest.TestCase):
 
     def test_corta_no_fim_de_uma_palavra_sem_ponto_final(self) -> None:
         falado = resumo_falado("palavra " * 50, limite=20)
-        corpo = falado[len(PREFIXO_DA_RESPOSTA_DO_CLAUDE) + 1 :]
+        corpo = falado
         self.assertTrue(corpo.endswith("..."))
         self.assertLessEqual(len(corpo), 24)
         self.assertNotIn("palav.", corpo)
@@ -177,19 +178,19 @@ class TestLimitesDeCaracteres(unittest.TestCase):
     def test_corta_no_fim_de_frase_quando_ha_um_ponto_final_na_janela(self) -> None:
         resposta = "Primeira frase completa. " + ("palavra " * 40)
         falado = resumo_falado(resposta, limite=30)
-        corpo = falado[len(PREFIXO_DA_RESPOSTA_DO_CLAUDE) + 1 :]
+        corpo = falado
         self.assertEqual(corpo, "Primeira frase completa.")
 
     def test_resposta_dentro_do_limite_nunca_falado_e_como_o_conteudo_falavel(self) -> None:
         resposta = "Está tudo feito."
         self.assertEqual(
-            resumo_falado(resposta), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito."
+            resumo_falado(resposta), "Está tudo feito."
         )
 
     def test_conteudo_falado_nunca_passa_dos_duzentos_caracteres(self) -> None:
         resposta = "frase natural sem tags nem código. " * 20
         falado = resumo_falado(resposta)
-        corpo = falado[len(PREFIXO_DA_RESPOSTA_DO_CLAUDE) + 1 :]
+        corpo = falado
         self.assertLessEqual(len(corpo), MAXIMO_CARACTERES_FALADOS + len("..."))
 
     def test_teto_absoluto_com_prefixo_nunca_e_ultrapassado(self) -> None:
@@ -207,27 +208,40 @@ class TestLimitesDeCaracteres(unittest.TestCase):
             self.assertIn(palavra, original.split(" "), f"{palavra!r} nao e uma palavra inteira")
 
 
-class TestPrefixoDeOrigem(unittest.TestCase):
-    """D48.4/D59.5: quem fala nomeia a origem e diz que nao esta verificada."""
+class TestRotuloDeOrigemSoNoEcra(unittest.TestCase):
+    """A voz nunca diz de quem e a resposta; o rotulo fica no ecra e no log."""
 
-    def test_prefixo_diz_de_quem_e_a_frase(self) -> None:
-        self.assertIn("Claude", PREFIXO_DA_RESPOSTA_DO_CLAUDE)
+    def test_rotulo_diz_de_quem_e_a_resposta(self) -> None:
+        self.assertIn("Claude", ROTULO_DA_RESPOSTA_DO_CLAUDE)
+        self.assertIn("não verificada", ROTULO_DA_RESPOSTA_DO_CLAUDE)
+        self.assertEqual(rotulo_da_origem("pt"), ROTULO_DA_RESPOSTA_DO_CLAUDE)
+        self.assertEqual(rotulo_da_origem("en"), "Claude says:")
 
-    def test_prefixo_diz_que_nao_esta_verificada(self) -> None:
-        self.assertIn("não verificada", PREFIXO_DA_RESPOSTA_DO_CLAUDE)
+    def test_nenhuma_resposta_falada_tem_o_rotulo(self) -> None:
+        respostas = ("Está tudo bem.", "", "   ", '{"a": 1}', "Done. Shall I commit?", "palavra " * 60)
+        for lingua in ("pt", "en"):
+            for resposta in respostas:
+                with self.subTest(lingua=lingua, resposta=repr(resposta[:20])):
+                    falado = resumo_falado(resposta, lingua=lingua)
+                    self.assertNotIn("Claude says", falado)
+                    self.assertNotIn("Claude Code", falado)
+                    self.assertNotIn(rotulo_da_origem(lingua), falado)
 
-    def test_toda_a_resposta_falada_comeca_pelo_prefixo(self) -> None:
-        for resposta in ("Está tudo bem.", "", "   ", '{"a": 1}'):
-            with self.subTest(resposta=repr(resposta)):
-                self.assertTrue(resumo_falado(resposta).startswith(PREFIXO_DA_RESPOSTA_DO_CLAUDE))
+    def test_as_frases_de_recurso_nao_nomeiam_a_origem(self) -> None:
+        for lingua in ("pt", "en"):
+            for caso in ("sem_texto", "so_tecnico", "sem_corte_seguro"):
+                with self.subTest(lingua=lingua, caso=caso):
+                    frase = frase_de_recurso(caso, lingua)
+                    self.assertNotIn("Claude", frase)
+                    self.assertLessEqual(len(frase), 80)
 
 
 class TestFraseDeRecurso(unittest.TestCase):
     """D59.4: o silencio nunca e a resposta; a frase de recurso diz onde esta o resto."""
 
     def test_as_duas_frases_de_recurso_dizem_onde_esta_a_resposta_completa(self) -> None:
-        self.assertIn("consola", FRASE_RECURSO_SEM_TEXTO)
-        self.assertIn("consola", FRASE_RECURSO_SO_TECNICO)
+        self.assertIn("ecrã", FRASE_RECURSO_SEM_TEXTO)
+        self.assertIn("ecrã", FRASE_RECURSO_SO_TECNICO)
 
     def test_as_duas_frases_de_recurso_sao_diferentes(self) -> None:
         self.assertNotEqual(FRASE_RECURSO_SEM_TEXTO, FRASE_RECURSO_SO_TECNICO)
@@ -261,18 +275,18 @@ class TestTagsSemFechoNaMesmaLinha(unittest.TestCase):
         for inicio in inicios:
             with self.subTest(inicio=inicio):
                 falado = resumo_falado(f"Feito.\n{inicio}")
-                self.assertEqual(falado, f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.")
+                self.assertEqual(falado, "Feito.")
                 self.assertNotIn(inicio.strip("<"), falado)
                 self.assertNotIn("<", falado)
 
     def test_tag_partida_em_linhas_sai_inteira_sem_deixar_o_atributo(self) -> None:
         # `name="Bash">` sozinho nao e uma tag, mas tambem nao e linguagem natural
         falado = resumo_falado('Ok.\n<invoke\nname="Bash">\n</invoke')
-        self.assertEqual(falado, f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Ok.")
+        self.assertEqual(falado, "Ok.")
 
     def test_linha_so_com_o_maior_que_do_fecho_nao_chega_a_voz(self) -> None:
         falado = resumo_falado("Ok.\n</invoke\n>")
-        self.assertEqual(falado, f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Ok.")
+        self.assertEqual(falado, "Ok.")
         self.assertNotIn(">", falado)
 
 
@@ -392,7 +406,7 @@ class TestFiltroNaoComeLinguagemNatural(unittest.TestCase):
         for frase in self.FRASES:
             with self.subTest(frase=frase):
                 falado = resumo_falado(frase)
-                self.assertEqual(falado, f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} {frase}")
+                self.assertEqual(falado, frase)
 
 
 class TestCategoriasExtraDeExclusao(unittest.TestCase):
@@ -453,7 +467,7 @@ class TestCaminhoRealDaRespostaDoClaude(unittest.TestCase):
         teste = self._responder("Está tudo feito, os testes passaram todos.")
         self.assertEqual(
             teste.falados,
-            [f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito, os testes passaram todos."],
+            ["Está tudo feito, os testes passaram todos."],
         )
 
     def test_resposta_gigante_sem_um_espaco_nao_parte_uma_palavra_ao_meio(self) -> None:
@@ -483,7 +497,7 @@ class TestVarreduraPorCategoria(unittest.TestCase):
                 falado = resumo_falado(f"Feito.\n{variante}")
                 self.assertIn(
                     falado,
-                    (f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.", FRASE_RECURSO_SO_TECNICO),
+                    ("Feito.", FRASE_RECURSO_SO_TECNICO),
                     f"{variante!r} chegou a voz: {falado!r}",
                 )
 
@@ -644,7 +658,7 @@ class TestVarreduraPorCategoria(unittest.TestCase):
         # o filtro tira a marcacao, nao a resposta: so o titulo sai, o texto por baixo fica
         self.assertEqual(
             resumo_falado("## Resumo\n\nEstá tudo feito e os testes passaram."),
-            f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito e os testes passaram.",
+            "Está tudo feito e os testes passaram.",
         )
 
     def test_11_a_juncao_das_linhas_nao_remonta_nenhuma_categoria(self) -> None:
@@ -689,7 +703,7 @@ class TestCasosExatosDaRevisao(unittest.TestCase):
 
     def test_a_frase_natural_a_volta_do_prompt_sobrevive(self) -> None:
         # o pedaco proibido sai INTEIRO e o que era linguagem natural continua a falar-se
-        self.assertEqual(resumo_falado("Feito.\n>dir"), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.")
+        self.assertEqual(resumo_falado("Feito.\n>dir"), "Feito.")
 
     def test_o_url_partido_em_linhas_nao_se_remonta_na_juncao(self) -> None:
         falado = resumo_falado("Ve em https\n://exemplo.pt/guia")
@@ -746,7 +760,7 @@ class TestDesempenhoDoFiltro(unittest.TestCase):
 
     def test_uma_palavra_gigante_nao_arrasta_a_frase_natural_da_mesma_resposta(self) -> None:
         falado, decorrido = self._medir("Está tudo feito.\n" + "x" * 30_000)
-        self.assertEqual(falado, f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito.")
+        self.assertEqual(falado, "Está tudo feito.")
         self.assertLess(decorrido, self.LIMITE_DE_TEMPO_S)
 
     def test_uma_palavra_maior_do_que_a_frase_falada_nunca_e_falavel(self) -> None:
@@ -776,7 +790,7 @@ class TestDesempenhoDoFiltro(unittest.TestCase):
         linha_gigante = ("a" * 15 + "." + "b" * 10 + " ") * 100
         texto = "Está tudo feito.\n\n" + linha_gigante
         self.assertEqual(
-            resumo_falado(texto), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Está tudo feito."
+            resumo_falado(texto), "Está tudo feito."
         )
 
     def test_uma_linha_de_prosa_natural_quase_no_teto_continua_falavel(self) -> None:
@@ -790,7 +804,7 @@ class TestDesempenhoDoFiltro(unittest.TestCase):
         self.assertEqual(texto_falavel(linha), linha)
         falado = resumo_falado(linha)
         self.assertNotEqual(falado, FRASE_RECURSO_SO_TECNICO)
-        self.assertTrue(falado.startswith(f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Corri os testes"))
+        self.assertTrue(falado.startswith("Corri os testes"))
 
     def test_linha_de_1m_de_caracteres_feita_de_muitas_palavras_curtas_e_tratada_em_tempo_trivial(
         self,
@@ -847,7 +861,7 @@ class TestTetoPorLinhaNaoEOTetoDaRespostaJunta(unittest.TestCase):
         falado = resumo_falado(resposta)
         self.assertNotEqual(falado, FRASE_RECURSO_SO_TECNICO)
         self.assertNotEqual(falado, FRASE_RECURSO_SEM_TEXTO)
-        self.assertTrue(falado.startswith(f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Corri os testes"))
+        self.assertTrue(falado.startswith("Corri os testes"))
         self.assertLessEqual(len(falado), MAXIMO_ABSOLUTO_FALADO)
         return falado
 
@@ -888,15 +902,13 @@ RESPOSTA_HEADLESS_COM_PERGUNTA = (
 
 
 class TestLinguaDaResposta(unittest.TestCase):
-    """O prefixo e as frases de recurso seguem a lingua do jarvis; pt fica como estava."""
+    """O rotulo e as frases de recurso seguem a lingua do jarvis; a voz diz so o conteudo."""
 
-    def test_em_ingles_o_prefixo_e_curto(self) -> None:
-        self.assertEqual(prefixo_da_resposta("en"), "Claude says:")
-        self.assertEqual(resumo_falado("All tests pass.", lingua="en"), "Claude says: All tests pass.")
+    def test_em_ingles_diz_so_o_conteudo(self) -> None:
+        self.assertEqual(resumo_falado("All tests pass.", lingua="en"), "All tests pass.")
 
-    def test_em_portugues_fica_o_prefixo_de_sempre(self) -> None:
-        self.assertEqual(prefixo_da_resposta("pt"), PREFIXO_DA_RESPOSTA_DO_CLAUDE)
-        self.assertEqual(resumo_falado("Feito."), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Feito.")
+    def test_em_portugues_diz_so_o_conteudo(self) -> None:
+        self.assertEqual(resumo_falado("Feito."), "Feito.")
         self.assertEqual(frase_de_recurso("so_tecnico", "pt"), FRASE_RECURSO_SO_TECNICO)
         self.assertEqual(frase_de_recurso("sem_texto", "pt"), FRASE_RECURSO_SEM_TEXTO)
 
@@ -916,7 +928,7 @@ class TestSemMarcacaoMarkdown(unittest.TestCase):
 
     def test_negrito_da_aceitacao_nunca_se_le_com_asteriscos(self) -> None:
         falado = resumo_falado("**How I found it**\nThe startup waits for the model.", lingua="en")
-        self.assertEqual(falado, "Claude says: How I found it. The startup waits for the model.")
+        self.assertEqual(falado, "How I found it. The startup waits for the model.")
 
     def test_enfase_titulos_listas_links_e_crases(self) -> None:
         resposta = (
@@ -927,7 +939,7 @@ class TestSemMarcacaoMarkdown(unittest.TestCase):
         )
         falado = resumo_falado(resposta, lingua="en")
         self.assertEqual(
-            falado, "Claude says: First, I read the setup guide. Then the warmup step runs twice. Nothing else changed."
+            falado, "First, I read the setup guide. Then the warmup step runs twice. Nothing else changed."
         )
         for marca in ("*", "#", "[", "]", "(", "`", "__", "example", "https", "- ", "Summary"):
             self.assertNotIn(marca, falado)
@@ -935,7 +947,7 @@ class TestSemMarcacaoMarkdown(unittest.TestCase):
     def test_o_paragrafo_colado_ao_titulo_continua_a_falar_se(self) -> None:
         self.assertEqual(
             resumo_falado("## Result\nThe startup is slow in the model load.", lingua="en"),
-            "Claude says: The startup is slow in the model load.",
+            "The startup is slow in the model load.",
         )
 
     def test_um_titulo_com_codigo_continua_a_fechar_o_bloco(self) -> None:
@@ -944,10 +956,10 @@ class TestSemMarcacaoMarkdown(unittest.TestCase):
 
     def test_link_sem_forma_completa_continua_a_sair_pelo_filtro(self) -> None:
         falado = resumo_falado('Done.\nSee [the guide](https://x.io/a "title").', lingua="en")
-        self.assertEqual(falado, "Claude says: Done.")
+        self.assertEqual(falado, "Done.")
 
     def test_identificadores_com_sublinhado_nao_viram_enfase(self) -> None:
-        self.assertEqual(resumo_falado("Done.\nI changed __init__ now.", lingua="en"), "Claude says: Done.")
+        self.assertEqual(resumo_falado("Done.\nI changed __init__ now.", lingua="en"), "Done.")
 
 
 class TestSoAsPrimeirasFrases(unittest.TestCase):
@@ -957,13 +969,13 @@ class TestSoAsPrimeirasFrases(unittest.TestCase):
         resposta = "One is done. Two is done. Three is done. Four is done. Five is done."
         self.assertEqual(MAXIMO_FRASES_FALADAS, 3)
         self.assertEqual(
-            resumo_falado(resposta, lingua="en"), "Claude says: One is done. Two is done. Three is done."
+            resumo_falado(resposta, lingua="en"), "One is done. Two is done. Three is done."
         )
 
     def test_continua_dentro_do_limite_de_caracteres(self) -> None:
         frase = "This sentence is long enough to fill a good part of the spoken limit on its own. "
         falado = resumo_falado(frase * 3, lingua="en")
-        corpo = falado[len("Claude says: ") :]
+        corpo = falado
         self.assertLessEqual(len(corpo), MAXIMO_CARACTERES_FALADOS)
         self.assertLessEqual(len(falado), MAXIMO_ABSOLUTO_FALADO)
         self.assertTrue(corpo.endswith("."))
@@ -975,7 +987,7 @@ class TestSoAsPrimeirasFrases(unittest.TestCase):
         resposta = "One is done. Two is done. Three is done. Four is done. Shall I commit?"
         falado = resumo_falado(resposta, lingua="en")
         self.assertTrue(falado.endswith("Shall I commit?"), falado)
-        self.assertLessEqual(len(dividir_em_frases(falado[len("Claude says: ") :])), MAXIMO_FRASES_FALADAS)
+        self.assertLessEqual(len(dividir_em_frases(falado)), MAXIMO_FRASES_FALADAS)
 
 
 class TestPerguntaDoClaudeOuveSe(unittest.TestCase):
@@ -983,7 +995,7 @@ class TestPerguntaDoClaudeOuveSe(unittest.TestCase):
 
     def test_resposta_headless_da_aceitacao(self) -> None:
         falado = resumo_falado(RESPOSTA_HEADLESS_COM_PERGUNTA, lingua="en")
-        self.assertTrue(falado.startswith("Claude says: Which two test files do you mean?"), falado)
+        self.assertTrue(falado.startswith("Which two test files do you mean?"), falado)
         for proibido in ("tests/", "test_anomaly", ".py", "`"):
             self.assertNotIn(proibido, falado)
         self.assertTrue(tem_pergunta(falado))
@@ -991,14 +1003,14 @@ class TestPerguntaDoClaudeOuveSe(unittest.TestCase):
 
     def test_a_pergunta_so_volta_se_passar_o_filtro_sozinha(self) -> None:
         falado = resumo_falado("Done.\nShould I delete tests/test_anomaly.py? It is old.", lingua="en")
-        self.assertEqual(falado, "Claude says: Done.")
+        self.assertEqual(falado, "Done.")
 
     def test_sinais_de_pergunta_sem_palavras_nao_sao_pergunta(self) -> None:
-        self.assertEqual(resumo_falado("Done.\n?? tests/fixtures/", lingua="en"), "Claude says: Done.")
+        self.assertEqual(resumo_falado("Done.\n?? tests/fixtures/", lingua="en"), "Done.")
 
     def test_as_linhas_seguintes_do_bloco_proibido_nunca_voltam(self) -> None:
         falado = resumo_falado("Done.\nI ran `x = 1`.\nShall I commit?", lingua="en")
-        self.assertEqual(falado, "Claude says: Done.")
+        self.assertEqual(falado, "Done.")
 
 
 if __name__ == "__main__":
@@ -1035,14 +1047,14 @@ class TestSeccaoDeFontesNuncaSeFala(unittest.TestCase):
             with self.subTest(titulo=titulo):
                 resposta = self.RESPOSTA.format(titulo=titulo)
                 falado = resumo_falado(resposta, lingua="en")
-                self.assertEqual(falado, f"{prefixo_da_resposta('en')} Benfica won 2-1 against Porto.")
+                self.assertEqual(falado, "Benfica won 2-1 against Porto.")
                 self.assertNotIn("ource", falado)
                 self.assertNotIn("ESPN", falado)
                 self.assertNotIn("BBC", falado)
 
     def test_titulo_colado_ao_paragrafo_sem_linha_em_branco(self) -> None:
         resposta = "O Benfica ganhou 2-1.\n**Fontes:**\n1. [Record](https://record.pt/x)\n2. A Bola"
-        self.assertEqual(resumo_falado(resposta), f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} O Benfica ganhou 2-1.")
+        self.assertEqual(resumo_falado(resposta), "O Benfica ganhou 2-1.")
 
     def test_palavra_sources_na_prosa_nao_corta(self) -> None:
         for resposta in (
@@ -1062,3 +1074,187 @@ class TestSeccaoDeFontesNuncaSeFala(unittest.TestCase):
             with self.subTest(resposta=resposta):
                 self.assertEqual(resumo_falado(resposta, lingua=lingua), frase_de_recurso("so_tecnico", lingua))
 
+
+# --- Resposta em streaming ------------------------------------------------------------
+
+
+def _falar_aos_pedacos(pedacos: list[str], lingua: str = "en") -> tuple[list[str], list[str]]:
+    """(frases ditas a meio do stream, frases ditas no fim) de uma resposta dada aos pedacos."""
+    fluxo = ResumoEmFluxo(lingua=lingua)
+    a_meio: list[str] = []
+    for pedaco in pedacos:
+        a_meio.extend(fluxo.acrescentar(pedaco))
+    no_fim = fluxo.acabar()
+    return a_meio, no_fim
+
+
+def _divisoes(texto: str):
+    """O texto inteiro, partido em dois em cada fronteira de caracter, e caracter a caracter."""
+    yield [texto]
+    for indice in range(1, len(texto)):
+        yield [texto[:indice], texto[indice:]]
+    if len(texto) > 1:
+        yield list(texto)
+
+
+#: Respostas limpas: aos pedacos, dizem sempre exatamente o mesmo que a resposta inteira.
+RESPOSTAS_LIMPAS = (
+    "It is 22 degrees and sunny in Porto today.",
+    "It is 22 degrees and sunny in Porto today. Light wind from the north. Want the weekend too?",
+    "Benfica won 2-1 against Porto.\n\nSources:\n- [BBC Sport](https://bbc.co.uk/sport)\n- ESPN",
+    "It is 3.14 degrees. The version 2.0 is out. Nice.",
+    'He said "yes." Then he left. Is that all?',
+    "Well... it depends. Maybe tomorrow! Or not?",
+    "One. Two. Three. Four. Five. Do you want more?",
+    "- Sunny in the morning\n- Rain after 3 pm\n- Windy at night",
+    "**Weather**\nIt is sunny. It is warm.",
+    "O Benfica ganhou 2-1.\n**Fontes:**\n1. [Record](https://record.pt/x)\n2. A Bola",
+    "Searching the web for that.\n\nIt is 22 degrees in Porto. Light wind.",
+    "Here are today's games.\n1. Benfica plays at 8.\n2. Porto plays at 9.",
+    "1. Benfica plays at 8.\n2. Porto plays at 9.\n3. Braga plays at 10.",
+    "Two games.\n10. Benfica at 8\n11. Porto at 9",
+    "Sources say the match ended 2-1. Benfica scored twice.",
+    "A very long sentence " + "that keeps on going " * 12 + "until it ends. Short one.",
+    "",
+    "Sources:\n- [BBC](https://bbc.co.uk)\n- ESPN",
+    '{"a": 1}',
+)
+
+#: Respostas com o que nunca se fala. Nenhum dos pedacos marcados pode chegar a voz.
+RESPOSTAS_ADVERSARIAIS = (
+    ("It's sunny.\n```bash\nrm -rf /\n```\nMore prose here.", ("rm", "bash", "`")),
+    ("The weather is nice. See publico.pt for details.", ("publico",)),
+    ('All good <invoke\nname="Bash">\n<parameter name="command">git status</parameter>', ("invoke", "Bash", "git")),
+    ("Result: <b>sunny</b>. It is warm.", ("<", ">")),
+    ("Check https://x.pt now. It is sunny.", ("http", "x.pt")),
+    ("Saved at C:\\Temp\\x. Done.", ("Temp", "\\")),
+    ("It is sunny. Details in jarvis/app.py and notes.md. Bye.", ("app.py", "notes")),
+    ("It is sunny.\n\nSources:\nThe forecast came from IPMA. Rain tomorrow.", ("IPMA", "Rain")),
+    ("It is sunny.\n## References\nThe club site says kickoff is at 8. Enjoy.", ("kickoff", "Enjoy")),
+    ('The word "ok. " : yes. More text here.', (": yes",)),
+    ("Sunny today. Run:\n```\ngit push --force\n```\nLater.", ("git", "force")),
+    ('It is sunny. Traceback (most recent call last):\n  File "x.py", line 1\nValueError: boom', ("Traceback", "ValueError")),
+    ("Temperature is 20. $env:PATH is set. Ok.", ("$", "PATH")),
+    ("Nice day. " + "x" * 300 + ". Bye.", ("xxxx",)),
+    ("First.\n" + "word " * 500 + "\nLast.", ("word word",)),
+    ("It is sunny.\n| a | b |\n|---|---|\n| 1 | 2 |", ("|",)),
+    ("It is 20 degrees.\n\n**Sources:** met office. IPMA.", ("IPMA", "met office")),
+)
+
+
+class TestRespostaEmStreaming(unittest.TestCase):
+    """O filtro da resposta falada aplicado pedaco a pedaco, a uma resposta ainda a chegar."""
+
+    def verificar_invariantes(self, pedacos: list[str], proibidas=()) -> str:
+        a_meio, no_fim = _falar_aos_pedacos(pedacos)
+        falado = " ".join(a_meio + no_fim)
+        self.assertTrue(falado, "nunca calado")
+        self.assertFalse(texto_proibido(falado), falado)
+        self.assertLessEqual(len(dividir_em_frases(falado)), MAXIMO_FRASES_FALADAS, falado)
+        # O corte a meio de uma frase comprida acrescenta "..." ao limite do conteudo.
+        self.assertLessEqual(len(falado), MAXIMO_CARACTERES_FALADOS + 3, falado)
+        self.assertLessEqual(len(falado), MAXIMO_ABSOLUTO_FALADO, falado)
+        self.assertLessEqual(len(a_meio), MAXIMO_FRASES_FALADAS - 1)
+        for frase in a_meio + no_fim:
+            self.assertFalse(texto_proibido(frase), frase)
+        for proibida in proibidas:
+            self.assertNotIn(proibida, falado)
+        return falado
+
+    def test_respostas_limpas_dizem_o_mesmo_em_qualquer_divisao(self) -> None:
+        for texto in RESPOSTAS_LIMPAS:
+            esperado = resumo_falado(texto, lingua="en")
+            for pedacos in _divisoes(texto):
+                with self.subTest(texto=texto[:40], pedacos=len(pedacos), primeiro=len(pedacos[0])):
+                    self.assertEqual(self.verificar_invariantes(pedacos), esperado)
+
+    def test_respostas_adversariais_nunca_deixam_passar_o_proibido(self) -> None:
+        for texto, proibidas in RESPOSTAS_ADVERSARIAIS:
+            for pedacos in _divisoes(texto):
+                with self.subTest(texto=texto[:40], pedacos=len(pedacos), primeiro=len(pedacos[0])):
+                    self.verificar_invariantes(pedacos, proibidas)
+
+    def test_tres_pedacos_em_todas_as_fronteiras(self) -> None:
+        for texto, proibidas in (
+            ("It is sunny.\n\nSources:\nIPMA says rain. More.", ("IPMA", "rain")),
+            ("See x.pt. It is sunny. Ok.", ("x.pt",)),
+            ('Ok <invoke\nname="Bash">', ("invoke",)),
+        ):
+            for i in range(1, len(texto)):
+                for j in range(i + 1, len(texto)):
+                    with self.subTest(texto=texto[:20], i=i, j=j):
+                        self.verificar_invariantes([texto[:i], texto[i:j], texto[j:]], proibidas)
+
+    def test_a_primeira_frase_sai_antes_do_fim_do_stream(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        self.assertEqual(fluxo.acrescentar("It is 22 degrees and sunny in Porto today."), [])
+        self.assertEqual(fluxo.acrescentar(" Light"), ["It is 22 degrees and sunny in Porto today."])
+        self.assertEqual(fluxo.acrescentar(" wind.\nMore"), ["Light wind."])
+        self.assertEqual(fluxo.acrescentar(" text. And more. "), [], "a meio so saem duas frases")
+        self.assertEqual(fluxo.acabar(), ["More text."])
+        self.assertEqual(fluxo.falado, "It is 22 degrees and sunny in Porto today. Light wind. More text.")
+
+    def test_o_numero_de_um_item_de_lista_nao_e_uma_frase(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        self.assertEqual(fluxo.acrescentar("Here are today's games.\n1. "), ["Here are today's games."])
+        self.assertEqual(fluxo.acrescentar("Benfica plays at 8.\n2. Porto plays at 9."), ["Benfica plays at 8."])
+        self.assertEqual(fluxo.acabar(), ["Porto plays at 9."])
+        self.assertEqual(fluxo.falado, "Here are today's games. Benfica plays at 8. Porto plays at 9.")
+
+    def test_um_ponto_so_e_fim_de_frase_com_o_espaco_a_seguir(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        self.assertEqual(fluxo.acrescentar("It is 3."), [])
+        self.assertEqual(fluxo.acrescentar("14 degrees. "), ["It is 3.14 degrees."])
+
+    def test_uma_linha_sem_pontuacao_espera_pela_seguinte(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        self.assertEqual(fluxo.acrescentar("Sunny today\n"), [])
+        self.assertEqual(fluxo.acrescentar("It is warm. "), ["Sunny today It is warm."])
+
+    def test_a_pergunta_do_fim_entra_no_lugar_da_terceira_frase(self) -> None:
+        a_meio, no_fim = _falar_aos_pedacos(list("One. Two. Three. Four. Do you want more?"))
+        self.assertEqual(a_meio, ["One.", "Two."])
+        self.assertEqual(no_fim, ["Do you want more?"])
+
+    def test_o_que_ja_se_disse_nunca_se_desdiz(self) -> None:
+        # A linha so se revela proibida no fim: a primeira frase ja foi dita, nada mais sai.
+        a_meio, no_fim = _falar_aos_pedacos(["The weather is nice. ", "See publico.pt for details. ", "Bye. "])
+        self.assertEqual(a_meio, ["The weather is nice."])
+        self.assertEqual(no_fim, [])
+
+    def test_nada_depois_do_titulo_das_fontes(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        ditas = fluxo.acrescentar("Benfica won. ")
+        for pedaco in ("\n\nSources:\n", "The club site. ", "Record. ", "\n"):
+            ditas += fluxo.acrescentar(pedaco)
+        ditas += fluxo.acabar()
+        self.assertEqual(ditas, ["Benfica won."])
+
+    def test_depois_de_parar_nada_mais_sai(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        self.assertEqual(fluxo.acrescentar("One. Two"), ["One."])
+        fluxo.parar()
+        self.assertEqual(fluxo.acrescentar(". Three. "), [])
+        self.assertEqual(fluxo.acabar(), [])
+        self.assertEqual(fluxo.falado, "One.")
+
+    def test_sem_nada_dito_o_fim_e_o_resumo_da_resposta_inteira(self) -> None:
+        for texto in ("", "```\nx = 1\n```", "Sources: x"):
+            with self.subTest(texto=texto):
+                fluxo = ResumoEmFluxo(lingua="en")
+                fluxo.acrescentar(texto)
+                self.assertEqual(fluxo.acabar(), [resumo_falado(texto, lingua="en")])
+
+    def test_acabar_duas_vezes_nao_repete(self) -> None:
+        fluxo = ResumoEmFluxo(lingua="en")
+        fluxo.acrescentar("Sunny.")
+        self.assertEqual(fluxo.acabar(), ["Sunny."])
+        self.assertEqual(fluxo.acabar(), [])
+
+    def test_resposta_grande_aos_pedacos_nao_prende_a_voz(self) -> None:
+        tecnica = ("x = 1\n" * 2000) + "Done."
+        inicio = time.perf_counter()
+        a_meio, no_fim = _falar_aos_pedacos([tecnica[i : i + 4] for i in range(0, len(tecnica), 4)])
+        self.assertLess(time.perf_counter() - inicio, 5.0)
+        self.assertEqual(a_meio, [])
+        self.assertFalse(texto_proibido(" ".join(no_fim)))

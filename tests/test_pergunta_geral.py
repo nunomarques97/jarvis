@@ -9,6 +9,9 @@ Sem som, sem microfone e sem rede. O que protegem:
   * a pasta de trabalho e neutra: fora do jarvis e de todos os projetos;
   * a pergunta, a data, a localizacao e as instrucoes vao por stdin;
   * o limite de tempo vem da configuracao; tempo esgotado mata o processo;
+  * a saida e `stream-json`: os pedacos de texto chegam pela ordem, a
+    resposta e a da linha final; uma linha estragada, uma saida grande
+    demais ou sem linha final e falha, e o processo e morto;
   * saida que nao e JSON, is_error, resposta vazia: falha curta, nada mais;
   * cancelar mata o processo (ou impede que arranque);
   * pedidos de dinheiro ou de bolsa sao recusados antes de arrancar;
@@ -24,6 +27,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import queue
 import subprocess
 import tempfile
 import threading
@@ -40,6 +44,7 @@ from jarvis.pergunta_geral import (
     contexto_da_memoria,
     data_por_extenso,
     ler_gasto,
+    ler_evento,
     ler_resposta,
     texto_do_pedido,
     pasta_neutra,
@@ -52,20 +57,106 @@ CLI_FALSO = "C:/ficticio/claude.exe"
 HOJE = datetime.date(2026, 9, 26)
 
 
-def saida_json(texto: str = "It is 22 degrees and sunny in Porto today.", **extra) -> str:
+def resultado_json(texto: str = "It is 22 degrees and sunny in Porto today.", **extra) -> str:
+    """So a linha final (`result`) da saida do `claude -p`."""
     obj = {"type": "result", "subtype": "success", "is_error": False, "result": texto}
     obj.update(extra)
     return json.dumps(obj)
 
 
+def linha_de_texto(pedaco: str) -> str:
+    """Uma linha `stream_event` com um pedaco de texto da resposta."""
+    return json.dumps(
+        {
+            "type": "stream_event",
+            "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": pedaco}},
+        }
+    )
+
+
+LINHA_DE_ARRANQUE = json.dumps({"type": "system", "subtype": "init", "tools": ["WebSearch", "WebFetch"]})
+LINHA_DE_MENSAGEM = json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {}}})
+
+
+def pedacos_de(texto: str, tamanho: int = 7) -> list[str]:
+    return [texto[i : i + tamanho] for i in range(0, len(texto), tamanho)]
+
+
+def saida_json(texto: str = "It is 22 degrees and sunny in Porto today.", *, pedacos=None, **extra) -> str:
+    """A saida `stream-json` inteira de uma resposta: arranque, pedacos de texto e a linha final.
+
+    Os pedacos de texto so vem numa resposta sem erro (como no Claude Code);
+    `pedacos` da-os a mao (uma lista, ou [] para nenhum).
+    """
+    if pedacos is None:
+        pedacos = pedacos_de(texto) if extra.get("is_error", False) is False and isinstance(texto, str) else []
+    linhas = [LINHA_DE_ARRANQUE, LINHA_DE_MENSAGEM, *(linha_de_texto(p) for p in pedacos)]
+    linhas.append(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": texto}]}}))
+    linhas.append(resultado_json(texto, **extra))
+    return "\n".join(linhas) + "\n"
+
+
 # --- Processo falso partilhado com tests/test_app.py ---------------------------
+
+
+class _EntradaFalsa:
+    def __init__(self, processo: "ProcessoFalso") -> None:
+        self._processo = processo
+        self._partes: list[str] = []
+
+    def write(self, texto: str) -> int:
+        self._partes.append(texto)
+        return len(texto)
+
+    def close(self) -> None:
+        self._processo.entrada = "".join(self._partes)
+        self._processo._arranque.a_correr.set()
+
+
+class _SaidaFalsa:
+    """O stdout do processo falso: `readline(limite)` como o de um pipe em modo texto."""
+
+    def __init__(self, processo: "ProcessoFalso") -> None:
+        self._processo = processo
+        comportamento = processo.comportamento
+        self._linhas = comportamento.splitlines(keepends=True) if isinstance(comportamento, str) else []
+
+    def readline(self, limite: int = -1) -> str:
+        processo = self._processo
+        comportamento = processo.comportamento
+        if isinstance(comportamento, queue.Queue):
+            while not processo.morto.is_set():
+                try:
+                    linha = comportamento.get(timeout=0.01)
+                except queue.Empty:
+                    continue
+                if linha is None:
+                    break
+                return linha if linha.endswith("\n") else linha + "\n"
+            return self._fim()
+        if comportamento in ("demora", "bloqueia"):
+            processo.morto.wait(10.0)
+            return self._fim()
+        if processo.morto.is_set() or not self._linhas:
+            return self._fim()
+        linha = self._linhas.pop(0)
+        if 0 <= limite < len(linha):
+            linha, resto = linha[:limite], linha[limite:]
+            self._linhas.insert(0, resto)
+        return linha
+
+    def _fim(self) -> str:
+        if self._processo.returncode is None:
+            self._processo.returncode = -9 if self._processo.morto.is_set() else 0
+        return ""
 
 
 class ProcessoFalso:
     """Faz de `subprocess.Popen` do `claude -p`.
 
-    `comportamento`: uma string com a saida (responde logo), "demora" (o
-    `communicate` esgota o tempo) ou "bloqueia" (so acaba quando e morto).
+    `comportamento`: uma string com a saida (responde logo), "demora" ou
+    "bloqueia" (so acaba quando e morto: o limite de tempo ou o cancelamento),
+    ou uma `queue.Queue` de linhas que o teste vai dando (None acaba a saida).
     """
 
     def __init__(self, arranque: "ArranqueFalso", argv, comportamento, **kw) -> None:
@@ -74,22 +165,10 @@ class ProcessoFalso:
         self.kw = kw
         self.comportamento = comportamento
         self.entrada: str | None = None
-        self.limite: float | None = None
         self.morto = threading.Event()
         self.returncode: int | None = None
-
-    def communicate(self, input=None, timeout=None):
-        self.entrada = input
-        self.limite = timeout
-        self._arranque.a_correr.set()
-        if self.comportamento == "demora":
-            raise subprocess.TimeoutExpired(self.argv, timeout)
-        if self.comportamento == "bloqueia":
-            self.morto.wait(10.0)
-            self.returncode = 1
-            return "", ""
-        self.returncode = 0
-        return self.comportamento, ""
+        self.stdin = _EntradaFalsa(self)
+        self.stdout = _SaidaFalsa(self)
 
     def poll(self):
         return self.returncode
@@ -99,7 +178,7 @@ class ProcessoFalso:
 
     def wait(self, timeout=None):
         if self.returncode is None:
-            self.returncode = -9
+            self.returncode = -9 if self.morto.is_set() else 0
         return self.returncode
 
 
@@ -164,7 +243,6 @@ class TestChamadaAoClaude(_ComPasta):
         argv = arranque.ultimo.argv
         self.assertEqual(argv, [CLI_FALSO, *ARGS_DA_PERGUNTA, "--model", "sonnet"])
         self.assertNotIn(pergunta, " ".join(argv), "a pergunta nunca vai na linha de comandos")
-        self.assertEqual(arranque.ultimo.limite, 42.0)
 
     def test_so_pesquisa_na_web_sem_mcp_nem_personalizacoes(self) -> None:
         args = list(ARGS_DA_PERGUNTA)
@@ -179,10 +257,15 @@ class TestChamadaAoClaude(_ComPasta):
             "--no-session-persistence",
         ):
             self.assertIn(flag, args)
-        self.assertEqual(args[args.index("--output-format") + 1], "json")
+        # Streaming com os pedacos de texto; --bare exige uma chave de API paga.
+        self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", args)
+        self.assertIn("--include-partial-messages", args)
         self.assertEqual(args[args.index("--permission-prompts") + 1], "none")
         juntos = " ".join(args)
-        for proibido in ("--mcp-config", "Bash", "Edit", "Write", "--settings", "--resume", "--dangerously"):
+        for proibido in (
+            "--mcp-config", "Bash", "Edit", "Write", "--settings", "--resume", "--dangerously", "--bare"
+        ):
             self.assertNotIn(proibido, juntos)
 
     def test_corre_na_pasta_neutra_com_ambiente_limpo(self) -> None:
@@ -195,6 +278,9 @@ class TestChamadaAoClaude(_ComPasta):
         self.assertNotIn("CLAUDECODE", kw["env"])
         self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", kw["env"])
         self.assertEqual(kw["stdin"], subprocess.PIPE)
+        self.assertEqual(kw["stdout"], subprocess.PIPE)
+        # O stderr nunca e lido: num pipe cheio o processo ficava preso.
+        self.assertEqual(kw["stderr"], subprocess.DEVNULL)
 
     def test_stdin_leva_pergunta_data_local_lingua_e_instrucoes(self) -> None:
         arranque = ArranqueFalso()
@@ -272,10 +358,11 @@ class TestResultado(_ComPasta):
             "",
             "[1, 2]",
             saida_json(is_error=True, subtype="error_max_turns"),
-            json.dumps({"result": "sem is_error"}),
+            json.dumps({"type": "result", "result": "sem is_error"}),
+            json.dumps({"result": "sem tipo nenhum", "is_error": False}),
             saida_json("   "),
-            json.dumps({"is_error": False, "result": 42}),
-            saida_json("x" * (pergunta_geral.MAXIMO_DA_SAIDA_BYTES + 1)),
+            json.dumps({"type": "result", "is_error": False, "result": 42}),
+            saida_json("x" * (pergunta_geral.MAXIMO_DA_LINHA_BYTES + 1), pedacos=[]),
         ):
             with self.subTest(saida=saida[:40]):
                 resultado = perguntas_de_teste(ArranqueFalso(saida), self.pasta).responder("weather in Porto")
@@ -283,15 +370,15 @@ class TestResultado(_ComPasta):
                 self.assertEqual(resultado.texto, "")
 
     def test_ler_resposta(self) -> None:
-        self.assertEqual(ler_resposta(saida_json("Ok.")), ("Ok.", "ok"))
+        self.assertEqual(ler_resposta(resultado_json("Ok.")), ("Ok.", "ok"))
         self.assertIsNone(ler_resposta("{")[0])
 
     def test_tempo_esgotado_mata_o_processo(self) -> None:
         arranque = ArranqueFalso("demora")
-        config = ConfigPerguntas(limite_s=12.0)
+        config = ConfigPerguntas(limite_s=0.2)
         resultado = perguntas_de_teste(arranque, self.pasta, config=config).responder("weather in Porto")
         self.assertEqual(resultado.estado, "tempo_esgotado")
-        self.assertEqual(arranque.ultimo.limite, 12.0)
+        self.assertIn("0.2 s", resultado.motivo)
         self.assertTrue(arranque.ultimo.morto.is_set())
         self.assertEqual(resultado.texto, "")
 
@@ -329,6 +416,153 @@ class TestResultado(_ComPasta):
         arranque = ArranqueFalso()
         self.assertEqual(perguntas_de_teste(arranque, self.pasta).responder(" \n ").estado, "falhou")
         self.assertEqual(arranque.processos, [])
+
+
+class TestStreaming(_ComPasta):
+    """A saida `stream-json`: pedacos de texto pela ordem, falhas a meio e cancelamento."""
+
+    def correr_com_fila(self, config: ConfigPerguntas | None = None):
+        """Uma consulta a correr numa thread, com as linhas dadas pelo teste."""
+        linhas: queue.Queue = queue.Queue()
+        arranque = ArranqueFalso(linhas)
+        consulta = perguntas_de_teste(arranque, self.pasta, config=config).nova("weather in Porto")
+        recebidos: list[str] = []
+        chegou = threading.Event()
+
+        def ao_texto(pedaco: str) -> None:
+            recebidos.append(pedaco)
+            chegou.set()
+
+        resultados = []
+        fio = threading.Thread(target=lambda: resultados.append(consulta.correr(ao_texto=ao_texto)))
+        fio.start()
+        self.addCleanup(fio.join, 5.0)
+        return linhas, arranque, consulta, recebidos, chegou, resultados, fio
+
+    def test_os_pedacos_chegam_pela_ordem_e_a_resposta_vem_da_linha_final(self) -> None:
+        texto = "It is 22 degrees and sunny in Porto today. Light wind."
+        recebidos = []
+        resultado = perguntas_de_teste(ArranqueFalso(saida_json(texto)), self.pasta).nova("weather").correr(
+            ao_texto=recebidos.append
+        )
+        self.assertEqual((resultado.estado, resultado.texto), ("respondida", texto))
+        self.assertEqual("".join(recebidos), texto)
+        self.assertGreater(len(recebidos), 1)
+        self.assertIsNotNone(resultado.primeiro_texto_s)
+
+    def test_sem_quem_receba_os_pedacos_continua_a_responder(self) -> None:
+        resultado = perguntas_de_teste(ArranqueFalso(saida_json("Sunny.")), self.pasta).responder("weather")
+        self.assertEqual((resultado.estado, resultado.texto), ("respondida", "Sunny."))
+
+    def test_uma_mensagem_nova_depois_de_texto_comeca_um_paragrafo(self) -> None:
+        saida = "\n".join(
+            [
+                LINHA_DE_MENSAGEM,
+                linha_de_texto("Searching."),
+                json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}}),
+                LINHA_DE_MENSAGEM,
+                linha_de_texto("Sunny."),
+                resultado_json("Sunny."),
+            ]
+        )
+        recebidos = []
+        perguntas_de_teste(ArranqueFalso(saida), self.pasta).nova("weather").correr(ao_texto=recebidos.append)
+        self.assertEqual(recebidos, ["Searching.", "\n\nSunny."])
+
+    def test_linha_mal_formada_depois_de_texto_falha_e_mata_o_processo(self) -> None:
+        for estragada in ('{"type": "stream_event", "event": {', "[1, 2]", "nao e json", "null"):
+            with self.subTest(estragada=estragada):
+                saida = "\n".join([linha_de_texto("It is sunny. "), estragada, linha_de_texto("More."), resultado_json()])
+                arranque = ArranqueFalso(saida)
+                recebidos = []
+                resultado = perguntas_de_teste(arranque, self.pasta).nova("weather").correr(ao_texto=recebidos.append)
+                self.assertEqual(resultado.estado, "falhou")
+                self.assertEqual(resultado.texto, "")
+                self.assertEqual(recebidos, ["It is sunny. "], "nada depois da linha estragada")
+                self.assertTrue(arranque.ultimo.morto.is_set())
+
+    def test_saida_sem_linha_final_e_falha(self) -> None:
+        saida = "\n".join([LINHA_DE_ARRANQUE, linha_de_texto("It is sunny.")])
+        resultado = perguntas_de_teste(ArranqueFalso(saida), self.pasta).responder("weather")
+        self.assertEqual(resultado.estado, "falhou")
+        self.assertIn("sem resultado final", resultado.motivo)
+
+    def test_linha_ou_saida_grande_demais_e_falha(self) -> None:
+        grande = linha_de_texto("x" * (pergunta_geral.MAXIMO_DA_LINHA_BYTES + 10))
+        arranque = ArranqueFalso("\n".join([grande, resultado_json()]))
+        resultado = perguntas_de_teste(arranque, self.pasta).responder("weather")
+        self.assertEqual(resultado.estado, "falhou")
+        self.assertIn("grande demais", resultado.motivo)
+        self.assertTrue(arranque.ultimo.morto.is_set())
+        with mock.patch.object(pergunta_geral, "MAXIMO_DA_SAIDA_BYTES", 2000):
+            muitas = "\n".join([linha_de_texto("abc ") for _ in range(100)] + [resultado_json()])
+            resultado = perguntas_de_teste(ArranqueFalso(muitas), self.pasta).responder("weather")
+        self.assertEqual(resultado.estado, "falhou")
+        self.assertIn("grande demais", resultado.motivo)
+
+    def test_eventos_desconhecidos_e_deltas_que_nao_sao_texto_sao_ignorados(self) -> None:
+        saida = "\n".join(
+            [
+                json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": "{"}}}),
+                json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": 5}}}),
+                json.dumps({"type": "stream_event", "event": "texto"}),
+                json.dumps({"type": "outro", "text": "Nunca dito."}),
+                linha_de_texto("Sunny."),
+                resultado_json("Sunny."),
+            ]
+        )
+        recebidos = []
+        resultado = perguntas_de_teste(ArranqueFalso(saida), self.pasta).nova("weather").correr(ao_texto=recebidos.append)
+        self.assertEqual(recebidos, ["Sunny."])
+        self.assertTrue(resultado.respondida)
+
+    def test_ler_evento(self) -> None:
+        self.assertEqual(ler_evento(linha_de_texto("Ola")), (pergunta_geral.EVENTO_TEXTO, "Ola"))
+        self.assertEqual(ler_evento(LINHA_DE_MENSAGEM), (pergunta_geral.EVENTO_MENSAGEM, None))
+        self.assertEqual(ler_evento(LINHA_DE_ARRANQUE), (pergunta_geral.EVENTO_OUTRO, None))
+        self.assertEqual(ler_evento(resultado_json("x"))[0], pergunta_geral.EVENTO_RESULTADO)
+        for estragada in ("", "{", "[]", '"texto"', "{" * 5000):
+            with self.subTest(estragada=estragada[:10]):
+                with self.assertRaises(ValueError):
+                    ler_evento(estragada)
+
+    def test_cancelar_a_meio_do_stream_mata_o_processo_e_nada_mais_chega(self) -> None:
+        linhas, arranque, consulta, recebidos, chegou, resultados, fio = self.correr_com_fila()
+        linhas.put(linha_de_texto("It is sunny. "))
+        self.assertTrue(chegou.wait(5.0))
+        self.assertTrue(consulta.cancelar())
+        linhas.put(linha_de_texto("Never delivered."))
+        linhas.put(resultado_json())
+        fio.join(5.0)
+        self.assertFalse(fio.is_alive())
+        self.assertTrue(arranque.ultimo.morto.is_set())
+        self.assertEqual(resultados[0].estado, "cancelada")
+        self.assertEqual(recebidos, ["It is sunny. "])
+
+    def test_tempo_esgotado_a_meio_do_stream_mata_o_processo(self) -> None:
+        linhas, arranque, _consulta, recebidos, chegou, resultados, fio = self.correr_com_fila(
+            ConfigPerguntas(limite_s=0.3)
+        )
+        linhas.put(linha_de_texto("It is sunny. "))
+        self.assertTrue(chegou.wait(5.0))
+        fio.join(5.0)
+        self.assertFalse(fio.is_alive())
+        self.assertEqual(resultados[0].estado, "tempo_esgotado")
+        self.assertEqual(resultados[0].texto, "")
+        self.assertTrue(arranque.ultimo.morto.is_set())
+        self.assertEqual(recebidos, ["It is sunny. "])
+
+    def test_quem_recebe_os_pedacos_pode_cancelar_logo(self) -> None:
+        arranque = ArranqueFalso(saida_json("One. Two. Three. Four."))
+        consulta = perguntas_de_teste(arranque, self.pasta).nova("weather")
+        recebidos = []
+
+        def ao_texto(pedaco: str) -> None:
+            recebidos.append(pedaco)
+            consulta.cancelar()
+
+        self.assertEqual(consulta.correr(ao_texto=ao_texto).estado, "cancelada")
+        self.assertEqual(len(recebidos), 1)
 
 
 class TestPedidosFinanceiros(_ComPasta):
@@ -536,7 +770,9 @@ class TestGasto(_ComPasta):
                 self.assertFalse(resultado.uso)
 
     def test_uma_falha_tambem_traz_o_gasto_quando_ha_json(self) -> None:
-        saida = json.dumps({"is_error": True, "subtype": "error_max_turns", "usage": {"input_tokens": 5}})
+        saida = json.dumps(
+            {"type": "result", "is_error": True, "subtype": "error_max_turns", "usage": {"input_tokens": 5}}
+        )
         resultado = perguntas_de_teste(ArranqueFalso(saida), self.pasta).responder("what games are on today")
         self.assertEqual(resultado.estado, "falhou")
         self.assertEqual(dict(resultado.uso), {"input_tokens": 5})

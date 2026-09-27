@@ -17,6 +17,9 @@ com timestamps; no fim sai a tabela com:
 
   * horas: fim da fala -> inicio da resposta falada (p50 e p95);
   * ditado: fim da fala -> inicio do recap falado (p50 e p95);
+  * por etapa, para as horas e para o ditado: o p50 do fim de turno, do STT,
+    do interprete (e quantas frases foram pela regra ou pelo LLM), do resto
+    e da voz ate ao primeiro audio, desde o ultimo chunk com voz;
   * primeiro sinal de vida: fim da fala -> linha A PENSAR (o maximo);
   * arranque: do inicio do processo a PRONTO, com a VRAM livre antes e depois.
 
@@ -89,8 +92,8 @@ PROJETOS_FICTICIOS = (
 
 #: As frases de cada volta. Escolhidas para a voz sintetica sair bem
 #: transcrita (as formas mais curtas, "que horas sao" e "sim", saem trocadas
-#: nesta voz). "podes dizer-me que horas sao" passa pelo LLM e nao pela lista
-#: branca: e o caminho mais lento das horas, por isso a medida e conservadora.
+#: nesta voz). As horas vao pela regra, sem o LLM; o ditado passa sempre pelo
+#: LLM, por isso as duas medidas cobrem os dois caminhos do interprete.
 FRASES = {
     "pt": {
         "horas": "podes dizer-me que horas são",
@@ -132,6 +135,9 @@ class Resultado:
     nao_percebidas: list[str] = field(default_factory=list)
     recebidos: list[tuple[str, str]] = field(default_factory=list)
     arranque_s: float | None = None
+    #: A decomposicao por etapa de cada resposta medida (a linha "tempos" do log).
+    tempos_horas: list[app.TemposDaResposta] = field(default_factory=list)
+    tempos_recap: list[app.TemposDaResposta] = field(default_factory=list)
     vram_antes: object = None
     vram_depois: object = None
     notas: list[str] = field(default_factory=list)
@@ -158,6 +164,8 @@ def classificar(medidas: list[app.MedidaDaFrase], voltas: int) -> Resultado:
                 resultado.nao_percebidas.append(f"resposta ao recap {medida.texto!r} -> {medida.desfecho}")
         elif medida.intencao == "horas" and medida.primeira_fala_ms is not None:
             resultado.horas_ms.append(medida.primeira_fala_ms)
+            if medida.tempos is not None:
+                resultado.tempos_horas.append(medida.tempos)
         elif (
             medida.intencao == "ditar_prompt"
             and medida.projeto == PROJETO
@@ -165,6 +173,8 @@ def classificar(medidas: list[app.MedidaDaFrase], voltas: int) -> Resultado:
             and medida.primeira_fala_ms is not None
         ):
             resultado.recap_ms.append(medida.primeira_fala_ms)
+            if medida.tempos is not None:
+                resultado.tempos_recap.append(medida.tempos)
         else:
             resultado.nao_percebidas.append(
                 f"{medida.texto!r} -> intencao={medida.intencao} projeto={medida.projeto} desfecho={medida.desfecho}"
@@ -215,6 +225,24 @@ def avaliar(resultado: Resultado) -> list[str]:
     return falhas
 
 
+def linha_das_etapas(nome: str, tempos: list[app.TemposDaResposta]) -> str:
+    """O p50 de cada etapa, da ultima voz ao primeiro audio, e quantas frases foram pela regra."""
+    if not tempos:
+        return f"{nome:<35}: sem amostras"
+
+    def p50(valores: list[float | None]) -> str:
+        medidos = [valor for valor in valores if valor is not None]
+        return f"{percentil(medidos, 50):.0f} ms" if medidos else "?"
+
+    origens = [tempo.origem or "sem interprete" for tempo in tempos]
+    contagem = ", ".join(f"{origem} {origens.count(origem)}" for origem in sorted(set(origens)))
+    return (
+        f"{nome:<35}: fim de turno {p50([t.fim_de_turno_ms for t in tempos])} | stt {p50([t.stt_ms for t in tempos])} "
+        f"| interprete {p50([t.interprete_ms for t in tempos])} ({contagem}) | resto {p50([t.resto_ms for t in tempos])} "
+        f"| voz {p50([t.voz_ms for t in tempos])} | total {p50([t.total_ms for t in tempos])} (p50, n={len(tempos)})"
+    )
+
+
 def linhas_do_resumo(resultado: Resultado) -> list[str]:
     """A tabela final, igual na consola, no log e na evidencia."""
 
@@ -232,6 +260,8 @@ def linhas_do_resumo(resultado: Resultado) -> list[str]:
         f"(meta p50 <= {LIMITE_HORAS_P50_MS:.0f}, p95 <= {LIMITE_HORAS_P95_MS:.0f})",
         f"ditado -> inicio do recap falado   : {estatistica(resultado.recap_ms)} "
         f"(meta p50 <= {LIMITE_RECAP_P50_MS:.0f}, p95 <= {LIMITE_RECAP_P95_MS:.0f})",
+        linha_das_etapas("horas, por etapa", resultado.tempos_horas),
+        linha_das_etapas("ditado, por etapa", resultado.tempos_recap),
         f"primeiro sinal de vida (maximo)    : "
         + (f"{max(resultado.sinal_de_vida_ms):6.0f} ms" if resultado.sinal_de_vida_ms else "sem amostras")
         + f" (meta <= {LIMITE_SINAL_DE_VIDA_MS:.0f})",

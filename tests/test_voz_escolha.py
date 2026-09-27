@@ -14,7 +14,10 @@ O que estes testes protegem:
   * uma voz que nao exista no ficheiro de vozes nunca tira a fala: fica o
     Piper, com o motivo na descricao;
   * `scripts/amostras_voz.py` grava um WAV por voz dentro de audio/ e so usa
-    o dispositivo de som com --com-som.
+    o dispositivo de som com --com-som;
+  * `[voz] velocidade` (0.8 a 1.3, opcional) muda o `speed` do Kokoro e, sem
+    ela, cada voz fala a sua velocidade de sempre; `--velocidades` grava a
+    mesma voz a duas ou tres velocidades, tambem so com som com --com-som.
 
 Corre com:
 
@@ -39,6 +42,8 @@ RAIZ = Path(__file__).resolve().parent.parent
 
 from jarvis import voz  # noqa: E402
 from jarvis.config import (  # noqa: E402
+    VELOCIDADE_MAXIMA,
+    VELOCIDADE_MINIMA,
     VOZ_INGLESA_PADRAO,
     VOZES_INGLESAS,
     ConfigError,
@@ -115,10 +120,12 @@ class _BaseComKokoroFalso(unittest.TestCase):
             patch.start()
         self._voz_antes = voz.voz_inglesa()
         voz._esquecer_motor_residente()
+        voz.definir_velocidade(None)
 
     def tearDown(self) -> None:
         voz._esquecer_motor_residente()
         voz.definir_voz_inglesa(self._voz_antes)
+        voz.definir_velocidade(None)
         for patch in reversed(self._patches):
             patch.stop()
         self._temporaria.cleanup()
@@ -170,7 +177,30 @@ class TestConfigDaVoz(unittest.TestCase):
 
     def test_chave_desconhecida_e_recusada(self) -> None:
         with self.assertRaises(ConfigError):
-            self._config("[voz]", 'nome = "bm_george"', "velocidade = 2")
+            self._config("[voz]", 'nome = "bm_george"', "tom = 2")
+
+    def test_sem_velocidade_fica_a_de_cada_voz_e_as_frases_geradas_ligadas(self) -> None:
+        config = self._config("[voz]", 'nome = "bm_george"')
+        self.assertIsNone(config.voz.velocidade)
+        self.assertTrue(config.voz.frases_geradas)
+
+    def test_velocidade_dentro_dos_limites(self) -> None:
+        for valor in ("0.8", "1", "1.15", "1.3"):
+            with self.subTest(valor=valor):
+                self.assertEqual(self._config("[voz]", f"velocidade = {valor}").voz.velocidade, float(valor))
+        self.assertEqual((VELOCIDADE_MINIMA, VELOCIDADE_MAXIMA), (0.8, 1.3))
+
+    def test_velocidade_fora_dos_limites_ou_que_nao_e_numero_e_recusada(self) -> None:
+        for valor in ("0.79", "1.31", "2", "0", "-1", "true", '"1.1"', "nan", "inf"):
+            with self.subTest(valor=valor):
+                with self.assertRaises(ConfigError) as contexto:
+                    self._config("[voz]", f"velocidade = {valor}")
+                self.assertIn("velocidade", str(contexto.exception))
+
+    def test_frases_geradas_so_true_ou_false(self) -> None:
+        self.assertFalse(self._config("[voz]", "frases_geradas = false").voz.frases_geradas)
+        with self.assertRaises(ConfigError):
+            self._config("[voz]", 'frases_geradas = "no"')
 
     def test_o_exemplo_versionado_documenta_a_tabela(self) -> None:
         config = carregar_config(RAIZ / "config.exemplo.toml", validar_caminhos=False)
@@ -209,6 +239,45 @@ class TestVozInglesa(_BaseComKokoroFalso):
                 list(voz.MotorKokoro(voz=nome).sintetizar("Hi."))
                 self.assertEqual(_KokoroFalso.chamadas[-1]["speed"], voz.VELOCIDADE_DAS_VOZES[nome])
         self.assertEqual(set(voz.VELOCIDADE_DAS_VOZES), set(VOZES_INGLESAS))
+
+    def test_a_velocidade_do_config_vale_para_todas_as_vozes(self) -> None:
+        voz.definir_velocidade(1.1)
+        for nome in VOZES_INGLESAS:
+            with self.subTest(nome=nome):
+                _KokoroFalso.chamadas.clear()
+                motor = voz.MotorKokoro(voz=nome)
+                list(motor.sintetizar("Hi."))
+                self.assertEqual(_KokoroFalso.chamadas[-1]["speed"], 1.1)
+                self.assertIn("velocidade 1.1", motor.descricao)
+        voz.definir_velocidade(None)
+        list(voz.MotorKokoro(voz="bm_fable").sintetizar("Hi."))
+        self.assertEqual(_KokoroFalso.chamadas[-1]["speed"], voz.VELOCIDADE_DAS_VOZES["bm_fable"], "sem ela, a de sempre")
+
+    def test_mudar_a_velocidade_esquece_o_motor_ingles_carregado(self) -> None:
+        voz.definir_voz_inglesa("bm_fable")
+        primeiro = voz.motor_residente("en")
+        voz.definir_velocidade(None)
+        self.assertIs(voz.motor_residente("en"), primeiro)
+        voz.definir_velocidade(1.2)
+        segundo = voz.motor_residente("en")
+        self.assertIsNot(segundo, primeiro)
+        self.assertEqual(segundo.velocidade, 1.2)
+
+    def test_velocidade_fora_dos_limites_e_recusada_no_modulo(self) -> None:
+        for valor in (0.5, 1.35, True, "1.1"):
+            with self.subTest(valor=valor), self.assertRaises(ValueError):
+                voz.definir_velocidade(valor)
+        with self.assertRaises(ValueError):
+            voz.MotorKokoro().com_velocidade(1.4)
+
+    def test_com_velocidade_partilha_o_modelo(self) -> None:
+        base = voz.MotorKokoro(voz="bm_fable")
+        outro = base.com_velocidade(0.9)
+        self.assertIs(outro._kokoro, base._kokoro)
+        self.assertEqual((outro.voz, outro.velocidade), ("bm_fable", 0.9))
+        self.assertEqual(base.velocidade, voz.VELOCIDADE_DAS_VOZES["bm_fable"])
+        list(outro.sintetizar("Hi."))
+        self.assertEqual(_KokoroFalso.chamadas[-1]["speed"], 0.9)
 
     def test_mudar_a_voz_esquece_o_motor_ingles_carregado(self) -> None:
         voz.definir_voz_inglesa("bm_lewis")
@@ -299,6 +368,49 @@ class TestAmostras(_BaseComKokoroFalso):
         self.assertEqual(codigo, 0, saida.getvalue())
         self.assertTrue((self.pasta_de_audio / "amostras-voz" / "bm_george.wav").is_file())
         self.assertTrue((self.pasta_de_audio / "amostras-voz" / "af_heart.wav").is_file())
+
+    def test_velocidades_um_wav_por_velocidade_sem_som(self) -> None:
+        amostras = amostras_voz.gerar_amostras_de_velocidade(
+            voz.MotorKokoro(), "bm_fable", [1.0, 1.15, 1.3], pasta_de_audio=self.pasta_de_audio, saida_de_som=_SaidaProibida()
+        )
+        self.assertEqual([a.velocidade for a in amostras], [1.0, 1.15, 1.3])
+        self.assertEqual([a.caminho.name for a in amostras], ["bm_fable-v1.wav", "bm_fable-v1.15.wav", "bm_fable-v1.3.wav"])
+        pasta = (self.pasta_de_audio / "amostras-voz").resolve()
+        self.assertTrue(all(a.caminho.parent == pasta and a.caminho.is_file() for a in amostras))
+        self.assertEqual(list(dict.fromkeys(c["speed"] for c in _KokoroFalso.chamadas)), [1.0, 1.15, 1.3])
+        self.assertEqual({c["voice"] for c in _KokoroFalso.chamadas}, {"bm_fable"})
+
+    def test_velocidades_com_som_usam_o_dispositivo(self) -> None:
+        saida = _SaidaQueRegista()
+        amostras_voz.gerar_amostras_de_velocidade(
+            voz.MotorKokoro(), "bm_fable", [0.9, 1.2], com_som=True, pasta_de_audio=self.pasta_de_audio, saida_de_som=saida
+        )
+        self.assertGreater(saida.escritas, 0)
+
+    def test_velocidades_pedem_duas_ou_tres_dentro_dos_limites(self) -> None:
+        for valores in ([1.0], [1.0, 1.1, 1.2, 1.3], [1.0, 1.0], [0.7, 1.0], [1.0, 1.4], None):
+            with self.subTest(valores=valores), self.assertRaises(amostras_voz.AmostraError):
+                amostras_voz.validar_velocidades(valores)
+        self.assertEqual(amostras_voz.validar_velocidades([1.3, 0.8]), [1.3, 0.8])
+
+    def test_main_com_velocidades_sem_com_som_nao_abre_o_dispositivo(self) -> None:
+        with mock.patch.object(amostras_voz, "PASTA_AUDIO", self.pasta_de_audio), mock.patch.dict(
+            sys.modules, {"pyaudio": None}
+        ), contextlib.redirect_stdout(io.StringIO()) as saida:
+            codigo = amostras_voz.main(["--velocidades", "1.0", "1.2"])
+        self.assertEqual(codigo, 0, saida.getvalue())
+        for nome in ("bm_fable-v1.wav", "bm_fable-v1.2.wav"):
+            self.assertTrue((self.pasta_de_audio / "amostras-voz" / nome).is_file(), nome)
+        self.assertIn("[voz] velocidade", saida.getvalue())
+
+    def test_main_com_velocidades_e_duas_vozes_e_recusado(self) -> None:
+        with mock.patch.object(amostras_voz, "PASTA_AUDIO", self.pasta_de_audio), contextlib.redirect_stderr(
+            io.StringIO()
+        ) as erro, contextlib.redirect_stdout(io.StringIO()):
+            codigo = amostras_voz.main(["--velocidades", "1.0", "1.2", "--vozes", "bm_fable", "bm_george"])
+        self.assertEqual(codigo, 1)
+        self.assertIn("uma so voz", erro.getvalue())
+        self.assertFalse((self.pasta_de_audio / "amostras-voz").exists())
 
     def test_pasta_fora_de_audio_e_recusada(self) -> None:
         with self.assertRaises(amostras_voz.AmostraError):

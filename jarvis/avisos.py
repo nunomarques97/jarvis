@@ -58,6 +58,7 @@ if __package__ in (None, ""):
     # arrancado como script pelo hook: o cwd e a pasta do projeto, nao o jarvis
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from jarvis.persona import VARIANTES, Variantes  # noqa: E402
 from jarvis.canal_mcp import (  # noqa: E402
     FICHEIRO_IPC,
     HOST_IPC,
@@ -121,19 +122,19 @@ _FRASES = {
         RUN_BLOQUEADO: "O run do {p} está bloqueado.",
     },
     "en": {
-        EVENTO_ACABOU: "{p} is done.",
-        EVENTO_ESPERA: "{p} is waiting for you.",
-        RUN_TERMINADO: "The {p} run finished.",
-        RUN_FALHOU: "The {p} run failed.",
-        RUN_BLOQUEADO: "The {p} run is blocked.",
+        EVENTO_ACABOU: ("{p} is done.", "{p} has finished.", "{p} is all done."),
+        EVENTO_ESPERA: ("{p} is waiting for you.", "{p} needs you.", "{p} is waiting on you."),
+        RUN_TERMINADO: ("The {p} run finished.", "The {p} run is done."),
+        RUN_FALHOU: ("The {p} run failed.", "Bad news, the {p} run failed."),
+        RUN_BLOQUEADO: ("The {p} run is blocked.", "The {p} run is stuck."),
     },
 }
 
 
-def frase_do_aviso(evento: str, projeto: str, lingua: str = "pt") -> str:
-    """A frase fixa de um aviso: so o nome do projeto muda."""
+def frase_do_aviso(evento: str, projeto: str, lingua: str = "pt", variantes: Variantes | None = None) -> str:
+    """A frase fixa de um aviso, numa das suas formas: so o nome do projeto muda."""
     frases = _FRASES["en" if lingua == "en" else "pt"]
-    return frases[evento].format(p=projeto)
+    return (variantes or VARIANTES).escolher(f"avisos.{evento}", frases[evento]).format(p=projeto)
 
 
 # --- Lado do hook (corre dentro do Claude Code) -------------------------------

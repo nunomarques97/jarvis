@@ -334,13 +334,13 @@ Exact command used to download them into the repository:
 | `models/openwakeword/melspectrogram.tflite` | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.tflite` | `96fa0adccb6e8cf95cb14465409a1a2898ee4a96a85bb9ed3c7eb0e68bf163e8` |
 | `models/openwakeword/embedding_model.onnx` | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx` | `70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f` |
 | `models/openwakeword/embedding_model.tflite` | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.tflite` | `c0aea21eb84a4ce90a08c870da41b7a7173b45269e6a3207c71d67c40f3a59d8` |
-| `models/openwakeword/silero_vad.onnx` (not used by jarvis) | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx` | `a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28` |
+| `models/openwakeword/silero_vad.onnx` (used to interrupt jarvis; see below) | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx` | `a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28` |
 
-`jarvis/app.py` points explicitly at three of these files
+`jarvis/ouvido.py` points explicitly at three of these files
 (`hey_jarvis_v0.1.onnx`, `melspectrogram.onnx`, `embedding_model.onnx`), with
 `inference_framework="onnx"`; the `.tflite` files come in the same download and
-are not loaded. Neither is `silero_vad.onnx`: the VAD in use is RealtimeSTT's
-(WebRTC plus Silero from `torch.hub`).
+are not loaded. `silero_vad.onnx` is loaded by `jarvis/vad_silero.py` to hear
+the Sponsor speaking over jarvis (next section but one).
 
 **A second copy, inside `.venv` (not chosen by jarvis).** When RealtimeSTT
 starts with `wakeword_backend="oww"`, it always calls
@@ -380,6 +380,99 @@ hear.
 The wake word is removed from the transcribed text before the interpreter
 only when its exact words are there (`jarvis.ouvido.retirar_palavra_de_ativacao`);
 misheard spellings are never mapped back to the wake word.
+
+## Interrupting jarvis: Silero VAD
+
+While jarvis speaks, every 30 ms microphone chunk also goes through the Silero
+voice activity detector, so that speaking over the reply pauses it
+(`[escuta] interromper`, on by default; off with `--sem-voz`). The file is the
+one already in the table above:
+
+| File | Source URL | sha256 |
+|---|---|---|
+| `models/openwakeword/silero_vad.onnx` | `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx` | `a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28` |
+
+- **Model:** Silero VAD v4 in ONNX (inputs `input`, `sr`, `h`, `c`), from
+  `snakers4/silero-vad` (MIT), as redistributed by openWakeWord. It comes with
+  the openWakeWord download above: nothing new is downloaded or installed.
+- **Runtime:** the installed `onnxruntime`, CPU, one thread, one inference per
+  30 ms chunk with the network state kept between chunks (about 0.3 ms per
+  chunk on the i5-14400F). A chunk counts as speech at probability 0.5.
+- **Why Silero here and WebRTC elsewhere:** the WebRTC VAD still decides where
+  a phrase ends. Deciding whether to pause the voice needs a detector that
+  tells speech from a cough, a keyboard or breathing on the headset microphone.
+- **Rule:** three speech chunks in a row (90 ms) pause the voice; the pause is
+  timed from the first of them. What the Sponsor said is transcribed and
+  decides: noise or a backchannel ("yeah", "uh-huh") resumes the reply, real
+  speech stops it and becomes the next request.
+- **Measurement:** `scripts/medir_interrupcao.py` (sound only with
+  `--com-som`) plays replies through the headset and counts self-triggers
+  (target 0), then guides ten interruptions with the Sponsor's voice and
+  reports the p50/p95 time from speech onset to voice stopped (target p95
+  under 300 ms). There is no echo cancellation: the closed headset keeps the
+  voice out of the microphone, and the self-trigger count decides whether
+  that holds. `python -m jarvis.vad_silero --autoteste` checks that the file
+  loads and that silence and faint noise are not speech.
+
+Without the file, jarvis logs `interromper | desligado` and keeps working
+without interruptions.
+
+## End of turn: Smart Turn v3
+
+An audio model that judges whether the speaker has finished the sentence,
+so a pause to find a word is not taken as the end of the request
+(`jarvis/fim_de_turno.py`, `[ouvido] fim_de_turno`).
+
+| File | Source URL | sha256 |
+|---|---|---|
+| `models/smart-turn/smart-turn-v3.2-cpu.onnx` | `https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx` | `2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f` |
+
+- **Model:** Pipecat Smart Turn v3.2, int8 ONNX for CPU (8,679,182 bytes),
+  BSD-2-Clause, a Whisper Tiny encoder with a small classifier; 23 languages,
+  English and Portuguese included
+  ([repository](https://github.com/pipecat-ai/smart-turn),
+  [model card](https://huggingface.co/pipecat-ai/smart-turn-v3)). Input
+  `input_features` (1, 80, 800): the Whisper log-mel of the last 8 s of the
+  sentence; output: the probability that the sentence is complete.
+- **Download** (the only new file of this work; approved by the Sponsor):
+
+  ```
+  curl -L -o models/smart-turn/smart-turn-v3.2-cpu.onnx https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx
+  ```
+
+- **Runtime:** the installed `onnxruntime`, CPU, one thread, in a thread of
+  its own so capture never waits. The features come from the Whisper feature
+  extractor already inside `faster-whisper`, following the reference
+  `inference.py` (zeros before short audio, zero-mean unit-variance); the
+  `transformers` package is not needed. Measured here: about 125 ms per
+  check (p50, features included), not the 12 ms published for faster CPUs;
+  the check runs once per pause, while the silence is still being counted.
+- **Rule:** after 0.2 s of silence (WebRTC VAD) the sentence so far goes to
+  the model. Complete (probability >= 0.5): the turn ends at 0.3 s of
+  silence. Incomplete: listening continues up to `[ouvido]
+  fim_de_turno_maximo_s` (default 1.5 s, from 0.6 to 5). Speech that comes
+  back discards the verdict of that pause. A sentence with less than 0.3 s
+  of speech (a click, a tap on the microphone) keeps the fixed 0.6 s.
+- **Fallback:** with `fim_de_turno = "silencio"`, without the file, or if the
+  model fails, jarvis keeps the fixed 0.6 s silence and says so in one log
+  line (`fim de turno | silencio fixo de 0.6 s (...)`).
+- **Default: off**, decided by the numbers. `scripts/avaliar_fim_de_turno.py`
+  runs the Sponsor's microphone recordings (`recordings/en` and
+  `recordings/treino-en`) through the ear's path with both methods and writes
+  the result to `docs/forja/evidence/` (ignored by Git). The model is on by
+  default only if it cuts fewer sentences in the middle **and** the median
+  wait does not grow. On 86 recordings (2026-09-27):
+
+  | Method | Cut in the middle | Wait p50 | Wait mean | Wait p95 |
+  |---|---|---|---|---|
+  | fixed 0.6 s silence | 2 | 0.60 s | 0.60 s | 0.60 s |
+  | Smart Turn | 2 | 0.36 s | 0.48 s | 1.50 s |
+
+  Same number of cuts, so the rule keeps the fixed silence. The recordings
+  are read sentences with almost no pauses, so they cannot show the gain the
+  model is meant for; the Sponsor's step is to set
+  `fim_de_turno = "smart-turn"` in `config.toml`, use it in a real session
+  and run the measurement again with new recordings.
 
 ## Wake word: "boas jarvis" (Portuguese, trained locally)
 

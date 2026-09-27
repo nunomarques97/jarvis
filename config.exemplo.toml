@@ -28,12 +28,20 @@ caminho = "D:/caminho/para/projeto-dois"
 # limiar_ativacao: score minimo da palavra de ativacao (0 a 1). O valor certo
 #   para a tua voz e o teu ruido sai de scripts/avaliar_ativacao.py, que o
 #   escreve na evidencia; ate la vale 0.6.
+# fim_de_turno: como o jarvis decide que acabaste de falar. "silencio" espera
+#   0.6 s de silencio; "smart-turn" pergunta ao modelo Smart Turn (em
+#   models/smart-turn/, ver docs/MODELOS.md) depois de 0.2 s: frase acabada
+#   fecha aos 0.3 s, frase a meio espera ate fim_de_turno_maximo_s (0.6 a 5).
+#   Sem o ficheiro do modelo fica o "silencio". scripts/avaliar_fim_de_turno.py
+#   compara os dois nas tuas gravacoes.
 [ouvido]
 tecla = "ctrl-direito"
 motor = "parakeet-tdt-0.6b-v3"
 device = "cpu"
 lingua = "pt"
 limiar_ativacao = 0.6
+fim_de_turno = "silencio"
+fim_de_turno_maximo_s = 1.5
 
 # Opcional: o interprete, o LLM local que percebe a intencao, o projeto e
 # reescreve o ditado num prompt claro antes da confirmacao. Sem esta tabela
@@ -57,6 +65,9 @@ modelo_alternativo = "qwen3:4b"
 limite_s = 5.0
 carregamento_s = 20.0
 confirmacao_s = 30.0
+# Um ditado sem projeto dito, ate estes minutos depois do ultimo pedido num
+# projeto, assume esse projeto (o recap diz qual e so vai com "sim"); 0 desliga.
+ultimo_projeto_min = 10.0
 
 # Opcional: runs FORJA por voz ("como esta o run do X", "le o relatorio",
 # lancar, retomar e parar). Sem esta tabela o jarvis so ve as sessoes do
@@ -88,8 +99,14 @@ localizacao = "Portugal"
 # (americana), bm_george, bm_lewis, bm_daniel ou bm_fable (britanicas). Para
 # as ouvir antes de escolher: .venv\Scripts\python scripts/amostras_voz.py
 # (grava um WAV por voz em audio/amostras-voz/; com --com-som toca-os).
+# velocidade (opcional, 0.8 a 1.3) muda o ritmo da fala; sem ela cada voz fala
+# a sua velocidade. Para comparar: scripts/amostras_voz.py --velocidades 1.0 1.15 1.3
+# frases_geradas = false deixa so as frases fixas (sem o LLM local a escrever
+# as respostas sociais curtas e o "nao percebi").
 [voz]
 nome = "bm_fable"
+# velocidade = 1.15
+# frases_geradas = true
 
 # Opcional: adaptacao da transcricao ao teu sotaque, so quando lingua = "en" e
 # o motor e o Parakeet. Sem esta tabela fica tudo desligado (como antes).
@@ -107,20 +124,40 @@ reforco = false
 bonus = 1.5
 lexico = false
 
-# Opcional: a escuta sem palavra de ativacao depois de o jarvis falar. Sem esta
-# tabela valem estes mesmos valores.
-# seguimento_s: depois de o jarvis acabar de falar tens estes segundos para
-#   continuar sem dizer "hey jarvis" (entre 3 e 30). O que disseres nesse tempo
-#   e um pedido normal, com as mesmas confirmacoes; silencio, hesitacoes ou so
-#   "obrigado" sao ignorados.
-# sons: um som curto e suave marca quando essa escuta abre e outro, diferente,
-#   quando fecha. Poe false para os desligar (a bolinha e a linha de estado
-#   continuam a mostrar "A OUVIR-TE").
+# Opcional: o modo de conversa, a escuta sem palavra de ativacao depois de o
+# jarvis falar. Sem esta tabela valem estes mesmos valores.
+# seguimento_s: segundos de silencio que fecham a conversa (entre 3 e 30).
+#   Depois de cada resposta do jarvis podes continuar sem dizer "hey jarvis", e
+#   a contagem recomeca depois de cada resposta. "that's all" / "thanks, that's
+#   it" ("e tudo") tambem fecham. O que disseres e um pedido normal, com as
+#   mesmas confirmacoes; silencio, hesitacoes, so "obrigado", uma frase sem
+#   pedido ou conversa a volta que nao seja uma pergunta ao jarvis sao
+#   ignorados.
+# sons: um som curto e suave marca quando essa escuta abre (so a primeira vez,
+#   nao depois de cada resposta) e outro, diferente, quando fecha. Poe false
+#   para os desligar (a bolinha e a linha de estado continuam a mostrar
+#   "A OUVIR-TE").
 # volume: volume desses sons (maior do que 0, no maximo 1); baixo por omissao.
+# interromper: enquanto o jarvis fala, falar por cima dele pausa-o logo; um
+#   "yeah" ou uma tosse deixam-no continuar, uma frase a serio para-o e passa a
+#   ser o pedido seguinte. Poe false para desligar (--sem-voz tambem desliga).
 [escuta]
-seguimento_s = 8.0
+seguimento_s = 15.0
 sons = true
 volume = 0.15
+interromper = true
+
+# Opcional: onde o jarvis procura os teus repositorios git para os juntar aos
+# projetos acima, sem os escreveres a mao. Em cada arranque, cada pasta filha
+# DIRETA destas raizes que tenha .git passa a ser um projeto com o nome da
+# pasta. Um projeto de [[projetos]] com o mesmo nome ganha sempre. Pastas sem
+# .git, com um nome que nao serve para projeto, ou juncoes/atalhos que apontam
+# para fora da raiz ficam de fora (uma linha no log). Uma raiz que nao existe
+# nao e erro.
+# Sem esta tabela procura em Desktop/Repositorios dentro da tua pasta pessoal.
+# pastas: lista de caminhos absolutos ("~" tambem serve); [] desliga a descoberta.
+# [descoberta]
+# pastas = ["D:/caminho/para/repositorios"]
 
 # Opcional: a memoria das perguntas gerais. Sem esta tabela valem estes mesmos
 # valores, que tambem sao os tetos: aqui so se podem baixar, para cada pergunta

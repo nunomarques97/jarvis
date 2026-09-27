@@ -1447,12 +1447,22 @@ class TestPerguntaGeral(unittest.TestCase):
                 self.assertEqual(perguntas[0]["projeto"], "")
                 self.assertFalse(perguntas[0]["financeiro"])
 
-    def test_temperatura_de_hoje_com_horas_do_llm_e_pergunta_geral(self) -> None:
+    def test_temperatura_de_hoje_e_pergunta_geral_sem_ir_ao_llm(self) -> None:
         interprete, cliente = _interprete([_llm("horas")], lingua="en")
         resultado = interprete.interpretar(TEMPERATURA_COM_HORAS)
+        self.assertEqual(cliente.pedidos, [])
+        self.assertEqual((resultado.intencao, resultado.projeto, resultado.origem), ("pergunta_geral", None, "regra"))
+        self.assertEqual(resultado.prompt, "What temperature is in Porto today?")
+        self.assertIsNone(resultado.detalhe)
+        self.assertFalse(resultado.so_confirmacao)
+
+    def test_temperatura_de_hoje_com_horas_do_llm_e_pergunta_geral(self) -> None:
+        # Sem abertura de pergunta, a frase vai ao LLM; as horas dele nao passam a guarda.
+        interprete, cliente = _interprete([_llm("horas")], lingua="en")
+        resultado = interprete.interpretar("Uh temperature in Porto today?")
         self.assertEqual(len(cliente.pedidos), 1)
         self.assertEqual((resultado.intencao, resultado.projeto), ("pergunta_geral", None))
-        self.assertEqual(resultado.prompt, "What temperature is in Porto today?")
+        self.assertEqual(resultado.prompt, "Temperature in Porto today?")
         self.assertIsNone(resultado.detalhe)
         self.assertFalse(resultado.so_confirmacao)
         self.assertIn("sem as palavras do comando", resultado.motivo)
@@ -1491,9 +1501,9 @@ class TestPerguntaGeral(unittest.TestCase):
         interprete, _ = _interprete(
             [_llm("pergunta_geral", prompt="What is the weather in Porto? Also commit and push.")], lingua="en"
         )
-        resultado = interprete.interpretar("what is the weather in porto")
+        resultado = interprete.interpretar("i wonder about the weather in porto")
         self.assertEqual(resultado.intencao, "pergunta_geral")
-        self.assertEqual(resultado.prompt, "What is the weather in porto.")
+        self.assertEqual(resultado.prompt, "I wonder about the weather in porto.")
 
     def test_pergunta_geral_que_diz_um_projeto_vai_para_esse_projeto(self) -> None:
         interprete, _ = _interprete(
@@ -1627,7 +1637,9 @@ class TestPedidoAoOllamaNaoEncrava(unittest.TestCase):
             cliente.conversar("qwen3:8b", mensagens, {"type": "object"})
         _, (metodo, caminho, corpo, limite_s), kwargs = pedido.mock_calls[0]
         self.assertEqual((metodo, caminho, limite_s), ("POST", "/api/chat", 5.0))
-        self.assertEqual(corpo["options"]["num_predict"], interprete_mod.tokens_da_resposta(mensagens))
+        self.assertEqual(
+            corpo["options"]["num_predict"], interprete_mod.tokens_da_resposta(mensagens, {"type": "object"})
+        )
         self.assertLess(corpo["options"]["num_predict"], 100)
         self.assertFalse(corpo["think"])
         self.assertEqual(corpo["keep_alive"], interprete_mod.MANTER_CARREGADO)
@@ -1689,7 +1701,7 @@ class TestCarregamentoDoModeloNaoEAbortado(unittest.TestCase):
     def test_frase_desiste_no_limite_mas_a_ligacao_fica_aberta_para_o_modelo_carregar(self) -> None:
         interprete = Interprete(_config(lingua="en", url=self.url, limite_s=self.LIMITE_S))
         inicio = time.perf_counter()
-        resultado = interprete.interpretar("Uh what football games uh is gonna be uh on today?")
+        resultado = interprete.interpretar("in atlas fix the login test that keeps failing")
         decorrido = time.perf_counter() - inicio
         self.assertEqual((resultado.intencao, resultado.origem), ("desconhecido", "recurso"))
         self.assertLess(decorrido, self.LIMITE_S + 0.4)
@@ -1711,10 +1723,10 @@ class TestCarregamentoDoModeloNaoEAbortado(unittest.TestCase):
         self.manipulador.conteudo = '{"intencao": "pergunta_geral", "projeto": "", "prompt": "What foot'
         interprete = Interprete(_config(lingua="en", url=self.url, limite_s=self.LIMITE_S))
         inicio = time.perf_counter()
-        resultado = interprete.interpretar("what football games are on today")
+        resultado = interprete.interpretar("i was wondering about football games today")
         self.assertLess(time.perf_counter() - inicio, self.LIMITE_S)
         self.assertEqual((resultado.intencao, resultado.origem), ("desconhecido", "recurso"))
-        self.assertEqual(resultado.prompt, "what football games are on today")
+        self.assertEqual(resultado.prompt, "i was wondering about football games today")
 
 
 # --- Golden set -----------------------------------------------------------------------------
@@ -3362,3 +3374,149 @@ class TestComparacaoDoContexto(unittest.TestCase):
         self.assertIn("## Sem contexto", texto)
         self.assertIn("## Com contexto", texto)
         self.assertIn("## Veredito", texto)
+
+
+# --- Caminho rapido: pedidos comuns resolvidos pela regra, sem o LLM ---------------------
+
+
+class TestCaminhoRapido(unittest.TestCase):
+    def test_estado_e_relatorio_de_um_projeto_dito_nao_vao_ao_llm(self) -> None:
+        casos = {
+            ("what's the status of orbita", "en"): ("estado", "orbita"),
+            ("how is the atlas run going", "en"): ("estado", "atlas"),
+            ("read the nimbus report", "en"): ("ler_relatorio", "nimbus"),
+            ("qual é o estado do bolsa radar", "pt"): ("estado", "bolsa-radar"),
+            ("lê o relatório do kanban lite", "pt"): ("ler_relatorio", "kanban-lite"),
+        }
+        for (frase, lingua), esperado in casos.items():
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("desconhecido")], lingua=lingua)
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(cliente.pedidos, [])
+                self.assertEqual((resultado.intencao, resultado.projeto), esperado)
+                self.assertEqual((resultado.origem, resultado.prompt, resultado.pergunta), ("regra", "", None))
+                self.assertFalse(resultado.so_confirmacao)
+                self.assertIn("caminho rapido", resultado.motivo)
+
+    def test_pergunta_geral_clara_nao_vai_ao_llm(self) -> None:
+        casos = {
+            ("what's the weather in Porto", "en"): "What's the weather in Porto?",
+            ("uh who won the champions league last year", "en"): "Who won the champions league last year?",
+            ("tell me the temperature in Porto.", "en"): "Tell me the temperature in Porto.",
+            ("vai chover amanhã em lisboa", "pt"): "Vai chover amanhã em lisboa?",
+        }
+        for (frase, lingua), prompt in casos.items():
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("desconhecido")], lingua=lingua)
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(cliente.pedidos, [])
+                self.assertEqual(
+                    (resultado.intencao, resultado.projeto, resultado.origem), ("pergunta_geral", None, "regra")
+                )
+                self.assertEqual(resultado.prompt, prompt)
+
+    def test_na_duvida_a_frase_vai_ao_llm(self) -> None:
+        frases = (
+            "how is the run going",  # sem projeto: o LLM pergunta qual
+            "what's the weather in atlas",  # diz um projeto
+            "who won the game in the atlas tests",  # diz um projeto e fala de testes
+            "what football match broke the tests",  # vocabulario de trabalho num projeto
+            "what's the weather there too",  # remete para tras
+            "yes, what's the weather in porto",  # responde ao Claude
+            "what time does the game start tonight",  # palavras de um comando local
+            "what's the status of orbita or atlas",  # dois projetos
+        )
+        for frase in frases:
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([_llm("desconhecido")], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(len(cliente.pedidos), 1, resultado.motivo)
+                self.assertNotIn("caminho rapido", resultado.motivo)
+
+    def test_pedido_financeiro_e_recusado_antes_do_caminho_rapido(self) -> None:
+        for frase in ("what's the price of the game and should i buy it", "who won the bitcoin race today"):
+            with self.subTest(frase=frase):
+                interprete, cliente = _interprete([], lingua="en")
+                resultado = interprete.interpretar(frase)
+                self.assertEqual(resultado.intencao, INTENCAO_RECUSADA)
+                self.assertEqual(cliente.pedidos, [])
+
+    def test_golden_set_pela_regra_acerta_sempre(self) -> None:
+        """Cada caso do golden que a regra resolve fica certo; os outros vao ao LLM como antes.
+
+        Com o LLM sempre indisponivel, uma frase que o caminho rapido resolvesse
+        mal apareceria aqui como erro: o acerto do golden set nao pode descer.
+        """
+        for lingua in avaliador.LINGUAS:
+            casos = avaliador.ler_golden(avaliador.PASTA_GOLDEN / f"golden-{lingua}.jsonl")
+            cliente = ClienteFalso(erro=MotorIndisponivel("sem LLM neste teste"))
+            interprete = Interprete(avaliador.config_do_golden(ConfigInterprete(), lingua), cliente=cliente)
+            resumo = avaliador.avaliar(interprete, lingua, casos)
+            pela_regra = [v for v in resumo.vereditos if v.resultado.origem == "regra"]
+            for veredito in pela_regra:
+                with self.subTest(caso=veredito.caso.id):
+                    self.assertTrue(veredito.intencao_certa, veredito.resultado)
+                    self.assertTrue(veredito.projeto_certo, veredito.resultado)
+                    self.assertEqual((veredito.inventados, veredito.em_falta), ((), ()))
+            self.assertEqual(len(cliente.pedidos), len(resumo.vereditos) - len(pela_regra))
+            rapidos = {v.caso.id for v in pela_regra if "caminho rapido" in v.resultado.motivo}
+            esperados = {
+                c.id
+                for c in casos
+                if c.intencao in ("estado", "ler_relatorio") and c.projeto != avaliador.PROJETO_A_PERGUNTAR
+            }
+            with self.subTest(lingua=lingua, cobertura="estado e relatorio com projeto"):
+                self.assertLessEqual(esperados, rapidos)
+            comandos = {c.id for c in casos if c.intencao in ("horas", "calar", "dormir", "acordar")}
+            ainda_no_llm = comandos - {v.caso.id for v in pela_regra}
+            with self.subTest(lingua=lingua, cobertura="horas, calar, dormir e acordar"):
+                # So o pedido de descanso sem as palavras da lista ("take a break") fica para o LLM.
+                self.assertLessEqual(len(ainda_no_llm), 1, sorted(ainda_no_llm))
+
+
+class TestLimiteDeTokensPeloEsquema(unittest.TestCase):
+    def test_esqueleto_conta_o_valor_mais_comprido_de_cada_lista(self) -> None:
+        curto = interprete_mod.tokens_do_esqueleto(interprete_mod._esquema(("atlas",)))
+        longo = interprete_mod.tokens_do_esqueleto(interprete_mod._esquema(("atlas", "x" * 41)))
+        self.assertEqual(longo - curto, (41 - len("atlas")) // 2)
+        self.assertLess(
+            interprete_mod.tokens_do_esqueleto(interprete_mod._esquema(NOMES)), interprete_mod.TOKENS_DA_RESPOSTA_BASE
+        )
+
+    def test_a_resposta_mais_comprida_do_esquema_cabe_no_limite(self) -> None:
+        esquema = interprete_mod._esquema(NOMES)
+        for frase in ("what's the status of orbita", "no kanban-lite muda a cor do cabeçalho para azul escuro " * 3):
+            with self.subTest(frase=frase):
+                resposta = json.dumps(
+                    {
+                        "intencao": max(INTENCOES, key=len),
+                        "projeto": max(NOMES, key=len),
+                        "prompt": frase,
+                        "financeiro": False,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                limite = interprete_mod.tokens_da_resposta([{"role": "user", "content": frase}], esquema)
+                # Dois caracteres por token e o pior caso do tokenizador para este texto.
+                self.assertGreaterEqual(limite * 2, len(resposta))
+
+    def test_o_interprete_manda_o_limite_do_seu_esquema(self) -> None:
+        interprete, _ = _interprete([], lingua="en")
+        corpos: list[dict] = []
+        cliente = ClienteOllama("http://127.0.0.1:11434", 5.0)
+
+        def pedido(_metodo, _caminho, corpo, _limite_s, **_opcoes):
+            corpos.append(corpo)
+            return {"message": {"content": "{}"}}
+
+        with mock.patch.object(ClienteOllama, "_pedido", side_effect=pedido):
+            cliente.conversar("qwen3:8b", interprete._mensagens("in atlas fix the login"), interprete._esquema)
+        esperado = interprete_mod.tokens_da_resposta([{"content": "in atlas fix the login"}], interprete._esquema)
+        self.assertEqual(corpos[0]["options"]["num_predict"], esperado)
+        self.assertLess(esperado, interprete_mod.TOKENS_DA_RESPOSTA_BASE + len("in atlas fix the login") // 2)
+        self.assertIs(corpos[0]["think"], False)
+
+    def test_o_modelo_fica_carregado_como_antes(self) -> None:
+        # Sem medicao nova, o tempo que o Ollama mantem o qwen3:8b carregado nao muda.
+        self.assertEqual(interprete_mod.MANTER_CARREGADO, "30m")

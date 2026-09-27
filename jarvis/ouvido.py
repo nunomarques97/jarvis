@@ -8,7 +8,9 @@ um unico callback, por dois gatilhos:
                    (`GetAsyncKeyState`, via ctypes): nao consome a tecla, nao
                    precisa de foco na consola e nao traz dependencia nova.
   maos-livres      a palavra de ativacao (openWakeWord) abre a escuta; o fim
-                   da fala decide-o o VAD (webrtcvad) depois de um silencio.
+                   da fala decide-o o VAD (webrtcvad) depois de um silencio,
+                   com o fim de turno de `jarvis.fim_de_turno` (o Smart Turn
+                   depois de um silencio curto, ou o silencio fixo de 0,6 s).
 
 Janela de escuta: `abrir_escuta(segundos, para=...)` abre uma escuta como a
 das maos-livres, mas sem palavra de ativacao: a resposta a um recap pendente
@@ -19,6 +21,17 @@ sozinha. So existe com VAD; sem ele, fica a tecla de falar. A espera de fala
 so guarda os ultimos 300 ms de audio, e todas estas escutas deitam fora o
 primeiro meio segundo, onde ainda pode soar o fim da voz do jarvis ou o som
 de abertura da escuta.
+
+Interromper: enquanto o jarvis fala (`definir_voz_a_falar(True)`, posto pelo
+`jarvis.app` a volta de cada fala), cada chunk em repouso passa tambem pelo
+VAD Silero (`jarvis.vad_silero`). `CHUNKS_PARA_INTERROMPER` chunks seguidos
+com fala chamam `ao_interromper(INTERRUPCAO_PAUSAR, instante)`, com o
+instante do primeiro desses chunks, e o jarvis pausa a voz. A frase dita por
+cima e captada com os ultimos 300 ms antes dela (a unica coisa guardada
+enquanto se espera) e acaba pelo VAD como as maos-livres; segue como frase
+com o gatilho `GATILHO_INTERRUPCAO`, sem palavra de ativacao. Se nao der
+frase nenhuma (nada transcrito, fila cheia, transcricao falhada), o ouvido
+chama `ao_interromper(INTERRUPCAO_RETOMAR, instante)` para a voz continuar.
 
 Palavra de ativacao da lingua do config ([ouvido].lingua): "hey jarvis" em
 ingles (modelo pre-treinado do openWakeWord) e "boas jarvis" em portugues
@@ -43,6 +56,11 @@ leitura e corre a maquina de estados (barata: tecla, VAD e detetor); a de
 transcricao tira frases de uma fila curta, transcreve e chama o callback. A
 captura nunca espera pela transcricao nem pelo callback, por isso o estado da
 tecla corresponde sempre ao audio que acabou de chegar.
+
+Fim verdadeiro da fala: cada frase leva o instante do ultimo chunk que o VAD
+chamou voz (`Frase.ultima_voz`), tambem com a tecla quando ha VAD. O fim da
+escuta chega depois dele (o silencio final ou o soltar da tecla); as latencias
+que o Sponsor sente medem-se a partir da ultima voz.
 
 Sinais de escuta: cada inicio e fim de escuta escreve uma linha na consola
 (sempre) e, so com `com_som=True` (a flag --com-som), toca um bip curto numa
@@ -77,6 +95,7 @@ from typing import Callable, Iterable, Protocol
 
 from jarvis.audio_util import RAIZ, ler_wav_pcm16, reamostrar_pcm16
 from jarvis.config import LIMIAR_DE_ATIVACAO_PADRAO
+from jarvis.fim_de_turno import AMOSTRAS_DA_JANELA, SILENCIO_FIXO_S, FimDeTurno
 from jarvis.stt import TAXA_DO_MOTOR, MotorBase, MotorIndisponivel, criar_motor, duracao_pcm16
 
 TAXA = TAXA_DO_MOTOR
@@ -108,10 +127,17 @@ CHUNKS_ANTES_DA_FALA = 10
 #: podem estar no buffer da placa de som e do microfone. O audio deste intervalo
 #: e deitado fora: nem conta para o VAD nem entra na frase.
 GUARDA_APOS_A_VOZ_S = 0.5
-#: Silencio que fecha a frase das maos-livres.
-SILENCIO_FINAL_S = 0.6
+#: Silencio que fecha a frase das maos-livres sem o Smart Turn.
+SILENCIO_FINAL_S = SILENCIO_FIXO_S
+#: Chunks do fim da frase que o fim de turno ve (os 8 s do modelo).
+CHUNKS_DO_FIM_DE_TURNO = math.ceil(AMOSTRAS_DA_JANELA / AMOSTRAS_POR_CHUNK)
 #: 0 (menos agressivo) a 3 (mais agressivo a chamar ruido ao que nao e voz).
 AGRESSIVIDADE_DO_VAD = 2
+#: Interromper: chunks seguidos com fala (Silero) para a voz do jarvis pausar
+#: (90 ms; a pausa conta desde o primeiro deles).
+CHUNKS_PARA_INTERROMPER = 3
+#: Audio guardado antes do inicio da fala que interrompe (300 ms).
+CHUNKS_ANTES_DA_INTERRUPCAO = 10
 
 PASTA_MODELOS_OWW = RAIZ / "models" / "openwakeword"
 MODELO_MELSPEC = PASTA_MODELOS_OWW / "melspectrogram.onnx"
@@ -199,6 +225,12 @@ GATILHO_TECLA = "tecla"
 GATILHO_ATIVACAO = "ativacao"
 #: Escuta aberta pelo jarvis (resposta ao recap, conversa ou seguimento), sem palavra de ativacao.
 GATILHO_JANELA = "janela"
+#: Frase dita por cima da voz do jarvis, sem palavra de ativacao.
+GATILHO_INTERRUPCAO = "interrupcao"
+#: O que `ao_interromper` recebe: a fala comecou por cima da voz (pausar) ou
+#: a frase dita por cima nao deu texto nenhum (retomar).
+INTERRUPCAO_PAUSAR = "pausar"
+INTERRUPCAO_RETOMAR = "retomar"
 
 #: Para que e a janela de escuta sem palavra de ativacao.
 ESCUTA_CONVERSA = "conversa"
@@ -232,10 +264,20 @@ class Frase:
     #: A palavra de ativacao retirada do inicio do texto (tal como foi
     #: transcrita), ou None quando nao havia nenhuma.
     palavra_retirada: str | None = None
+    #: O ultimo chunk que o VAD chamou voz: o fim verdadeiro da fala, antes do
+    #: silencio que fecha a frase ou do soltar da tecla. None sem VAD ou sem voz.
+    ultima_voz: float | None = None
 
     @property
     def ms_do_fim_ao_texto(self) -> float:
         return (self.texto_pronto - self.fim_da_escuta) * 1000
+
+    @property
+    def ms_da_ultima_voz_ao_fim(self) -> float | None:
+        """Quanto tempo a escuta ainda esperou depois do ultimo chunk com voz."""
+        if self.ultima_voz is None:
+            return None
+        return (self.fim_da_escuta - self.ultima_voz) * 1000
 
 
 @dataclass(frozen=True)
@@ -247,6 +289,7 @@ class _FraseCaptada:
     score: float | None
     #: A palavra de ativacao seguida de silencio: sem audio para transcrever.
     so_ativacao: bool = False
+    ultima_voz: float | None = None
 
 
 # --- Pecas trocaveis: fonte, tecla, detetor, VAD -----------------------------
@@ -278,6 +321,10 @@ class DetetorDeAtivacao(Protocol):
 
 class Vad(Protocol):
     def e_fala(self, chunk: bytes) -> bool: ...
+
+
+#: Os gatilhos sem palavra de ativacao: os sons sao do jarvis, nunca o bip.
+_GATILHOS_SEM_BIP = (GATILHO_JANELA, GATILHO_INTERRUPCAO)
 
 
 def _modulo_do_microfone():
@@ -614,6 +661,9 @@ class Ouvido:
         ao_ativar_sem_fala: Callable[[Frase], None] | None = None,
         ao_evento: Callable[[str], object] | None = None,
         ao_chunk: Callable[[bytes], object] | None = None,
+        vad_da_interrupcao: Vad | None = None,
+        ao_interromper: Callable[[str, float], object] | None = None,
+        fim_de_turno: FimDeTurno | None = None,
     ) -> None:
         if tecla is None and detetor is None:
             raise ValueError("o ouvido precisa de pelo menos um gatilho (tecla ou palavra de ativacao)")
@@ -629,6 +679,13 @@ class Ouvido:
         #: para a bolinha. Tem de ser rapido; uma falha dele nunca para a escuta.
         self.ao_evento = ao_evento
         self.ao_chunk = ao_chunk
+        #: Interromper o jarvis a falar: o VAD que decide o inicio da fala por
+        #: cima da voz e quem pausa, retoma ou para a voz. Precisa tambem do
+        #: `vad` (o fim da frase); sem os tres, nao ha interrupcao.
+        self.vad_da_interrupcao = vad_da_interrupcao
+        self.ao_interromper = ao_interromper
+        #: Quando o silencio depois da fala fecha a frase; sem ele, o silencio fixo.
+        self.fim_de_turno = fim_de_turno if fim_de_turno is not None else FimDeTurno(None, escrever=escrever)
         self.tecla = tecla
         self.detetor = detetor
         self.vad = vad
@@ -653,6 +710,8 @@ class Ouvido:
         self._score: float | None = None
         self._voz_seguida = 0
         self._silencio_s = 0.0
+        #: Instante (no relogio) do ultimo chunk com voz da frase em curso.
+        self._ultima_voz: float | None = None
         self._atalho = False
         self._gatilho = GATILHO_ATIVACAO
         self._espera_pela_fala_s = ESPERA_PELA_FALA_S
@@ -671,6 +730,14 @@ class Ouvido:
         self._trinco_da_janela = threading.Lock()
         self._a_transcrever = False
         self._fechar_janela = False
+        #: A voz do jarvis esta a falar (so enquanto isto e verdade se ouve por cima dela).
+        self._voz_a_falar = False
+        #: Ultimos chunks antes de uma fala por cima da voz, e os chunks seguidos com fala.
+        self._antes_da_interrupcao: list[bytes] = []
+        self._voz_na_interrupcao = 0
+        self._primeira_voz_na_interrupcao = 0.0
+        #: Quantas vezes a fala por cima da voz do jarvis comecou.
+        self.interrupcoes = 0
         self._fila: queue.Queue[_FraseCaptada | None] = queue.Queue(maxsize=FRASES_EM_ESPERA)
         self._parar = threading.Event()
         self._fios: list[threading.Thread] = []
@@ -703,7 +770,7 @@ class Ouvido:
         self.escrever(f"ouvido | {seta} | {detalhe}")
         self._avisar(tipo)
         # Nas escutas sem palavra de ativacao os sons sao do jarvis, nao do bip.
-        if self.com_som and self._gatilho != GATILHO_JANELA:
+        if self.com_som and self._gatilho not in _GATILHOS_SEM_BIP:
             try:
                 self.tocar(tipo)
             except Exception:  # noqa: BLE001 - um bip falhado nunca para a escuta
@@ -768,12 +835,79 @@ class Ouvido:
         self.escrever(f"ouvido | descartado: {motivo} | nada transcrito, nada enviado")
         self._avisar(EVENTO_DESCARTADA)
 
+    # -- interromper o jarvis a falar
+
+    @property
+    def interromper_ligado(self) -> bool:
+        """Ha tudo o que e preciso para ouvir por cima da voz do jarvis."""
+        return self.vad_da_interrupcao is not None and self.vad is not None and self.ao_interromper is not None
+
+    def definir_voz_a_falar(self, a_falar: bool) -> None:
+        """O jarvis comecou (True) ou acabou (False) de falar. Chamado por quem fala."""
+        self._voz_a_falar = bool(a_falar)
+
+    def _interromper(self, evento: str, instante: float) -> None:
+        if self.ao_interromper is None:
+            return
+        try:
+            self.ao_interromper(evento, instante)
+        except Exception as erro:  # noqa: BLE001 - quem pausa a voz nunca para a escuta
+            self.escrever(f"ouvido | o tratamento da interrupcao ({evento}) falhou: {erro!r}")
+
+    def _esquecer_interrupcao(self) -> None:
+        self._antes_da_interrupcao = []
+        self._voz_na_interrupcao = 0
+        reiniciar = getattr(self.vad_da_interrupcao, "reiniciar", None)
+        if reiniciar is not None:
+            try:
+                reiniciar()
+            except Exception:  # noqa: BLE001 - o VAD recomeca na mesma
+                pass
+
+    def _vigiar_interrupcao(self, chunk: bytes, agora: float) -> bool:
+        """Em repouso com a voz a falar: True quando a fala por cima comecou (e a captura com ela)."""
+        self._antes_da_interrupcao.append(chunk)
+        if len(self._antes_da_interrupcao) > CHUNKS_ANTES_DA_INTERRUPCAO:
+            del self._antes_da_interrupcao[0]
+        try:
+            fala = self.vad_da_interrupcao.e_fala(chunk)
+        except Exception:  # noqa: BLE001 - um VAD falhado nao interrompe ninguem
+            fala = False
+        if not fala:
+            self._voz_na_interrupcao = 0
+            return False
+        self._voz_na_interrupcao += 1
+        if self._voz_na_interrupcao == 1:
+            self._primeira_voz_na_interrupcao = agora
+        if self._voz_na_interrupcao < CHUNKS_PARA_INTERROMPER:
+            return False
+        primeira = self._primeira_voz_na_interrupcao
+        self._estado = "a_falar"
+        self._gatilho = GATILHO_INTERRUPCAO
+        self._buffer = list(self._antes_da_interrupcao)
+        self._inicio = primeira
+        self._score = None
+        self._silencio_s = 0.0
+        self._ultima_voz = agora
+        self._esquecer_interrupcao()
+        self.fim_de_turno.reiniciar()
+        self.interrupcoes += 1
+        self._sinal("inicio", "fala por cima da voz do jarvis (sem palavra de ativacao)", agora)
+        self._interromper(INTERRUPCAO_PAUSAR, primeira)
+        return True
+
+    def _frase_de_interrupcao_perdida(self, gatilho: str) -> None:
+        """A frase dita por cima nao chega ao jarvis: a voz pausada continua."""
+        if gatilho == GATILHO_INTERRUPCAO:
+            self._interromper(INTERRUPCAO_RETOMAR, self.relogio())
+
     def _voltar_ao_repouso(self) -> None:
         self._estado = "repouso"
         self._buffer = []
         self._score = None
         self._voz_seguida = 0
         self._silencio_s = 0.0
+        self._ultima_voz = None
         self._atalho = False
         self._gatilho = GATILHO_ATIVACAO
         self._espera_pela_fala_s = ESPERA_PELA_FALA_S
@@ -783,6 +917,7 @@ class Ouvido:
         with self._trinco_da_janela:
             self._fechar_janela = False
         self._escuta = ESCUTA_CONVERSA
+        self.fim_de_turno.reiniciar()
         if self.detetor is not None:
             self.detetor.reiniciar()
 
@@ -796,12 +931,25 @@ class Ouvido:
             self._atalho = bool(outra())
         return self._atalho
 
+    def _voz_na_tecla(self, chunk: bytes, agora: float) -> None:
+        """Com a tecla o VAD nao decide nada: so marca o ultimo chunk com voz, se houver VAD."""
+        if self.vad is None:
+            return
+        try:
+            if self.vad.e_fala(chunk):
+                self._ultima_voz = agora
+        except Exception:  # noqa: BLE001 - a medida e um extra, a tecla segue
+            pass
+
     def _enfileirar(self, gatilho: str, fim: float) -> None:
-        captada = _FraseCaptada(b"".join(self._buffer), gatilho, self._inicio, fim, self._score)
+        captada = _FraseCaptada(
+            b"".join(self._buffer), gatilho, self._inicio, fim, self._score, ultima_voz=self._ultima_voz
+        )
         try:
             self._fila.put_nowait(captada)
         except queue.Full:
             self._descartar(f"{FRASES_EM_ESPERA} frases ainda a espera de transcricao")
+            self._frase_de_interrupcao_perdida(gatilho)
             return
         self._avisar(EVENTO_CAPTADA)
 
@@ -829,17 +977,22 @@ class Ouvido:
                 # Uma janela sem palavra de ativacao ainda sem fala nao perde nada.
                 if not (self._estado == "ativado" and self._gatilho == GATILHO_JANELA):
                     self._descartar("a tecla foi premida a meio de uma escuta por palavra de ativacao")
+                    self._frase_de_interrupcao_perdida(self._gatilho)
                 self._voltar_ao_repouso()
+            self._esquecer_interrupcao()
             self._estado = "tecla"
             self._inicio = agora
             self._buffer = [chunk]
+            self._ultima_voz = None
             self._sinal("inicio", f"{self.nome_da_tecla} premida", agora)
+            self._voz_na_tecla(chunk, agora)
             self._houve_atalho()
             return
 
         if self._estado == "tecla":
             if premida:
                 self._buffer.append(chunk)
+                self._voz_na_tecla(chunk, agora)
                 self._houve_atalho()
                 if self._duracao_do_buffer() >= MAXIMO_DA_FRASE_S:
                     self._sinal("fim", f"frase no maximo de {MAXIMO_DA_FRASE_S:.0f} s; solta a tecla", agora)
@@ -885,8 +1038,15 @@ class Ouvido:
                 )
                 return
 
+        if self._estado == "repouso":
+            if self._voz_a_falar and self.interromper_ligado:
+                if self._vigiar_interrupcao(chunk, agora):
+                    return
+            elif self._antes_da_interrupcao or self._voz_na_interrupcao:
+                self._esquecer_interrupcao()
+
         if self.detetor is None and self._estado == "repouso":
-            return  # sem maos-livres, audio fora da tecla nem e olhado
+            return  # sem maos-livres nem voz a falar, audio fora da tecla nem e olhado
 
         if self._estado == "repouso":
             score = self.detetor.processar(chunk)
@@ -915,6 +1075,8 @@ class Ouvido:
                 if janela and len(self._buffer) > CHUNKS_ANTES_DA_FALA:
                     del self._buffer[0]
                 fala = self.vad.e_fala(chunk)
+            if fala:
+                self._ultima_voz = agora
             if fala and self._aguardado_s > self._surdez_s:
                 self._voz_seguida += 1
             else:
@@ -922,6 +1084,7 @@ class Ouvido:
             if self._voz_seguida >= CHUNKS_PARA_COMECAR_A_FALA:
                 self._estado = "a_falar"
                 self._silencio_s = 0.0
+                self.fim_de_turno.reiniciar()
                 if janela:
                     # A frase comeca no primeiro chunk com voz, nao na abertura da janela.
                     self._inicio = agora - self._voz_seguida * DURACAO_DO_CHUNK_S
@@ -940,12 +1103,19 @@ class Ouvido:
         self._buffer.append(chunk)
         decorrido = self._duracao_do_buffer()
         fala = self.vad.e_fala(chunk)
+        if fala:
+            self._ultima_voz = agora
         self._silencio_s = 0.0 if fala else self._silencio_s + DURACAO_DO_CHUNK_S
-        if self._silencio_s >= SILENCIO_FINAL_S or decorrido >= MAXIMO_DA_FRASE_S:
-            motivo = "fim da fala (VAD)" if self._silencio_s >= SILENCIO_FINAL_S else "frase no maximo"
+        fim = self.fim_de_turno.acabou(self._silencio_s, self._audio_da_frase)
+        if fim is not None or decorrido >= MAXIMO_DA_FRASE_S:
+            motivo = fim if fim is not None else "frase no maximo"
             self._sinal("fim", motivo, agora)
             self._enfileirar(self._gatilho, agora)
             self._voltar_ao_repouso()
+
+    def _audio_da_frase(self) -> bytes:
+        """O fim da frase em curso que o fim de turno ve (ate 8 s)."""
+        return b"".join(self._buffer[-CHUNKS_DO_FIM_DE_TURNO:])
 
     # -- transcricao (thread de transcricao)
 
@@ -955,15 +1125,20 @@ class Ouvido:
         except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para o ouvido
             self.escrever(f"ouvido | transcricao falhou ({self.motor.nome}): {erro!r}")
             self._avisar(EVENTO_ERRO)
+            self._frase_de_interrupcao_perdida(captada.gatilho)
             return None
         pronto = self.relogio()
         if not resultado.texto:
             self._descartar("nada transcrito nesta frase")
+            self._frase_de_interrupcao_perdida(captada.gatilho)
             return None
         # Com a tecla a palavra so pode vir dita inteira; a cauda sozinha e o
-        # resto de uma ativacao maos-livres que abriu a meio da palavra.
+        # resto de uma ativacao maos-livres que abriu a meio da palavra (ou de
+        # um "jarvis" dito por cima da voz).
         texto, retirada = retirar_palavra_de_ativacao(
-            resultado.texto, self.palavras_de_ativacao, aceitar_cauda=captada.gatilho == GATILHO_ATIVACAO
+            resultado.texto,
+            self.palavras_de_ativacao,
+            aceitar_cauda=captada.gatilho in (GATILHO_ATIVACAO, GATILHO_INTERRUPCAO),
         )
         if retirada is not None:
             self.escrever(f"ouvido | palavra de ativacao retirada do inicio do texto: {retirada!r}")
@@ -979,6 +1154,7 @@ class Ouvido:
             latencia_stt_ms=resultado.latencia_ms,
             score_ativacao=captada.score,
             palavra_retirada=retirada,
+            ultima_voz=captada.ultima_voz,
         )
 
     def _entregar_so_ativacao(self, captada: _FraseCaptada) -> None:
@@ -1061,7 +1237,11 @@ class Ouvido:
                 return
             if self._parar.is_set():
                 continue  # a parar: o que falta na fila nao se entrega
-            self._entregar(captada)
+            try:
+                self._entregar(captada)
+            except Exception as erro:  # noqa: BLE001 - uma frase falhada nunca para a transcricao
+                self.escrever(f"ouvido | ERRO ao entregar a frase: {erro!r}")
+                self._frase_de_interrupcao_perdida(captada.gatilho)
 
     def iniciar(self) -> None:
         """Abre a fonte AQUI (um microfone que nao abre levanta para quem arranca) e lanca as threads."""
@@ -1381,6 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --ouvir: microfone real, frases impressas; nada e encaminhado.
     from jarvis.config import TECLAS_DE_FALAR
+    from jarvis.fim_de_turno import criar_fim_de_turno
 
     detetor = vad = None
     if not args.sem_ativacao:
@@ -1399,6 +1580,9 @@ def main(argv: list[str] | None = None) -> int:
         limiar_de_ativacao=config.ouvido.limiar_ativacao,
         com_som=args.com_som,
         nome_da_tecla=config.ouvido.tecla,
+        fim_de_turno=criar_fim_de_turno(config.ouvido.fim_de_turno, config.ouvido.fim_de_turno_maximo_s)
+        if vad is not None
+        else None,
     )
     try:
         print(f"motor pronto em {ouvido.preparar():.0f} ms")

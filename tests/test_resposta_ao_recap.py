@@ -32,9 +32,9 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from jarvis import app
+from jarvis import app, confirmacao
 from jarvis.app import A_ESPERA_A_OUVIR, A_OUVIR, A_OUVIR_TE
-from jarvis.config import ConfigEscuta
+from jarvis.config import SEGUIMENTO_S, ConfigEscuta
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
     DURACAO_DO_CHUNK_S,
@@ -176,9 +176,9 @@ def _sem_escuta_nada_e_ouvido(teste: unittest.TestCase, cena: Cena) -> None:
 def _seguimento_ate_ao_prazo(teste: unittest.TestCase, cena: Cena) -> None:
     """Depois de uma resposta falada fica a janela de seguimento; fechada ela, nada e ouvido."""
     teste.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_SEGUIMENTO)
-    teste.assertEqual(cena.aberturas[-1][1:], (8.0, ESCUTA_SEGUIMENTO, False))
+    teste.assertEqual(cena.aberturas[-1][1:], (SEGUIMENTO_S, ESCUTA_SEGUIMENTO, False))
     teste.assertEqual(cena.jarvis.painel.atual, A_OUVIR_TE)
-    cena.passar(SILENCIO, 8.5, verificar=True)
+    cena.passar(SILENCIO, SEGUIMENTO_S + 0.5, verificar=True)
     _sem_escuta_nada_e_ouvido(teste, cena)
     teste.assertEqual(cena.jarvis.painel.atual, A_OUVIR)
 
@@ -190,7 +190,7 @@ class TestEscutaDepoisDoRecap(unittest.TestCase):
     def test_abre_so_depois_de_a_voz_acabar_com_o_prazo_inteiro(self) -> None:
         cena = Cena([DITADO_EN])
         cena.com_recap()
-        self.assertTrue(cena.falados[-1].endswith("Send it?"))
+        self.assertTrue(cena.falados[-1].endswith("send it?"))
         self.assertEqual(cena.escuta_ao_falar, [None], "nada aberto enquanto a voz le o recap")
         self.assertTrue(cena.aberturas)
         self.assertFalse(any(a_falar for *_resto, a_falar in cena.aberturas), "nunca abre com a voz a falar")
@@ -305,7 +305,7 @@ class TestRespostaSemPalavraDeAtivacao(unittest.TestCase):
         cena.jarvis._abrir_conversa("atlas")
         cena.dizer("yes, run the whole suite and then the linter")
         self.assertTrue(cena.jarvis.confirmacao.a_espera)
-        self.assertEqual(cena.falados[-1], "Reply to Claude in atlas: yes, run the whole suite and then the linter. Send it?")
+        self.assertEqual(cena.falados[-1], "Reply to Claude in atlas: yes, run the whole suite and then the linter - send it?")
         self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
         self.assertEqual(cena.aberturas[-1][1:], (30.0, ESCUTA_RECAP, False))
         cena.dizer("go ahead")
@@ -653,7 +653,7 @@ class TestCabecalho(unittest.TestCase):
 
     def test_diz_a_janela_de_seguimento_com_os_segundos_por_omissao(self) -> None:
         self.assertIn(
-            "depois de o jarvis falar: 8 s para continuar sem palavra de ativacao;"
+            "depois de o jarvis falar: 15 s para continuar sem palavra de ativacao;"
             " o som e a bolinha (A OUVIR-TE) dizem quando esta a ouvir",
             self._cabecalho(VadFalso()),
         )
@@ -661,7 +661,7 @@ class TestCabecalho(unittest.TestCase):
     def test_a_janela_de_seguimento_usa_os_segundos_configurados(self) -> None:
         texto = self._cabecalho(VadFalso(), escuta=ConfigEscuta(seguimento_s=12.5))
         self.assertIn("depois de o jarvis falar: 12.5 s para continuar sem palavra de ativacao", texto)
-        self.assertNotIn("depois de o jarvis falar: 8 s", texto)
+        self.assertNotIn("depois de o jarvis falar: 15 s", texto)
 
 
 
@@ -713,7 +713,7 @@ class TestRespostasReaisAoRecap(unittest.TestCase):
         cena.com_recap("hey jarvis, tell chamora to read the README and summarize it. Don't change anything.")
         cena.dizer("Uh no, add uh one more uh request. I want to s uh the summarize to be in Portuguese.")
         self.assertEqual(cena.jarvis.confirmacao.recap.pedido.prompt, limpo)
-        self.assertEqual(cena.falados[-1], f"To chamora: {limpo} Send it?")
+        self.assertEqual(cena.falados[-1], f"For chamora: {limpo.rstrip('.')} - send it?")
         self.assertEqual(cena.canal.recebidos, [])
         self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
         cena.dizer("Yes.")
@@ -730,7 +730,7 @@ class TestRespostasReaisAoRecap(unittest.TestCase):
         cena.dizer("The no change uh um the login screen to Wipstone")
         self.assertEqual(len(cena.m.llm.pedidos), 2, "a correcao passou pelo interprete")
         self.assertEqual(cena.jarvis.confirmacao.recap.pedido.prompt, "Fix the Wipstone.")
-        self.assertEqual(cena.falados[-1], "To atlas: Fix the Wipstone. Send it?")
+        self.assertEqual(cena.falados[-1], "Fix the Wipstone, for atlas - send it?")
         self.assertEqual(cena.canal.recebidos, [])
 
     def test_estado_do_jarvis_corre_sem_recap(self) -> None:
@@ -739,6 +739,51 @@ class TestRespostasReaisAoRecap(unittest.TestCase):
         self.assertFalse(cena.jarvis.confirmacao.a_espera)
         self.assertFalse(any("Confirm?" in fala for fala in cena.falados))
         self.assertIn("desfecho: executado", cena.log())
+
+
+class TestRecapComProjetoAssumido(unittest.TestCase):
+    """O ultimo projeto usado, com a voz e o ouvido: o recap diz-o e so o "sim" envia."""
+
+    def cena_com_atlas_usado(self, *respostas_llm) -> Cena:
+        cena = Cena([DITADO_EN, *respostas_llm])
+        cena.com_recap()
+        cena.dizer("Yeah.")
+        self.assertEqual(cena.canal.recebidos, [("atlas", "Fix the login test.")])
+        return cena
+
+    def test_no_for_outro_projeto_troca_e_o_yes_envia_so_ai(self) -> None:
+        cena = self.cena_com_atlas_usado(resposta_llm("ditar_prompt", "", "Add tests to the login page."))
+        cena.pedir("hey jarvis, add tests to the login page")
+        self.assertTrue(cena.jarvis.confirmacao.a_espera)
+        self.assertEqual(cena.falados[-1], "Add tests to the login page, still for atlas - send it?")
+        self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP)
+        cena.dizer("No, for orbita.")
+        self.assertEqual(cena.falados[-1], "Add tests to the login page, for orbita - send it?")
+        self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_RECAP, "a escuta abre outra vez para o recap novo")
+        self.assertEqual(len(cena.canal.recebidos), 1)
+        cena.dizer("Yes.")
+        self.assertEqual(cena.canal.recebidos[-1], ("orbita", "Add tests to the login page."))
+
+    def test_mistura_de_sim_e_abort_nunca_envia(self) -> None:
+        cena = self.cena_com_atlas_usado(resposta_llm("ditar_prompt", "", "Add tests to the login page."))
+        cena.pedir("hey jarvis, add tests to the login page")
+        for resposta in ("Yes abort.", "Yes, but for orbita."):
+            with self.subTest(resposta=resposta):
+                cena.dizer(resposta)
+                self.assertEqual(len(cena.canal.recebidos), 1, "nada enviado")
+                self.assertTrue(cena.jarvis.confirmacao.a_espera)
+                self.assertEqual(cena.jarvis.confirmacao.recap.pedido.projeto, "atlas")
+        # A terceira resposta que nao confirma cancela, sem enviar.
+        cena.dizer("Okay.")
+        self.assertFalse(cena.jarvis.confirmacao.a_espera)
+        self.assertIn(cena.falados[-1], confirmacao._FRASES["en"]["cancelado"])
+        self.assertEqual(len(cena.canal.recebidos), 1)
+
+    def test_passado_o_tempo_pergunta_o_projeto(self) -> None:
+        cena = self.cena_com_atlas_usado(resposta_llm("ditar_prompt", "", "Add tests to the login page."))
+        cena.relogio.avancar(11 * 60)
+        cena.pedir("hey jarvis, add tests to the login page")
+        self.assertTrue(cena.falados[-1].startswith("Which project is it for"), cena.falados[-1])
 
 
 if __name__ == "__main__":

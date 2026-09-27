@@ -13,7 +13,7 @@ de escuta, porque nada se envia sem o "sim" do recap.
     as hesitacoes ("uh", "um") e o endereco ao jarvis ("Jarvis, answer ...");
   - uma resposta curta (ate 5 palavras: "Yes.", "the first one") vai logo e o
     jarvis diz "Sent."; uma mais longa vai para a confirmacao rapida
-    ("Responder ao Claude no <projeto>: <texto>. Envio?") e so um "sim" a
+    ("Responder ao Claude no <projeto>: <texto> - envio?") e so um "sim" a
     envia. Fora desta janela nada se envia sem recap;
   - "sai da conversa" (ou "exit the conversation") fecha a janela sem enviar
     nada, e 8 s sem ninguem comecar a falar tambem;
@@ -24,6 +24,19 @@ curto ou longo.
 
 Uma pergunta so abre a janela se o utilizador a ouviu: se o filtro da resposta
 falada a cortou, a janela nao abre (o texto inteiro fica no ecra).
+
+Uma resposta a uma PERGUNTA GERAL que acaba numa pergunta ouvida ("... Do you
+want the forecast for tomorrow too?") faz o mesmo na janela de seguimento: a
+frase seguinte continua a pergunta geral, com a memoria da conversa recente,
+sem passar pelas intencoes de projeto (`pergunta_de_seguimento`). "Yes." e
+uma resposta nessa janela, nao cortesia solta.
+
+Depois de qualquer resposta falada, o jarvis continua a ouvir sem palavra de
+ativacao (o modo de conversa, em `jarvis.app`). Daqui vem o que ele precisa:
+"that's all" / "thanks, that's it" fecham essa escuta
+(`e_para_fechar_a_escuta`), e uma pergunta geral ouvida nela so segue se for
+dita como pergunta ao jarvis (`pergunta_dirigida`), para a conversa a volta
+nunca ir ao Claude.
 
 Este modulo so tem as regras (sem threads nem audio); `jarvis.app` liga-as ao
 ouvido, a confirmacao e ao canal.
@@ -38,6 +51,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from jarvis.interprete import (
+    INTENCAO_PERGUNTA_GERAL,
     INTENCAO_RECUSADA,
     Interpretacao,
     limpar_texto,
@@ -96,6 +110,104 @@ FRASES_DE_SAIR = frozenset(
         "stop conversation",
     }
 )
+
+
+#: Fecham a escuta sem palavra de ativacao depois de o jarvis falar (o modo
+#: de conversa): a frase inteira, ja normalizada, sem a cortesia a volta.
+FRASES_DE_FECHAR_A_ESCUTA = frozenset(
+    {
+        "that s all",
+        "thats all",
+        "that is all",
+        "that s it",
+        "thats it",
+        "that is it",
+        "that ll be all",
+        "that will be all",
+        "that ll do",
+        "that will do",
+        "nothing else",
+        "that s everything",
+        "stop listening",
+        "e tudo",
+        "e so",
+        "e so isso",
+        "mais nada",
+        "nada mais",
+        "para de ouvir",
+        *FRASES_DE_SAIR,
+    }
+)
+#: Palavras soltas que podem estar a volta da frase de fecho ("Thanks, that's
+#: it.", "No, that's all for now, jarvis.", "Obrigado, e tudo.").
+_A_VOLTA_DO_FECHO = frozenset(
+    {
+        "thanks", "thank", "you", "no", "nope", "ok", "okay", "alright", "right", "cheers", "great",
+        "jarvis", "hey", "for", "now", "please",
+        "obrigado", "obrigada", "nao", "pronto", "entao", "por", "agora", "boas",
+    }
+)
+
+#: Abertura de uma pergunta ou de um pedido de informacao, no inicio da frase
+#: ja normalizada (sem hesitacoes nem o endereco ao jarvis).
+_ABERTURA_DIRIGIDA = re.compile(
+    r"(?:what|whats|who|whos|whose|where|wheres|when|which|why|how|hows"
+    r"|is|are|was|were|do|does|did|can|could|will|would|should|has|have"
+    r"|tell\s+me|explain|give\s+me|remind\s+me|look\s+up|search|find\s+out"
+    r"|qual|quais|quem|onde|quando|quanto|quantos|quantas|que|o\s+que|como|porque|sera|e\s+verdade"
+    r"|diz\s+me|explica|sabes|procura)\b"
+)
+#: Palavras soltas antes da abertura ("So, what's ...", "Olha, quem ...").
+_ANTES_DA_ABERTURA = frozenset({"so", "and", "well", "ok", "okay", "hey", "olha", "entao", "e", "now", "also"})
+
+
+def e_para_fechar_a_escuta(texto: str | None, lingua: str = "pt") -> bool:
+    """"that's all", "thanks, that's it" e equivalentes, ditos como frase inteira.
+
+    Hesitacoes, a palavra de ativacao e a cortesia a volta nao contam; tudo o
+    resto conta: "that's all wrong" ou "that's it, run the tests" nao fecham.
+    """
+    normalizado = _normalizar(sem_palavra_de_ativacao(limpar_texto(texto or "")))
+    palavras = [palavra for palavra in normalizado.split() if not _e_hesitacao(palavra, lingua)]
+    inicio, fim = 0, len(palavras)
+    while inicio < fim and palavras[inicio] in _A_VOLTA_DO_FECHO:
+        inicio += 1
+    while fim > inicio and palavras[fim - 1] in _A_VOLTA_DO_FECHO:
+        fim -= 1
+    return " ".join(palavras[inicio:fim]) in FRASES_DE_FECHAR_A_ESCUTA
+
+
+def dirigida_ao_jarvis(texto: str | None, lingua: str = "pt") -> bool:
+    """A frase comeca por chamar o jarvis ("Jarvis, ...", "Uh, hey jarvis ...")."""
+    formas = [_normalizar(palavra) for palavra in limpar_texto(texto or "").split()]
+    formas = [forma for forma in formas if forma and not _e_hesitacao(forma, lingua)]
+    for posicao, forma in enumerate(formas[: _MAXIMO_ANTES_DO_JARVIS + 1]):
+        if forma == "jarvis":
+            return posicao < len(formas) - 1
+        if forma not in _ANTES_DO_JARVIS:
+            return False
+    return False
+
+
+def pergunta_dirigida(texto: str | None, lingua: str = "pt") -> bool:
+    """A frase e dita como uma pergunta (ou um pedido de informacao) ao jarvis.
+
+    Serve para a fala ouvida sem palavra de ativacao: uma conversa a volta
+    ("I think we should leave at six") pode ser lida pelo interprete como uma
+    pergunta geral, mas so vai ao Claude quando chama o jarvis, acaba em "?"
+    ou abre como uma pergunta ("what", "how", "tell me", "qual", "diz-me").
+    """
+    if dirigida_ao_jarvis(texto, lingua):
+        return True
+    limpa = limpar_resposta(texto, lingua)
+    if not limpa:
+        return False
+    if limpa.rstrip(" \"'”’»)]*_").endswith(("?", "¿")):
+        return True
+    palavras = _normalizar(limpa).split()
+    while palavras and palavras[0] in _ANTES_DA_ABERTURA:
+        palavras = palavras[1:]
+    return bool(palavras) and _ABERTURA_DIRIGIDA.match(" ".join(palavras)) is not None
 
 
 def acaba_em_pergunta(texto: str | None) -> bool:
@@ -214,6 +326,52 @@ def resposta_literal(
         prompt=literal,
         origem="regra",
         motivo="resposta na janela de conversa (texto ouvido sem hesitacoes, sem reescrita)",
+    )
+
+
+#: Palavras que respondem a uma pergunta de sim ou nao. Sao cortesia fora de
+#: uma conversa ("Yeah." solto nao pede nada), mas depois de uma pergunta sao
+#: a resposta.
+_PALAVRAS_DE_RESPOSTA = frozenset({"yes", "yeah", "yep", "yup", "sim"})
+
+
+def responde_a_pergunta(texto: str | None) -> bool:
+    """A frase tem um "yes"/"sim": depois de uma pergunta nunca e so cortesia."""
+    return any(palavra in _PALAVRAS_DE_RESPOSTA for palavra in _normalizar(texto or "").split())
+
+
+def pergunta_de_seguimento(
+    texto: str, nomes_de_projeto: tuple[str, ...] = (), *, lingua: str = "pt"
+) -> Interpretacao:
+    """A frase dita depois de uma resposta geral que acabou numa pergunta.
+
+    Continua a pergunta geral: nunca passa pelo LLM nem pelas intencoes de
+    projeto, e o texto enviado e o ouvido sem hesitacoes nem o endereco ao
+    jarvis (`limpar_resposta`). A memoria da conversa recente vai com ela
+    (quem a faz e `jarvis.app`). A regra financeira vem antes, ao texto
+    ouvido inteiro e ao que se envia: um pedido de compra ou venda e recusado
+    e nada sai do PC.
+    """
+    ouvido = limpar_texto(texto or "")
+    literal = limpar_resposta(texto, lingua)
+    termo = pedido_financeiro(ouvido, nomes_de_projeto) or pedido_financeiro(literal, nomes_de_projeto)
+    if termo is not None:
+        return Interpretacao(
+            texto=ouvido,
+            intencao=INTENCAO_RECUSADA,
+            projeto=None,
+            prompt="",
+            origem="regra",
+            motivo=f"pedido financeiro na continuacao da pergunta geral ('{termo}')",
+            termo_financeiro=termo,
+        )
+    return Interpretacao(
+        texto=ouvido,
+        intencao=INTENCAO_PERGUNTA_GERAL,
+        projeto=None,
+        prompt=literal,
+        origem="regra",
+        motivo="continuacao da pergunta geral (texto ouvido sem hesitacoes, sem reescrita)",
     )
 
 

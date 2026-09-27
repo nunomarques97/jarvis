@@ -9,11 +9,21 @@ Recebe a `Interpretacao` de uma frase e decide:
   - uma frase que nao se percebeu (ou que o LLM nao interpretou) nao faz
     nada: o jarvis pede para repetir;
   - ver o estado ou ler o relatorio de um projeto so le: corre logo, sem
-    recap; sem projeto, o jarvis pergunta qual e corre logo que ele e dito;
+    recap; sem projeto, usa o ultimo projeto usado (ver abaixo) e a resposta
+    diz qual; sem nenhum recente, o jarvis pergunta qual e corre logo que ele
+    e dito;
   - todas as outras intencoes tem efeito (enviar um prompt, abrir o editor
     ou a pasta, lancar, retomar ou parar um run, responder numa conversa) e
     ficam PENDENTES: o jarvis mostra na consola o que percebeu e o texto
-    exato a enviar, e diz em voz alta um resumo com no maximo duas frases;
+    exato a enviar, e diz em voz alta um recap curto que acaba numa pergunta
+    leve ("Add tests to the login page, for atlas - send it?"); um prompt
+    longo e dito pelo tema, em poucas palavras, e o texto inteiro fica no
+    ecra;
+  - um ditado sem projeto dito, feito ate `[interprete] ultimo_projeto_min`
+    minutos (10 por omissao) depois do ultimo pedido executado num projeto,
+    assume esse projeto e o recap diz qual ("..., still for atlas - send
+    it?"); continua a so ir depois do "sim", e "no, for forja" troca de
+    projeto e recapitula outra vez;
   - guardar ou apagar um facto do caderno da memoria (`lembrar_facto`,
     `esquecer_facto`, vindos do jarvis depois de `jarvis.memoria` aceitar o
     facto) tambem fica pendente: o recap diz o facto e so um "sim" o grava
@@ -34,6 +44,9 @@ Com um pedido pendente, cada resposta do utilizador e uma de:
     uma resposta que confirma e cancela ao mesmo tempo pergunta de novo;
   - "nao, muda X para Y" / "acrescenta ...": o interprete reescreve o pedido
     mantendo o resto, e o jarvis volta a recapitular;
+  - com o projeto assumido, "no, for forja" / "nao, para o forja" (so o nome
+    de outro projeto, com negacao ou preposicao) troca o projeto, sem LLM, e
+    o jarvis volta a recapitular;
   - "que horas sao" / "what time is it" (a frase inteira, na lista branca
     do router): o jarvis diz as horas e o pedido continua pendente;
   - outra coisa: o jarvis volta a perguntar; a terceira vez cancela.
@@ -80,11 +93,14 @@ from jarvis.interprete import (
     _so_o_projeto,
     limpar_texto,
     pedido_financeiro,
+    pergunta_de_projeto,
+    pergunta_dos_projetos_conhecidos,
     projetos_em_alternativa,
     projetos_mencionados,
     sem_palavra_de_ativacao,
 )
 from jarvis.conversa import e_resposta_curta
+from jarvis.persona import CASO_NAO_PERCEBI, Persona, Variantes
 from jarvis.router import _normalizar, encaminhar
 
 #: Intencoes de um projeto que so leem: correm logo, sem recap nem "sim",
@@ -99,17 +115,31 @@ INTENCAO_LEMBRAR_FACTO = "lembrar_facto"
 INTENCAO_ESQUECER_FACTO = "esquecer_facto"
 INTENCOES_DA_MEMORIA = frozenset({INTENCAO_LEMBRAR_FACTO, INTENCAO_ESQUECER_FACTO})
 
+#: Sem projeto dito, estas assumem o ultimo projeto usado: o ditado (que
+#: continua a ter recap e "sim") e as leituras. As outras perguntam qual.
+_INTENCOES_QUE_ASSUMEM = frozenset({"ditar_prompt"}) | INTENCOES_SO_DE_LEITURA
+
 #: Tudo o que fica pendente de um recap e de um "sim".
 _INTENCOES_COM_RECAP = INTENCOES_COM_EFEITO | INTENCOES_DA_MEMORIA
 #: Intencoes cujo texto aparece no recap e vai no pedido.
 _INTENCOES_COM_TEXTO = INTENCOES_COM_PROMPT | INTENCOES_DA_MEMORIA
 
-#: No maximo este numero de palavras do prompt e dito em voz alta; um prompt
-#: mais longo e resumido na voz e mostrado inteiro na consola.
-PALAVRAS_DITAS = 30
-CARACTERES_DITOS = 220
-#: Quantas palavras do inicio de um prompt longo entram no resumo falado.
-PALAVRAS_DO_RESUMO = 12
+#: Um prompt ate este tamanho e dito inteiro no recap, com as frases como
+#: estao; um prompt maior e dito pelo tema e mostrado inteiro na consola.
+PALAVRAS_DITAS = 20
+CARACTERES_DITOS = 140
+#: O tema de um prompt longo: a primeira frase, se for curta, ou a primeira
+#: oracao; senao as primeiras palavras.
+PALAVRAS_DO_TEMA = 10
+PALAVRAS_DO_TEMA_CORTADO = 8
+#: Palavras que nunca acabam um tema cortado ("Fix the login and").
+_PALAVRAS_DE_LIGACAO = frozenset(
+    {
+        "and", "or", "but", "the", "a", "an", "to", "of", "in", "on", "for", "with", "that", "so", "it", "is",
+        "e", "ou", "mas", "o", "os", "as", "um", "uma", "de", "do", "da", "dos", "das", "para", "com", "que",
+        "em", "no", "na", "ao",
+    }
+)
 
 #: Respostas que nao se percebem antes de o pedido ser cancelado.
 TENTATIVAS = 3
@@ -480,11 +510,15 @@ class Pedido:
     detalhe: str | None = None
     #: Resposta curta na janela de conversa, enviada sem recap.
     sem_recap: bool = False
+    #: O projeto nao foi dito: e o ultimo usado. A resposta diz qual.
+    projeto_assumido: bool = False
 
 
-def _pedido_de_leitura(interpretacao: Interpretacao) -> Pedido:
+def _pedido_de_leitura(interpretacao: Interpretacao, projeto_assumido: bool = False) -> Pedido:
     """O pedido de uma leitura (estado, relatorio): so a intencao e o projeto."""
-    return Pedido(interpretacao.intencao, interpretacao.projeto, "", interpretacao.detalhe)
+    return Pedido(
+        interpretacao.intencao, interpretacao.projeto, "", interpretacao.detalhe, projeto_assumido=projeto_assumido
+    )
 
 
 @dataclass(frozen=True)
@@ -499,6 +533,8 @@ class Recap:
     pergunta: str = ""
     #: O pedido precisa de projeto e nenhum foi dito: "sim" nao chega.
     falta_projeto: bool = False
+    #: O projeto nao foi dito: e o ultimo usado, e o recap diz qual.
+    projeto_assumido: bool = False
 
 
 @dataclass(frozen=True)
@@ -543,16 +579,17 @@ _ACOES_EN = {
     "esquecer_facto": "Forget",
 }
 _SEM_PROJETO = {
-    "pt": {"conversa": "Responder ao Claude", "projeto": "que projeto", "marcador": "<projeto>"},
-    "en": {"conversa": "Reply to Claude", "projeto": "which project", "marcador": "<project>"},
+    "pt": {"conversa": "Responder ao Claude", "marcador": "<projeto>"},
+    "en": {"conversa": "Reply to Claude", "marcador": "<project>"},
 }
 
 _FRASES = {
     "pt": {
-        "enviar": "Envio?",
-        "confirmar": "Confirmas?",
-        "longo": "{acao}, um pedido de {n} palavras que começa por: {inicio}, e o resto está no ecrã",
-        "sem_projeto": "Percebi o pedido, mas não o projeto",
+        "enviar": "envio?",
+        "confirmar": "confirmas?",
+        "longo": "o texto inteiro está no ecrã",
+        "para": "para o {p}",
+        "ainda_para": "outra vez para o {p}",
         "recusado": "Isso não faço por voz: pedidos de dinheiro ou de bolsa ficam de fora.",
         "nao_percebi": "Não percebi. Repete, por favor.",
         "cancelado": "Cancelado, não enviei nada.",
@@ -565,8 +602,10 @@ _FRASES = {
         "ecra_enviar": "Texto a enviar:",
         "ecra_ajuda": 'Diz "sim" para enviar, ou "aborta" ("cancela" também serve). Para corrigir: "não, muda X para Y" ou "acrescenta ...".',
         "ecra_falta_projeto": "Falta o projeto: diz o nome do projeto, ou \"aborta\".",
-        "guardar": "Guardo?",
-        "apagar": "Apago?",
+        "ecra_conhecidos": "Projetos conhecidos: {nomes}",
+        "guardar": "guardo?",
+        "apagar": "apago?",
+        "ecra_projeto_assumido": "(projeto não dito: é o último usado; \"não, para o X\" troca)",
         "ecra_guardar": "Facto a guardar:",
         "ecra_apagar": "Facto a apagar:",
         "ecra_ajuda_memoria": 'Diz "sim" para confirmar, ou "aborta" ("cancela" também serve).',
@@ -575,32 +614,62 @@ _FRASES = {
         "de_novo_memoria": "Diz sim para confirmar, ou aborta.",
     },
     "en": {
-        "enviar": "Send it?",
-        "confirmar": "Confirm?",
-        "longo": "{acao}, a {n}-word request that starts with: {inicio}, and the rest is on screen",
-        "sem_projeto": "I got the request, but not the project",
-        "recusado": "I don't do that by voice: money and trading requests are off limits.",
-        "nao_percebi": "I didn't get that. Please say it again.",
-        "cancelado": "Cancelled, nothing was sent.",
-        "expirado": "No answer, so I cancelled. Nothing was sent.",
-        "de_novo": "Say yes to send, or abort.",
-        "correcao_falhou": "I couldn't apply that change; the request stays the same. {pergunta}",
-        "falhou": "I couldn't do that.",
-        "nada_para_corrigir": "There is no pending request to correct.",
+        "enviar": "send it?",
+        "confirmar": "go ahead?",
+        "longo": "the full text is on screen",
+        "para": "for {p}",
+        "ainda_para": "still for {p}",
+        "recusado": (
+            "Sorry, I don't do money and trading requests by voice.",
+            "Money and trading requests are off limits for me.",
+            "I never do money and trading requests by voice.",
+        ),
+        "nao_percebi": (
+            "Sorry, I didn't catch that. Could you say it again?",
+            "I missed that, sorry. Once more?",
+            "Sorry, could you repeat that?",
+        ),
+        "cancelado": ("Cancelled, nothing was sent.", "Okay, dropped it. Nothing was sent.", "Fine, I won't send it."),
+        "expirado": (
+            "No answer, so I cancelled. Nothing was sent.",
+            "I didn't hear back, so I dropped it. Nothing was sent.",
+        ),
+        "de_novo": ("Say yes to send, or abort.", "Just yes to send it, or abort.", "Yes to send, or abort to drop it."),
+        "correcao_falhou": (
+            "I couldn't apply that change; the request stays the same. {pergunta}",
+            "That change didn't work, so the request is unchanged. {pergunta}",
+        ),
+        "falhou": ("Sorry, I couldn't do that.", "That didn't work, sorry."),
+        "nada_para_corrigir": ("There's nothing waiting to correct.", "Nothing's pending, so there's nothing to correct."),
         "ecra_percebi": "Understood: {intencao}{projeto}",
         "ecra_enviar": "Text to send:",
         "ecra_ajuda": 'Say "yes" to send, or "abort" ("cancel" works too). To correct: "no, change X to Y" or "add ...".',
         "ecra_falta_projeto": "Missing project: say the project name, or \"abort\".",
-        "guardar": "Save it?",
-        "apagar": "Delete it?",
+        "ecra_conhecidos": "Known projects: {nomes}",
+        "guardar": "save it?",
+        "apagar": "delete it?",
+        "ecra_projeto_assumido": "(project not said: it is the last one used; \"no, for X\" switches)",
         "ecra_guardar": "Fact to save:",
         "ecra_apagar": "Fact to delete:",
         "ecra_ajuda_memoria": 'Say "yes" to confirm, or "abort" ("cancel" works too).',
-        "cancelado_memoria": "Cancelled, my memory is unchanged.",
-        "expirado_memoria": "No answer, so I cancelled. My memory is unchanged.",
-        "de_novo_memoria": "Say yes to confirm, or abort.",
+        "cancelado_memoria": ("Cancelled, my memory is unchanged.", "Okay, I left my notebook as it was."),
+        "expirado_memoria": (
+            "No answer, so I cancelled. My memory is unchanged.",
+            "I didn't hear back, so my notebook stays as it was.",
+        ),
+        "de_novo_memoria": ("Say yes to confirm, or abort.", "Just yes to confirm, or abort."),
     },
 }
+
+#: A pergunta do interprete quando a frase nao disse nenhum projeto (sem
+#: candidatos): so aqui o projeto pode ser assumido.
+_PERGUNTAS_GENERICAS = frozenset({None, pergunta_de_projeto((), "en"), pergunta_de_projeto((), "pt")})
+
+#: O que pode vir antes do nome na troca do projeto assumido: "no, for forja",
+#: "nao, para o forja", "no, forja", "in forja".
+_ANTES_DA_TROCA = _NEGACOES | frozenset(
+    {"for", "to", "in", "on", "the", "para", "pro", "no", "na", "ao", "em", "o", "a"}
+)
 
 #: Fim de frase dentro da pergunta de projeto: na voz vira virgula, para a
 #: pergunta ser uma so frase.
@@ -620,16 +689,75 @@ def _com_projeto(modelo: str, projeto: str | None, lingua: str) -> str:
     return modelo.format(p=projeto if projeto else _SEM_PROJETO[lingua]["marcador"])
 
 
-def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Recap:
-    """O recap de um pedido com efeito: fala (<= 2 frases) e ecra (tudo)."""
+def _pergunta_pelo_projeto(interpretacao: Interpretacao, conhecidos: tuple[str, ...], lingua: str) -> str:
+    """A pergunta a dizer quando falta o projeto, numa so frase.
+
+    Projetos ditos em alternativa ("in X or Y") ficam na pergunta do
+    interprete; sem candidatos, a pergunta diz os projetos conhecidos.
+    """
+    if interpretacao.pergunta not in _PERGUNTAS_GENERICAS:
+        pergunta = _numa_frase(interpretacao.pergunta) + "?"
+    else:
+        pergunta = pergunta_dos_projetos_conhecidos(conhecidos, lingua)
+    return pergunta[0].upper() + pergunta[1:]
+
+
+def _sem_pontuacao_no_fim(texto: str) -> str:
+    return texto.strip().rstrip(" ,;:.!?…").strip()
+
+
+def _tema(prompt: str) -> str:
+    """O tema de um prompt longo em poucas palavras. Deterministico.
+
+    A primeira frase, se for curta; senao a primeira oracao (ate a primeira
+    virgula, ponto e virgula ou dois pontos), se for curta; senao as primeiras
+    palavras, sem acabar numa palavra de ligacao ("Fix the login and").
+    """
+    primeira = _sem_pontuacao_no_fim(re.split(r"(?<=[.!?…])\s+", prompt.strip(), maxsplit=1)[0])
+    if len(primeira.split()) <= PALAVRAS_DO_TEMA:
+        return primeira
+    oracao = _sem_pontuacao_no_fim(re.split(r"[,;:]\s|\s[-–—]\s", primeira, maxsplit=1)[0])
+    if 3 <= len(oracao.split()) <= PALAVRAS_DO_TEMA:
+        return oracao
+    palavras = primeira.split()[:PALAVRAS_DO_TEMA_CORTADO]
+    while len(palavras) > 1 and _normalizar(palavras[-1]) in _PALAVRAS_DE_LIGACAO:
+        palavras.pop()
+    return _sem_pontuacao_no_fim(" ".join(palavras))
+
+
+def prompt_curto(prompt: str) -> bool:
+    """O prompt e curto o bastante para ser dito inteiro no recap."""
+    return len(prompt.split()) <= PALAVRAS_DITAS and len(prompt) <= CARACTERES_DITOS
+
+
+def compor_recap(
+    numero: int,
+    interpretacao: Interpretacao,
+    lingua: str,
+    conhecidos: tuple[str, ...] = (),
+    *,
+    projeto_assumido: bool = False,
+) -> Recap:
+    """O recap de um pedido com efeito: fala (uma so frase) e ecra (tudo).
+
+    A fala acaba numa pergunta leve: "Add tests to the login page, for atlas
+    - send it?"; um prompt curto de varias frases diz o projeto antes delas
+    ("For atlas: Fix the login. Don't change anything - send it?"). Um prompt
+    longo e dito pelo tema; o texto exato a enviar esta
+    sempre no ecra. `conhecidos` sao os nomes dos projetos, os usados ha menos
+    tempo primeiro: quando falta o projeto, a pergunta diz os primeiros e o
+    ecra mostra-os todos. Com `projeto_assumido`, o projeto nao foi dito e e o
+    ultimo usado: a fala diz-o ("still for atlas") e o ecra tambem.
+    """
     frases = _FRASES[lingua]
     acoes = _ACOES_EN if lingua == "en" else _ACOES_PT
     intencao, projeto = interpretacao.intencao, interpretacao.projeto
     # O texto mostrado e o texto enviado sao o mesmo objeto, numa so linha.
     prompt = limpar_texto(interpretacao.prompt) if intencao in _INTENCOES_COM_TEXTO else ""
     memoria = intencao in INTENCOES_DA_MEMORIA
-    pedido = Pedido(intencao, projeto, prompt, interpretacao.detalhe)
     falta_projeto = intencao in INTENCOES_COM_PROJETO and projeto is None
+    projeto_assumido = projeto_assumido and not falta_projeto
+    pedido = Pedido(intencao, projeto, prompt, interpretacao.detalhe, projeto_assumido=projeto_assumido)
 
     if intencao == "conversa" and projeto is None:
         acao = _SEM_PROJETO[lingua]["conversa"]
@@ -637,25 +765,32 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
         acao = _com_projeto(acoes[intencao], projeto, lingua)
 
     if falta_projeto:
-        pergunta = _numa_frase(interpretacao.pergunta or _SEM_PROJETO[lingua]["projeto"]) + "?"
-        pergunta = pergunta[0].upper() + pergunta[1:]
-        fala = f"{frases['sem_projeto']}. {pergunta}"
+        pergunta = _pergunta_pelo_projeto(interpretacao, conhecidos, lingua)
+        fala = pergunta
     else:
         if memoria:
-            pergunta = frases["guardar" if intencao == INTENCAO_LEMBRAR_FACTO else "apagar"]
+            leve = frases["guardar" if intencao == INTENCAO_LEMBRAR_FACTO else "apagar"]
         else:
-            pergunta = frases["enviar"] if prompt else frases["confirmar"]
+            leve = frases["enviar"] if prompt else frases["confirmar"]
+        pergunta = leve[0].upper() + leve[1:]
         if not prompt:
-            fala = f"{acao}. {pergunta}"
+            corpo = acao
         else:
-            # As frases do prompt sao ditas como estao no prompt.
-            palavras = prompt.split()
-            if len(palavras) > PALAVRAS_DITAS or len(prompt) > CARACTERES_DITOS:
-                inicio = " ".join(palavras[:PALAVRAS_DO_RESUMO]).rstrip(",;:.!?…")
-                fala = frases["longo"].format(acao=acao, n=len(palavras), inicio=inicio) + f". {pergunta}"
+            curto = prompt_curto(prompt)
+            dito = _sem_pontuacao_no_fim(prompt) if curto else _tema(prompt)
+            if intencao == "ditar_prompt":
+                para = frases["ainda_para" if projeto_assumido else "para"].format(p=projeto)
+                if curto and contar_frases(prompt) > 1:
+                    # As frases do prompt ficam como estao: o projeto vem antes.
+                    corpo = f"{para}: {dito}"
+                else:
+                    corpo = f"{dito}, {para}"
             else:
-                dito = prompt if prompt[-1] in ".!?…" else prompt.rstrip(",;:") + "."
-                fala = f"{acao}: {dito} {pergunta}"
+                corpo = f"{acao}: {dito}"
+            if not curto:
+                corpo += f", {frases['longo']}"
+        corpo = corpo[0].upper() + corpo[1:]
+        fala = f"{corpo} - {leve}"
 
     nome_da_intencao = intencao.replace("_", " ")
     linhas = [
@@ -663,6 +798,8 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
             intencao=nome_da_intencao, projeto=f" | projeto: {projeto}" if projeto else ""
         )
     ]
+    if projeto_assumido:
+        linhas.append(frases["ecra_projeto_assumido"])
     if prompt and memoria:
         linhas += [frases["ecra_guardar" if intencao == INTENCAO_LEMBRAR_FACTO else "ecra_apagar"], prompt]
     elif prompt:
@@ -671,9 +808,11 @@ def compor_recap(numero: int, interpretacao: Interpretacao, lingua: str) -> Reca
         linhas.append(acao)
     if falta_projeto:
         linhas.append(frases["ecra_falta_projeto"])
+        if conhecidos:
+            linhas.append(frases["ecra_conhecidos"].format(nomes=", ".join(conhecidos)))
     else:
         linhas.append(frases["ecra_ajuda_memoria" if memoria else "ecra_ajuda"])
-    return Recap(numero, pedido, fala, "\n".join(linhas), pergunta, falta_projeto)
+    return Recap(numero, pedido, fala, "\n".join(linhas), pergunta, falta_projeto, projeto_assumido)
 
 
 # --- Dialogo ------------------------------------------------------------------
@@ -698,6 +837,9 @@ class Confirmacao:
         lingua: str | None = None,
         limite_s: float | None = None,
         relogio: Callable[[], float] = time.perf_counter,
+        persona: Persona | None = None,
+        variantes: Variantes | None = None,
+        ultimo_projeto_s: float | None = None,
     ) -> None:
         self.interprete = interprete
         self._executar = executar
@@ -708,6 +850,12 @@ class Confirmacao:
         if isinstance(espera, bool) or not isinstance(espera, (int, float)) or espera <= 0:
             raise ValueError(f"limite da confirmacao invalido: {espera!r}")
         self.limite_s = float(espera)
+        recente = interprete.config.interprete.ultimo_projeto_min * 60 if ultimo_projeto_s is None else ultimo_projeto_s
+        if isinstance(recente, bool) or not isinstance(recente, (int, float)) or recente < 0:
+            raise ValueError(f"tempo do ultimo projeto invalido: {recente!r}")
+        #: Ate quanto tempo depois do ultimo pedido num projeto um ditado sem
+        #: projeto o assume; 0 desliga.
+        self.ultimo_projeto_s = float(recente)
         self._relogio = relogio
         self._trinco = threading.Lock()
         self._pendente: Interpretacao | None = None
@@ -717,9 +865,17 @@ class Confirmacao:
         self._ocupado = False
         self._falhas = 0
         self._numero = 0
+        #: Projetos a que um pedido foi feito nesta sessao, o mais recente primeiro.
+        self._usados: list[str] = []
+        #: O ultimo projeto a que um pedido foi executado e quando (no relogio).
+        self._ultimo_projeto: tuple[str, float] | None = None
         #: Chamado com cada recap apresentado, antes de ser dito (a bolinha
         #: mostra o texto a enviar). Uma falha aqui nunca para o recap.
         self.ao_propor: Callable[[Recap], object] | None = None
+        #: Escreve o "nao percebi" com o LLM local; None: so as frases fixas.
+        #: Nunca escreve um recap, a resposta a um recap nem uma recusa.
+        self.persona = persona
+        self._variantes = variantes or Variantes()
 
     # -- estado
 
@@ -743,8 +899,64 @@ class Confirmacao:
                 return self.limite_s
             return max(0.0, self._prazo - self._relogio())
 
+    def _projetos_por_uso(self) -> tuple[str, ...]:
+        """Os nomes dos projetos: os usados nesta sessao primeiro, depois os outros pela ordem da config."""
+        nomes = [projeto.nome for projeto in self.interprete.config.projetos]
+        usados = [nome for nome in self._usados if nome in nomes]
+        return tuple(usados + [nome for nome in nomes if nome not in usados])
+
+    def projetos_por_uso(self) -> tuple[str, ...]:
+        with self._trinco:
+            return self._projetos_por_uso()
+
+    def ultimo_projeto(self) -> str | None:
+        """O ultimo projeto usado, se foi ha menos de `ultimo_projeto_s` e ainda existe."""
+        with self._trinco:
+            ultimo = self._ultimo_projeto
+        if ultimo is None or self.ultimo_projeto_s <= 0:
+            return None
+        nome, quando = ultimo
+        if self._relogio() - quando > self.ultimo_projeto_s:
+            return None
+        if nome not in {projeto.nome for projeto in self.interprete.config.projetos}:
+            return None
+        return nome
+
+    def _projeto_a_assumir(self, interpretacao: Interpretacao) -> str | None:
+        """O projeto a assumir num ditado ou numa leitura sem projeto, ou None.
+
+        So quando a frase nao diz nenhum projeto (nem mal ouvido, nem em
+        alternativa), o interprete nao ficou com uma pergunta propria, o
+        texto nao e um pedido de dinheiro e houve um pedido num projeto ha
+        pouco tempo. O ditado continua a precisar do "sim" ao recap.
+        """
+        if interpretacao.intencao not in _INTENCOES_QUE_ASSUMEM or interpretacao.projeto is not None:
+            return None
+        if interpretacao.so_confirmacao or interpretacao.pergunta not in _PERGUNTAS_GENERICAS:
+            return None
+        nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)
+        # A palavra de ativacao ("hey jarvis") nao e o projeto jarvis.
+        texto = sem_palavra_de_ativacao(limpar_texto(interpretacao.texto))
+        if projetos_mencionados(texto, nomes) or projetos_em_alternativa(texto, nomes):
+            return None
+        if self._financeiro(interpretacao.texto) or self._financeiro(interpretacao.prompt):
+            return None
+        return self.ultimo_projeto()
+
     def _texto(self, chave: str, **valores: str) -> str:
-        return _FRASES[self.lingua][chave].format(**valores)
+        """Uma das variantes da frase, nunca a mesma que da ultima vez."""
+        return self._variantes.escolher(chave, _FRASES[self.lingua][chave]).format(**valores)
+
+    def _nao_percebi(self, frase_ouvida: str | None) -> str:
+        """O "nao percebi" escrito pelo LLM local, ou a variante fixa (prazo, falha ou filtro)."""
+        if self.persona is not None:
+            try:
+                gerada = self.persona.frase(CASO_NAO_PERCEBI, frase_ouvida)
+            except Exception:  # noqa: BLE001 - a persona nunca impede a resposta
+                gerada = None
+            if gerada:
+                return gerada
+        return self._texto("nao_percebi")
 
     def _texto_do(self, recap: Recap | None, chave: str) -> str:
         """A frase `chave`, na forma da memoria quando o recap e de um facto."""
@@ -778,15 +990,21 @@ class Confirmacao:
         if interpretacao.intencao == INTENCAO_PERGUNTA_GERAL and pergunta and not interpretacao.so_confirmacao:
             pedido = Pedido(INTENCAO_PERGUNTA_GERAL, None, pergunta)
             return self._correr(pedido, None, "pergunta geral: so le, dispensa confirmacao")
+        assumido = self._projeto_a_assumir(interpretacao)
+        if assumido is not None:
+            interpretacao = replace(interpretacao, projeto=assumido, pergunta=None)
+            self._mostrar(f"confirmacao | projeto nao dito: assumido o ultimo usado, {assumido}")
         if interpretacao.intencao in INTENCOES_SO_DE_LEITURA and interpretacao.projeto and not interpretacao.so_confirmacao:
-            return self._correr(_pedido_de_leitura(interpretacao), None, "so leitura: dispensa confirmacao")
+            pedido = _pedido_de_leitura(interpretacao, projeto_assumido=assumido is not None)
+            motivo = "so leitura: dispensa confirmacao" + ("; projeto assumido" if assumido else "")
+            return self._correr(pedido, None, motivo)
         sem_texto = interpretacao.intencao in _INTENCOES_COM_TEXTO and not limpar_texto(interpretacao.prompt)
         if interpretacao.so_confirmacao or interpretacao.intencao not in _INTENCOES_COM_RECAP or sem_texto:
             if interpretacao.texto:
                 self._mostrar(f"confirmacao | nao percebi: {interpretacao.texto}")
-            self._falar(self._texto("nao_percebi"))
+            self._falar(self._nao_percebi(interpretacao.texto))
             return Desfecho("nao_percebido", interpretacao.motivo)
-        return self._propor(interpretacao)
+        return self._propor(interpretacao, projeto_assumido=assumido is not None)
 
     def enviar_sem_recap(self, interpretacao: Interpretacao) -> Desfecho:
         """Envia logo uma resposta curta a uma pergunta do Claude, sem recap.
@@ -813,10 +1031,25 @@ class Confirmacao:
         pedido = Pedido(interpretacao.intencao, interpretacao.projeto, texto, sem_recap=True)
         return self._correr(pedido, None, "resposta curta na janela de conversa: enviada sem recap")
 
-    def _propor(self, interpretacao: Interpretacao, fala: str | None = None) -> Desfecho:
+    def _propor(
+        self, interpretacao: Interpretacao, fala: str | None = None, *, projeto_assumido: bool = False
+    ) -> Desfecho:
+        if self._financeiro(interpretacao.texto) or self._financeiro(interpretacao.prompt):
+            # Um pedido de dinheiro nunca chega a um recap, venha de onde vier.
+            with self._trinco:
+                self._limpar()
+            self._mostrar("confirmacao | pedido financeiro: recusado antes do recap; nada foi enviado")
+            self._falar(self._texto("recusado"))
+            return Desfecho("recusado", "pedido financeiro: nunca e recapitulado")
         with self._trinco:
             self._numero += 1
-            recap = compor_recap(self._numero, interpretacao, self.lingua)
+            recap = compor_recap(
+                self._numero,
+                interpretacao,
+                self.lingua,
+                self._projetos_por_uso(),
+                projeto_assumido=projeto_assumido,
+            )
             self._pendente = interpretacao
             self._recap = None
             self._ocupado = True
@@ -866,6 +1099,7 @@ class Confirmacao:
                 horas = self._horas_pedidas(texto)
                 tipo, edicao, aproximado = _classificar(texto)
                 projeto_dito = recap.falta_projeto and self._projeto_dito(texto) is not None
+                troca = self._troca_de_projeto(texto) if recap.projeto_assumido else None
                 if horas is not None:
                     # So le as horas: responde e o pedido continua a espera.
                     self._ocupado = True
@@ -873,10 +1107,10 @@ class Confirmacao:
                 elif tipo == "confirmar" and not recap.falta_projeto:
                     self._limpar()
                     acao = "executar"
-                elif tipo == "cancelar" and not (aproximado and projeto_dito):
+                elif tipo == "cancelar" and not (aproximado and (projeto_dito or troca)):
                     self._limpar()
                     acao = "cancelar"
-                elif projeto_dito and self._financeiro(texto):
+                elif (projeto_dito or troca) and self._financeiro(texto):
                     # O projeto dito com um pedido de dinheiro: a regra financeira vem antes.
                     self._limpar()
                     acao = "recusar"
@@ -884,6 +1118,10 @@ class Confirmacao:
                     # "no orbita" e a resposta a "qual projeto", nao um "no".
                     self._ocupado = True
                     acao = "projeto"
+                elif troca:
+                    # "no, for forja": o projeto assumido estava errado; recap novo, nada enviado.
+                    self._ocupado = True
+                    acao = "trocar"
                 elif tipo in ("corrigir", "acrescentar"):
                     self._ocupado = True
                     acao = "corrigir"
@@ -935,6 +1173,9 @@ class Confirmacao:
                     self._limpar()
                 return self._correr(_pedido_de_leitura(completa), None, "so leitura: projeto dito")
             return self._propor(completa)
+        if acao == "trocar":
+            self._mostrar(f"confirmacao | projeto trocado: {recap.pedido.projeto} -> {troca}; nada foi enviado")
+            return self._propor(replace(pendente, projeto=troca, pergunta=None))
         return self._aplicar_correcao(pendente, recap, edicao, tipo)
 
     def _horas_pedidas(self, texto: str | None) -> str | None:
@@ -982,6 +1223,23 @@ class Confirmacao:
             return None
         return ditos[0]
 
+    def _troca_de_projeto(self, texto: str | None) -> str | None:
+        """O projeto de "no, for forja" / "nao, para o forja": so o nome, sem mais nada. Deterministico.
+
+        Antes do nome so podem vir negacoes, preposicoes e artigos; uma
+        palavra a mais ("yes, for forja", "for forja and delete it") nunca e
+        uma troca. O nome tem de ser um so projeto conhecido.
+        """
+        palavras = _juntar_contracoes(_palavras(texto or "", hesitacoes_no_fim=True))
+        inicio = 0
+        while inicio < len(palavras) and palavras[inicio] in _ANTES_DA_TROCA:
+            inicio += 1
+        resto = " ".join(palavras[inicio:])
+        if not resto:
+            return None
+        nomes = tuple(projeto.nome for projeto in self.interprete.config.projetos)
+        return _so_o_projeto(resto, nomes)
+
     def _aplicar_correcao(
         self, pendente: Interpretacao, recap: Recap, edicao: str, tipo: str
     ) -> Desfecho:
@@ -1004,8 +1262,13 @@ class Confirmacao:
             return Desfecho("recusado", nova.motivo, recap=recap)
         if nova.intencao not in INTENCOES_COM_EFEITO or nova.so_confirmacao:
             self._mostrar(f"confirmacao | correcao nao aplicada ({nova.motivo})")
-            return self._propor(pendente, fala=self._texto("correcao_falhou", pergunta=recap.pergunta))
-        return self._propor(nova)
+            return self._propor(
+                pendente,
+                fala=self._texto("correcao_falhou", pergunta=recap.pergunta),
+                projeto_assumido=recap.projeto_assumido,
+            )
+        # O projeto continua assumido enquanto a correcao nao o muda.
+        return self._propor(nova, projeto_assumido=recap.projeto_assumido and nova.projeto == recap.pedido.projeto)
 
     # -- prazo, cancelamento e execucao
 
@@ -1043,6 +1306,10 @@ class Confirmacao:
             self._mostrar(f"confirmacao | {pedido.intencao} falhou: {erro!r}")
             self._falar(self._texto("falhou"))
             return Desfecho("falhou", f"{motivo}; o executor falhou: {erro!r}", pedido, recap)
+        if pedido.projeto:
+            with self._trinco:
+                self._usados = [pedido.projeto, *(nome for nome in self._usados if nome != pedido.projeto)]
+                self._ultimo_projeto = (pedido.projeto, self._relogio())
         return Desfecho("executado", motivo, pedido, recap, resultado)
 
     # -- ciclo bloqueante

@@ -62,27 +62,28 @@ aconteceu.
 O FILTRO E O ULTIMO A FALAR, NAO O PRIMEIRO (uma versao anterior falhou aqui): filtrar linha a
 linha e so depois JUNTAR as linhas sobreviventes com um espaco remonta conteudo proibido a
 jusante do filtro — `Esta tudo bem <invoke` + `name="Bash">` volta a dar a tag inteira da linha
-652 do log. Por isso a exclusao e reaplicada ao texto JA JUNTO numa linha (antes do prefixo e do
+652 do log. Por isso a exclusao e reaplicada ao texto JA JUNTO numa linha (antes do
 corte) e outra vez ao texto JA CORTADO: se alguma dessas verificacoes falhar, nada daquilo vai a
 voz, cai a frase de recurso. Nada chega as colunas sem ter passado o filtro na forma exata em que
 vai ser lido.
 
-LIMITES: 200 caracteres de conteudo falado, 280 no total ja com o prefixo de origem. O
+LIMITES: 200 caracteres de conteudo falado, 280 no total para qualquer frase dita. O
 corte, quando o conteudo ainda excede o limite depois do filtro, e sempre no fim de uma frase
 (`.`, `!` ou `?` seguido de espaco ou do fim do texto — o ponto de `3.14` ou de `jarvis.app` NAO
 e fim de frase e nunca corta ali) ou, nao havendo, no fim de uma palavra — nunca a meio de uma
 palavra.
 
 FRASE DE RECURSO: quando nao sobra nada falavel, o jarvis nunca fica calado. Ha tres
-frases fixas, conforme o caso: a resposta chegou mesmo vazia; a resposta so tinha conteudo
-tecnico (o filtro comeu tudo); ou — ja na rede de emergencia de `jarvis.app.responder`, para
-respostas de qualquer origem — nao havia um unico sitio seguro onde cortar. As duas primeiras
-nomeiam a origem (so elas sabem qual e); as tres dizem onde esta a resposta completa. A consola
-e o log levam sempre o texto inteiro, em bruto.
+frases fixas, curtas e naturais, conforme o caso: a resposta chegou mesmo vazia; a resposta so
+tinha conteudo tecnico (o filtro comeu tudo); ou — ja na rede de emergencia de
+`jarvis.app.responder`, para respostas de qualquer origem — nao havia um unico sitio seguro onde
+cortar. As tres dizem que a resposta completa esta no ecra. A consola e o log levam sempre o
+texto inteiro, em bruto.
 
-PREFIXO DE ORIGEM (cumpre a D48.4): diz de quem e a frase — em portugues diz tambem que ela
-nao esta verificada; em ingles e a forma curta "Claude says:". O prefixo e as frases de recurso
-seguem a lingua configurada: com lingua=en nada disto se diz em portugues.
+ROTULO DE ORIGEM: a voz nao diz de quem e a resposta (soava a robo); o rotulo ("Claude says:",
+ou em portugues a forma que diz tambem que a resposta nao esta verificada) fica so no ecra e no
+log, a frente do texto inteiro. O rotulo e as frases de recurso seguem a lingua configurada:
+com lingua=en nada disto se diz em portugues.
 
 MARCACAO MARKDOWN: antes do filtro, as marcas de enfase (`**`, `*`, `__x y__`), os marcadores de
 lista (`- `, `* `, `1. `) e a sintaxe de um link (so o texto do link fica, nunca o URL) saem do
@@ -103,6 +104,11 @@ A PERGUNTA OUVE-SE: quando o Claude pergunta alguma coisa e a linha da pergunta 
 passar o filtro inteiro; e quando as primeiras frases nao a incluem, a pergunta entra no lugar
 das ultimas. A verificacao do texto ja junto continua a correr sobre o resultado.
 
+RESPOSTA EM STREAMING (`ResumoEmFluxo`): uma resposta que chega aos pedacos e dita frase a
+frase, e cada frase so sai depois de o filtro inteiro correr sobre o texto recebido ate ela.
+O que ja se disse nunca se desdiz: se o resto da resposta mudar as primeiras frases do resumo,
+nada mais se diz.
+
 O LADO SEGURO E CALAR O PEDACO, NAO ARRISCAR: quando uma frase natural tem um sinal destes
 (`Alterei o app.py`, `Ve em publico.pt`), ela sai e fica a frase de recurso, que diz onde esta a
 resposta completa. Ler marcacao em voz alta parece avariado, e parecer avariado e pior do que
@@ -115,34 +121,24 @@ import re
 
 #: D59.3 (era 240): no maximo de CONTEUDO falado por resposta do Claude Code.
 MAXIMO_CARACTERES_FALADOS = 200
-#: D59.3 (era 400): corte duro de qualquer resposta falada, ja com o prefixo, seja de onde for.
+#: D59.3 (era 400): corte duro de qualquer resposta falada, seja de onde for.
 MAXIMO_ABSOLUTO_FALADO = 280
-#: D48.4/D59.5: nomeia a origem e diz que a frase nao esta verificada. Pode encurtar-se;
-#: fica como estava porque ja cabe largamente dentro do limite (40 caracteres).
-PREFIXO_DA_RESPOSTA_DO_CLAUDE = "Resposta do Claude Code, não verificada:"
+#: O rotulo de origem, so para o ecra e o log (a voz nunca o diz): nomeia a origem e, em
+#: portugues, diz que a resposta nao esta verificada.
+ROTULO_DA_RESPOSTA_DO_CLAUDE = "Resposta do Claude Code, não verificada:"
 
-#: D59.4: a resposta do Claude Code veio mesmo vazia (sem texto nenhum).
-FRASE_RECURSO_SEM_TEXTO = (
-    f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} respondeu sem texto para dizer; "
-    "a resposta completa está na consola."
-)
-#: D59.4: havia texto, mas o filtro por exclusao nao deixou nada falavel (era so codigo, tags,
-#: JSON, um caminho, etc.).
-FRASE_RECURSO_SO_TECNICO = (
-    f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} respondeu com código ou dados técnicos; "
-    "a resposta completa está na consola."
-)
-#: D59.4, rede de emergencia de `jarvis.app.responder`: uma resposta de QUALQUER origem (nao so
-#: do Claude Code) grande demais e sem um unico espaco onde cortar — uma "palavra" de centenas de
-#: caracteres nunca e linguagem natural. Nao nomeia o Claude Code porque tambem serve as
-#: respostas locais; diz de onde vem ("a resposta") e onde esta inteira, e nunca deixa o jarvis
-#: calado.
-FRASE_RECURSO_SEM_CORTE_SEGURO = (
-    "Não tenho nada que se possa ler em voz alta; a resposta completa está na consola."
-)
+#: A resposta do Claude Code veio mesmo vazia (sem texto nenhum).
+FRASE_RECURSO_SEM_TEXTO = "A resposta veio vazia; os detalhes estão no ecrã."
+#: Havia texto, mas o filtro por exclusao nao deixou nada falavel (era so codigo, tags, JSON, um
+#: caminho, etc.).
+FRASE_RECURSO_SO_TECNICO = "É sobretudo código; a resposta completa está no ecrã."
+#: Rede de emergencia de `jarvis.app.responder`: uma resposta de QUALQUER origem (nao so do Claude
+#: Code) grande demais e sem um unico espaco onde cortar — uma "palavra" de centenas de caracteres
+#: nunca e linguagem natural. Diz onde esta inteira e nunca deixa o jarvis calado.
+FRASE_RECURSO_SEM_CORTE_SEGURO = "Não dá para ler isto em voz alta; a resposta completa está no ecrã."
 
-#: O prefixo e as frases de recurso, por lingua. Em ingles o prefixo e curto.
-PREFIXOS_DA_RESPOSTA_DO_CLAUDE = {"pt": PREFIXO_DA_RESPOSTA_DO_CLAUDE, "en": "Claude says:"}
+#: O rotulo e as frases de recurso, por lingua. Em ingles o rotulo e curto.
+ROTULOS_DA_RESPOSTA_DO_CLAUDE = {"pt": ROTULO_DA_RESPOSTA_DO_CLAUDE, "en": "Claude says:"}
 FRASES_DE_RECURSO = {
     "pt": {
         "sem_texto": FRASE_RECURSO_SEM_TEXTO,
@@ -150,9 +146,9 @@ FRASES_DE_RECURSO = {
         "sem_corte_seguro": FRASE_RECURSO_SEM_CORTE_SEGURO,
     },
     "en": {
-        "sem_texto": "Claude says: the reply came back empty; the details are on screen.",
-        "so_tecnico": "Claude says: the reply is only code or technical details; the full reply is on screen.",
-        "sem_corte_seguro": "There is nothing I can read aloud; the full reply is on screen.",
+        "sem_texto": "The reply came back empty; the details are on screen.",
+        "so_tecnico": "It's mostly code, so the full reply is on screen.",
+        "sem_corte_seguro": "I can't read that one aloud; the full reply is on screen.",
     },
 }
 
@@ -164,9 +160,9 @@ def _lingua(lingua: str | None) -> str:
     return "en" if lingua == "en" else "pt"
 
 
-def prefixo_da_resposta(lingua: str | None = "pt") -> str:
-    """O prefixo de origem das respostas do Claude, na lingua do jarvis."""
-    return PREFIXOS_DA_RESPOSTA_DO_CLAUDE[_lingua(lingua)]
+def rotulo_da_origem(lingua: str | None = "pt") -> str:
+    """O rotulo de origem das respostas do Claude para o ecra e o log (nunca para a voz)."""
+    return ROTULOS_DA_RESPOSTA_DO_CLAUDE[_lingua(lingua)]
 
 
 def frase_de_recurso(caso: str, lingua: str | None = "pt") -> str:
@@ -618,7 +614,7 @@ def sem_seccao_de_fontes(texto: str) -> str:
 def texto_falavel(resposta: str, *, resgatar_perguntas: bool = False) -> str:
     """So o que passa o filtro por exclusao, numa unica linha, sem crases nem espacos a mais.
 
-    Funcao pura, sem limite de caracteres nem prefixo — usada por `resumo_falado` e pelos
+    Funcao pura, sem limite de caracteres — usada por `resumo_falado` e pelos
     testes que querem verificar o filtro isoladamente.
 
     A exclusao corre DUAS vezes: linha a linha (para tirar o pedaco proibido inteiro e manter o
@@ -710,8 +706,8 @@ def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS, lingua
 
     So linguagem natural chega a voz (filtro por exclusao, `texto_falavel`); um pedaco proibido
     nunca se le em parte — ou sai inteiro, ou a resposta cai para a frase de recurso fixa; o
-    corte por tamanho nunca parte uma palavra ao meio; a origem fica sempre nomeada, na lingua
-    do jarvis. So as primeiras frases se dizem, e uma pergunta do Claude nunca fica de fora se
+    corte por tamanho nunca parte uma palavra ao meio; a origem nao se diz (o rotulo fica no
+    ecra e no log). So as primeiras frases se dizem, e uma pergunta do Claude nunca fica de fora se
     ela propria passar o filtro. Quem quiser a resposta inteira, em bruto, le o log —
     esta funcao nunca e chamada para o que vai para o log.
     """
@@ -726,9 +722,130 @@ def resumo_falado(resposta: str, limite: int = MAXIMO_CARACTERES_FALADOS, lingua
         # o corte nunca devia criar conteudo proibido a partir de texto limpo, mas a frase que
         # vai as colunas e verificada na forma exata em que vai ser lida, nao na forma anterior
         return frase_de_recurso("so_tecnico", lingua)
-    falado = f"{prefixo_da_resposta(lingua)} {cortado}"
-    if len(falado) > MAXIMO_ABSOLUTO_FALADO:
+    if len(cortado) > MAXIMO_ABSOLUTO_FALADO:
         # ultima rede, nunca deve disparar dado o limite de conteudo acima — mas se disparar,
         # corta-se pela mesma regra, nunca a meio de uma palavra.
-        falado = cortar_no_limite(falado, MAXIMO_ABSOLUTO_FALADO) or frase_de_recurso("so_tecnico", lingua)
-    return falado
+        cortado = cortar_no_limite(cortado, MAXIMO_ABSOLUTO_FALADO) or frase_de_recurso("so_tecnico", lingua)
+    return cortado
+
+
+# --- resposta em streaming ------------------------------------------------------------
+
+#: Fim de frase num texto que ainda esta a chegar: so conta com o espaco a seguir ja recebido
+#: (o ponto de `3.` ainda pode ser o de `3.14`).
+_PADRAO_FIM_DE_FRASE_EM_FLUXO = re.compile(r"[.!?]{1,3}[\"'”’»)]{0,3}(?=\s)")
+#: Uma frase acabada: termina num fim de frase.
+_PADRAO_FRASE_ACABADA = re.compile(r"[.!?]{1,3}[\"'”’»)]{0,3}\Z")
+#: O inicio de uma linha que e so o numero de um item de lista (`1.`): o ponto nao acaba frase.
+_PADRAO_SO_NUMERO_DE_ITEM = re.compile(r"\s*\d{1,3}\.")
+#: A meio do streaming so se analisa o inicio da resposta; o resto decide-se no fim, com a
+#: resposta inteira. Mantem o custo de cada pedaco limitado.
+MAXIMO_ANALISADO_EM_FLUXO = 2000
+
+
+class ResumoEmFluxo:
+    """O resumo falado de uma resposta que chega aos pedacos, frase a frase.
+
+    Cada vez que chega um fim de frase (ou de linha), o filtro inteiro de `resumo_falado` corre
+    sobre o texto recebido ate ali, como se a resposta acabasse nesse ponto, e so saem as frases
+    acabadas que ainda nao foram ditas. Assim valem, pedaco a pedaco, as mesmas regras: nada
+    depois de um titulo de fontes, nada de codigo, caminhos ou marcacao, os limites de
+    caracteres e o maximo de frases. A meio so saem `MAXIMO_FRASES_FALADAS - 1` frases: a ultima
+    decide-se no fim (`acabar`), para uma pergunta do fim ainda poder entrar no lugar dela.
+
+    O que ja se disse nunca se desdiz: se o texto que chega depois muda as primeiras frases do
+    resumo (uma linha que so se revela proibida no fim, uma pergunta que as troca), nada mais se
+    diz. As frases ditas sao sempre verificadas juntas, na forma exata em que se ouvem.
+    """
+
+    def __init__(self, limite: int = MAXIMO_CARACTERES_FALADOS, lingua: str | None = "pt") -> None:
+        self.limite = limite
+        self.lingua = lingua
+        self._pedacos: list[str] = []
+        self._tamanho = 0
+        #: Ate onde o texto recebido ja foi analisado (o ultimo corte).
+        self._analisado = 0
+        self._ditas: list[str] = []
+        self._parado = False
+        self._acabado = False
+
+    @property
+    def recebido(self) -> str:
+        """Todo o texto recebido, em bruto."""
+        return "".join(self._pedacos)
+
+    @property
+    def falado(self) -> str:
+        """O que ja saiu para a voz, junto."""
+        return " ".join(self._ditas)
+
+    @property
+    def parado(self) -> bool:
+        return self._parado
+
+    def parar(self) -> None:
+        """Nada mais sai (cancelada, falhou ou a voz foi mandada calar)."""
+        self._parado = True
+
+    def acrescentar(self, pedaco: str) -> list[str]:
+        """Junta um pedaco do texto; devolve as frases novas prontas a dizer (ou nenhuma)."""
+        if not pedaco:
+            return []
+        antes = self._tamanho
+        self._pedacos.append(pedaco)
+        self._tamanho += len(pedaco)
+        if self._parado or self._acabado or antes >= MAXIMO_ANALISADO_EM_FLUXO:
+            return []
+        if len(self._ditas) >= MAXIMO_FRASES_FALADAS - 1:
+            return []
+        texto = self.recebido[:MAXIMO_ANALISADO_EM_FLUXO]
+        corte = texto.rfind("\n") + 1
+        # Um fim de frase novo acaba no pedaco novo, mas o ponto pode ter vindo no anterior.
+        for fim in _PADRAO_FIM_DE_FRASE_EM_FLUXO.finditer(texto, max(0, antes - 8)):
+            inicio_da_linha = texto.rfind("\n", 0, fim.start()) + 1
+            if _PADRAO_SO_NUMERO_DE_ITEM.fullmatch(texto, inicio_da_linha, fim.end()):
+                continue  # `1. ` e o marcador de um item, a frase dele ainda vem
+            corte = max(corte, fim.end())
+        if corte <= self._analisado:
+            return []
+        self._analisado = corte
+        return self._novas(texto[:corte], final=False)
+
+    def acabar(self) -> list[str]:
+        """A resposta chegou inteira: as frases que ainda faltam dizer.
+
+        Sem nada dito ate aqui, e exatamente `resumo_falado` da resposta inteira (com a frase de
+        recurso quando nada e falavel).
+        """
+        if self._acabado or self._parado:
+            self._acabado = True
+            return []
+        self._acabado = True
+        if not self._ditas:
+            resumo = resumo_falado(self.recebido, self.limite, self.lingua)
+            self._ditas.append(resumo)
+            return [resumo]
+        return self._novas(self.recebido, final=True)
+
+    def _novas(self, texto: str, *, final: bool) -> list[str]:
+        falavel = texto_falavel(texto, resgatar_perguntas=True)
+        cortado = _primeiras_frases(falavel, self.limite) if falavel else ""
+        frases = [] if not cortado or texto_proibido(cortado) else dividir_em_frases(cortado)
+        if not final and frases and not _PADRAO_FRASE_ACABADA.search(frases[-1]):
+            frases.pop()  # a frase ainda pode crescer
+        ja = len(self._ditas)
+        if frases[:ja] != self._ditas:
+            if ja:
+                self._parado = True
+            return []
+        novas = frases[ja:]
+        if not final:
+            novas = novas[: max(0, MAXIMO_FRASES_FALADAS - 1 - ja)]
+        if not novas:
+            return []
+        junto = " ".join(self._ditas + novas)
+        if texto_proibido(junto) or len(junto) > MAXIMO_ABSOLUTO_FALADO:
+            self._parado = True
+            return []
+        self._ditas.extend(novas)
+        return novas

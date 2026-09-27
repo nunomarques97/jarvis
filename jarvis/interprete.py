@@ -29,7 +29,10 @@ Por ordem, cada frase passa por:
      you there"), por uma lista fechada: resposta local, sem LLM;
   4. lista branca deterministica de `jarvis.router` (horas, data, calar,
      dormir, acordar, abrir editor/pasta num projeto conhecido): casa a frase
-     inteira e responde sem esperar pelo LLM;
+     inteira e responde sem esperar pelo LLM; logo a seguir, o caminho rapido
+     do router resolve tambem o estado ou o relatorio de um projeto dito pelo
+     nome e as perguntas gerais claras ("what's the weather in Porto"), com
+     `origem="regra"`;
   5. LLM local (Ollama por HTTP em localhost, sem dependencia nova) com a
      resposta presa a um esquema JSON; a resposta volta a ser validada aqui
      como entrada nao confiavel;
@@ -78,7 +81,7 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
 from jarvis.config import FRASES_DO_INTERPRETE_MAXIMAS, Config, ConfigInterprete, validar_url_local
-from jarvis.router import _normalizar, _palavra_bate, encaminhar
+from jarvis.router import _normalizar, _palavra_bate, encaminhar, pedido_do_projeto, pergunta_geral_clara
 
 #: A lista fechada de intencoes que o LLM pode devolver.
 INTENCOES: tuple[str, ...] = (
@@ -187,6 +190,10 @@ PRAZO_DO_CARREGAMENTO_S = 120.0
 #: repetido ou espacos sem fim) acaba cedo e cai no recurso `desconhecido`.
 TOKENS_DA_RESPOSTA_BASE = 64
 TOKENS_DA_RESPOSTA_MAXIMO = 400
+
+#: Tokens a mais no esqueleto do JSON para os espacos e as quebras de linha
+#: que o modelo pode escrever entre os campos.
+FOLGA_DOS_TOKENS_DO_JSON = 8
 
 Origem = Literal["regra", "llm", "recurso"]
 
@@ -1471,7 +1478,7 @@ class ClienteOllama:
             "temperature": 0,
             "seed": 0,
             "num_ctx": CONTEXTO_DO_LLM,
-            "num_predict": tokens_da_resposta(mensagens),
+            "num_predict": tokens_da_resposta(mensagens, esquema),
         }
         corpo: dict[str, Any] = {
             "model": modelo,
@@ -1513,15 +1520,38 @@ class ClienteOllama:
         self._pedido("POST", "/api/chat", corpo, limite_s or self.limite_s)
 
 
-def tokens_da_resposta(mensagens: list[dict[str, str]]) -> int:
+def tokens_da_resposta(mensagens: list[dict[str, str]], esquema: dict | None = None) -> int:
     """Quantos tokens o modelo pode gerar para responder a ultima mensagem.
 
     A resposta repete no maximo o texto do utilizador (o prompt reescrito)
-    mais os campos do JSON; um token tem pelo menos dois caracteres.
+    mais os campos do JSON; um token tem pelo menos dois caracteres. Com o
+    esquema, os campos do JSON contam pelo esqueleto mais comprido que ele
+    admite (`tokens_do_esqueleto`), em vez da base fixa.
     """
     ultima = mensagens[-1].get("content", "") if mensagens else ""
     tamanho = len(ultima) if isinstance(ultima, str) else 0
-    return min(TOKENS_DA_RESPOSTA_MAXIMO, TOKENS_DA_RESPOSTA_BASE + tamanho // 2)
+    base = TOKENS_DA_RESPOSTA_BASE if esquema is None else tokens_do_esqueleto(esquema)
+    return min(TOKENS_DA_RESPOSTA_MAXIMO, base + tamanho // 2)
+
+
+def tokens_do_esqueleto(esquema: dict) -> int:
+    """Tokens do JSON mais comprido que o esquema admite com o texto livre vazio.
+
+    Cada lista fechada conta pelo valor mais comprido, o booleano por "false"
+    e o texto livre vazio (o tamanho dele soma-se pela frase); dois
+    caracteres por token, mais uma folga para espacos e quebras de linha.
+    """
+    campos: dict[str, Any] = {}
+    propriedades = esquema.get("properties")
+    for nome, propriedade in (propriedades.items() if isinstance(propriedades, dict) else ()):
+        valores = propriedade.get("enum") if isinstance(propriedade, dict) else None
+        if isinstance(propriedade, dict) and propriedade.get("type") == "boolean":
+            campos[nome] = False
+        elif valores:
+            campos[nome] = max((str(valor) for valor in valores), key=len)
+        else:
+            campos[nome] = ""
+    return -(-len(json.dumps(campos, ensure_ascii=False)) // 2) + FOLGA_DOS_TOKENS_DO_JSON
 
 
 def _tamanhos(dados: dict, chave: str) -> dict[str, int]:
@@ -2173,6 +2203,26 @@ def pergunta_de_projeto(candidatos: tuple[str, ...], lingua: str) -> str:
     if candidatos:
         return f"Qual projeto: {_lista_falada(candidatos, lingua)}?"
     return "Para que projeto?"
+
+
+#: Quantos projetos conhecidos a pergunta pelo projeto diz em voz alta; a
+#: lista inteira fica no ecra.
+PROJETOS_DITOS_NA_PERGUNTA = 4
+
+
+def pergunta_dos_projetos_conhecidos(conhecidos: tuple[str, ...] | list[str], lingua: str) -> str:
+    """A pergunta pelo projeto em falta, com ate 4 projetos conhecidos e "ou outro".
+
+    `conhecidos` vem ja ordenado (os usados ha menos tempo primeiro).
+    """
+    ditos = list(conhecidos[:PROJETOS_DITOS_NA_PERGUNTA])
+    if lingua == "en":
+        if not ditos:
+            return "Which project is it for?"
+        return f"Which project is it for: {_lista_falada([*ditos, 'another one'], lingua)}?"
+    if not ditos:
+        return "Para que projeto é?"
+    return f"Para que projeto é: {_lista_falada([*ditos, 'outro'], lingua)}?"
 
 
 _PADRAO_DATA = re.compile(r"\b(data|dia|date|day|mes|month)\b")
@@ -2956,7 +3006,7 @@ class Interprete:
                 detalhe=social,
             )
 
-        rapido = self._pela_lista_branca(literal, frase)
+        rapido = self._pela_lista_branca(literal, frase) or self._pelo_caminho_rapido(literal, frase)
         if rapido is not None:
             return rapido
 
@@ -3051,6 +3101,41 @@ class Interprete:
             f"lista branca: {encaminhado.motivo}",
             detalhe=detalhe,
         )
+
+    def _pelo_caminho_rapido(self, literal: str, frase: str) -> Interpretacao | None:
+        """Estado/relatorio de um projeto dito e perguntas gerais claras, sem esperar pelo LLM.
+
+        Da o mesmo resultado que o LLM daria, e so quando a frase nao deixa
+        duvida: o projeto do padrao tem de ser o unico que a frase diz, e uma
+        pergunta geral nao pode dizer nenhum projeto, falar de trabalho num
+        projeto, remeter para tras, responder ao Claude nem ter as palavras
+        de um comando local. Na duvida, None e a frase segue para o LLM.
+        """
+        pedido = pedido_do_projeto(frase, self.config)
+        if pedido is not None and pedido.projeto is not None:
+            ditos = projetos_mencionados(frase, self._nomes)
+            if ditos != (pedido.projeto.nome,) or projetos_em_alternativa(frase, self._nomes):
+                return None
+            return Interpretacao(
+                literal, pedido.intencao, pedido.projeto.nome, "", "regra", f"caminho rapido: {pedido.motivo}"
+            )
+        pedido = pergunta_geral_clara(frase)
+        if pedido is None:
+            return None
+        normalizada = _normalizar(frase)
+        if (
+            projetos_mencionados(frase, self._nomes)
+            or _VOCABULARIO_DE_PROJETO.search(normalizada)
+            or tem_referencia(frase)
+            or resposta_ao_claude(frase)
+            or any(padrao.search(normalizada) for padrao in _PALAVRAS_DO_COMANDO.values())
+        ):
+            return None
+        pergunta = pergunta_literal(frase, self.lingua).strip()
+        if pergunta[-1:] not in (".", "!", "?", "…") and not normalizada.startswith(("tell me", "diz me")):
+            pergunta += "?"
+        prompt = em_forma_de_frase(pergunta)
+        return Interpretacao(literal, INTENCAO_PERGUNTA_GERAL, None, prompt, "regra", f"caminho rapido: {pedido.motivo}")
 
     def _compor(
         self,

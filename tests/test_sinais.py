@@ -159,8 +159,8 @@ class TestConfigEscuta(unittest.TestCase):
     def test_sem_tabela_valem_os_valores_por_omissao(self):
         escuta = self.carregar("").escuta
         self.assertEqual(escuta, ConfigEscuta())
-        self.assertEqual(escuta.seguimento_s, 8.0)
-        self.assertEqual(SEGUIMENTO_S, 8.0)
+        self.assertEqual(escuta.seguimento_s, 15.0)
+        self.assertEqual(SEGUIMENTO_S, 15.0)
         self.assertTrue(escuta.sons)
         self.assertEqual(escuta.volume, VOLUME_DOS_SONS_PADRAO)
         self.assertLessEqual(VOLUME_DOS_SONS_PADRAO, 0.2)

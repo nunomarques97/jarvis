@@ -5,7 +5,7 @@ ao Claude tenha um tamanho maximo garantido (e um gasto de quota maximo):
 
   - HISTORICO (curto prazo), so em RAM e nunca escrito em disco: as ultimas
     perguntas gerais respondidas e as respostas tal como foram ditas ou
-    mostradas (sem o prefixo "Claude says:"), para "and who scored?" ter
+    mostradas, para "and who scored?" ter
     contexto. No maximo `[memoria] trocas` trocas (teto 10), cada texto
     cortado em caracteres; esquece tudo ao fim de `[memoria] expira_min`
     minutos sem perguntas gerais (teto 30), e "new conversation" / "nova

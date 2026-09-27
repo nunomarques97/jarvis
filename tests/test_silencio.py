@@ -43,7 +43,6 @@ from jarvis.audio_util import PASTA_EVIDENCIA, caminho_evidencia_de_saida
 from jarvis.config import Config
 from jarvis.interprete import Interprete
 from jarvis.ouvido import GATILHO_TECLA, Frase
-from jarvis.resposta_falada import PREFIXO_DA_RESPOSTA_DO_CLAUDE
 from jarvis.sessoes import Entrega
 from jarvis.voz import ResultadoFala
 
@@ -542,7 +541,7 @@ class TestOsTresGatilhos(unittest.TestCase):
         """A rede de seguranca ao contrario: isto nao pode emudecer o jarvis."""
         self.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Sao quinze e trinta."))
 
-        self.assertEqual(self.falas, [f"{PREFIXO_DA_RESPOSTA_DO_CLAUDE} Sao quinze e trinta."])
+        self.assertEqual(self.falas, ["Sao quinze e trinta."])
 
 
 class TestRuidoDeTerceirosAoCalar(unittest.TestCase):

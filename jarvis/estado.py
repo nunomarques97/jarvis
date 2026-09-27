@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from jarvis.persona import VARIANTES
 from jarvis.canal_claude import (
     EXTENSOES_QUE_PASSAM_PELO_SHELL,
     ambiente_para_filho,
@@ -115,35 +116,59 @@ _FRASES = {
         "relatorio_sem_resumo": "O relatório do {p} não tem um resumo que se possa ler; o texto inteiro está no ecrã.",
     },
     "en": {
-        "sem_forja": "FORJA is not configured in jarvis.",
-        "nao_encontrado": "I couldn't find {programa} on this computer.",
-        "esgotado": "{programa} did not answer within {segundos} seconds.",
-        "saida_invalida": "{programa} gave an answer I couldn't read.",
-        "falhou": "{programa} reported an error; the details are on screen.",
-        "projeto_desconhecido": "I don't know that project.",
-        "sem_run": "{p} has no FORJA run.",
-        "so_sessoes": "FORJA is not configured, so I can only see the sessions.",
-        "run_running": "The run on {p} is running, {feitas} of {total} tasks done.",
-        "run_interrompido": "The run on {p} was interrupted, {feitas} of {total} tasks done.",
-        "run_blocked": "The run on {p} is stopped, {feitas} of {total} tasks done.",
-        "run_done": "The run on {p} finished, {feitas} of {total} tasks done.",
-        "run_failed": "The run on {p} ended unfinished, {feitas} of {total} tasks done.",
-        "task_atual": "It is on {task}{titulo}.",
-        "task_parada": "It stopped on {task}{titulo}.",
-        "bloqueio": "Blocker: {motivo}.",
-        "decisao": "It is waiting for your technology decision.",
-        "sessoes_nenhuma": "There are no Claude Code sessions open on {p}.",
-        "sessoes": "Claude Code sessions on {p}: {partes}.",
-        "sessoes_falhou": "I couldn't see the Claude Code sessions.",
+        "sem_forja": ("FORJA isn't set up in jarvis.", "FORJA isn't configured here."),
+        "nao_encontrado": ("I couldn't find {programa} on this computer.", "{programa} doesn't seem to be installed here."),
+        "esgotado": (
+            "{programa} didn't answer within {segundos} seconds.",
+            "{programa} took longer than {segundos} seconds, so I gave up.",
+        ),
+        "saida_invalida": ("{programa} gave an answer I couldn't read.", "I couldn't make sense of what {programa} returned."),
+        "falhou": ("{programa} hit an error; the details are on screen.", "{programa} reported an error; it's on screen."),
+        "projeto_desconhecido": ("I don't know that project.", "That's not a project I know."),
+        "sem_run": ("{p} has no FORJA run.", "There's no FORJA run on {p}."),
+        "so_sessoes": (
+            "FORJA isn't set up, so I can only see the sessions.",
+            "Without FORJA I can only see the sessions.",
+        ),
+        "run_running": (
+            "The run on {p} is going, {feitas} of {total} tasks done.",
+            "{p}'s run is in progress, {feitas} of {total} tasks done.",
+        ),
+        "run_interrompido": (
+            "The run on {p} was interrupted, {feitas} of {total} tasks done.",
+            "{p}'s run got interrupted, {feitas} of {total} tasks done.",
+        ),
+        "run_blocked": (
+            "The run on {p} is stopped, {feitas} of {total} tasks done.",
+            "{p}'s run has stopped, {feitas} of {total} tasks done.",
+        ),
+        "run_done": (
+            "The run on {p} finished, {feitas} of {total} tasks done.",
+            "{p}'s run is finished, {feitas} of {total} tasks done.",
+        ),
+        "run_failed": (
+            "The run on {p} ended unfinished, {feitas} of {total} tasks done.",
+            "{p}'s run ended early, {feitas} of {total} tasks done.",
+        ),
+        "task_atual": ("It's on {task}{titulo}.", "Now working on {task}{titulo}."),
+        "task_parada": ("It stopped on {task}{titulo}.", "It's stuck on {task}{titulo}."),
+        "bloqueio": ("Blocker: {motivo}.", "The reason: {motivo}."),
+        "decisao": ("It's waiting for your technology decision.", "It needs a technology decision from you."),
+        "sessoes_nenhuma": ("No Claude Code sessions are open on {p}.", "There are no Claude Code sessions open on {p}."),
+        "sessoes": ("Claude Code sessions on {p}: {partes}.", "On {p}, the Claude Code sessions: {partes}."),
+        "sessoes_falhou": ("I couldn't see the Claude Code sessions.", "I couldn't check the Claude Code sessions."),
         "a_trabalhar": "{n} working",
         "parada": "{n} idle",
         "paradas": "{n} idle",
         "a_espera": "{n} waiting for you",
         "outro": "{n} in another state",
         "e": " and ",
-        "sem_relatorio": "I found no report in {p}.",
-        "relatorio": "Summary of the {p} report: {resumo}",
-        "relatorio_sem_resumo": "The {p} report has no summary I can read aloud; the full text is on screen.",
+        "sem_relatorio": ("I found no report in {p}.", "There's no report in {p}."),
+        "relatorio": ("Summary of the {p} report: {resumo}", "Here's the {p} report in short: {resumo}"),
+        "relatorio_sem_resumo": (
+            "The {p} report has no summary I can read aloud; the full text is on screen.",
+            "No summary I can read aloud in the {p} report; it's all on screen.",
+        ),
     },
 }
 
@@ -190,8 +215,11 @@ def _lingua(lingua: str | None) -> str:
 
 
 def frase(chave: str, lingua: str = "pt", **valores: object) -> str:
-    """Uma frase fixa, na lingua do jarvis, com os valores preenchidos."""
-    texto = _FRASES[_lingua(lingua)][chave].format(**valores)
+    """Uma frase fixa, na lingua do jarvis, com os valores preenchidos.
+
+    Com variantes, nunca a mesma forma duas vezes seguidas (`VARIANTES`).
+    """
+    texto = VARIANTES.escolher(f"estado.{chave}", _FRASES[_lingua(lingua)][chave]).format(**valores)
     return texto[0].upper() + texto[1:] if texto else texto
 
 

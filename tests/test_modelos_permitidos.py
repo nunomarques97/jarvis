@@ -27,8 +27,14 @@ O caminho vivo (`python -m jarvis`) ja nao tem `--modelo`: o motor vem de
 `jarvis.stt.MOTORES`, e o faster-whisper dentro dela so aceita os tamanhos de
 `MotorFasterWhisper.MODELOS`. Os testes do caminho vivo verificam essa lista.
 
+Tambem aqui: o VAD Silero que ouve por cima da voz do jarvis usa o ficheiro
+que ja veio com o openWakeWord, registado em docs/MODELOS.md como usado, com
+o mesmo URL e sha256 que o codigo conhece. O mesmo para o Smart Turn do fim
+de turno, o unico ficheiro novo, que o .gitignore deixa fora do Git.
+
 NENHUM teste aqui toca no GPU, descarrega nada ou carrega um modelo: sao
-constantes e parsers de linha de comandos.
+constantes, parsers de linha de comandos e, quando o ficheiro existe, o sha256
+dele.
 
 Corre com:
 
@@ -39,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import sys
 import tempfile
@@ -49,7 +56,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from jarvis import stt  # noqa: E402
+from jarvis import fim_de_turno, stt, vad_silero  # noqa: E402
 from jarvis.config import ConfigError, ConfigOuvido, carregar_config  # noqa: E402
 from scripts import transcrever_ficheiro  # noqa: E402
 
@@ -171,6 +178,67 @@ class TestParsers(unittest.TestCase):
             list(accao_do_parser(parser, "--fallback").choices),
             transcrever_ficheiro.MODELOS_PERMITIDOS,
         )
+
+
+
+class TestSileroRegistado(unittest.TestCase):
+    """O VAD do interromper: o ficheiro do openWakeWord, registado e usado."""
+
+    CAMINHO = "models/openwakeword/silero_vad.onnx"
+    URL = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx"
+
+    def setUp(self) -> None:
+        self.modelos = (RAIZ / "docs" / "MODELOS.md").read_text(encoding="utf-8")
+
+    def test_o_codigo_usa_o_ficheiro_registado(self) -> None:
+        self.assertEqual(vad_silero.MODELO_SILERO.relative_to(RAIZ).as_posix(), self.CAMINHO)
+
+    def test_o_registo_diz_que_e_usado_com_url_e_sha256(self) -> None:
+        linhas = [linha for linha in self.modelos.splitlines() if f"`{self.CAMINHO}`" in linha and self.URL in linha]
+        self.assertTrue(linhas, "docs/MODELOS.md nao regista o Silero com o URL")
+        for linha in linhas:
+            self.assertIn(vad_silero.SHA256_DO_SILERO, linha)
+            self.assertNotIn("not used", linha)
+        self.assertIn("## Interrupting jarvis: Silero VAD", self.modelos)
+
+    def test_o_ficheiro_no_disco_e_o_registado(self) -> None:
+        caminho = RAIZ / self.CAMINHO
+        if not caminho.is_file():
+            self.skipTest(f"{self.CAMINHO} em falta")
+        self.assertEqual(hashlib.sha256(caminho.read_bytes()).hexdigest(), vad_silero.SHA256_DO_SILERO)
+
+
+class TestSmartTurnRegistado(unittest.TestCase):
+    """O modelo do fim de turno: registado com URL e sha256, nunca versionado."""
+
+    CAMINHO = "models/smart-turn/smart-turn-v3.2-cpu.onnx"
+    URL = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx"
+
+    def setUp(self) -> None:
+        self.modelos = (RAIZ / "docs" / "MODELOS.md").read_text(encoding="utf-8")
+
+    def test_o_codigo_usa_o_ficheiro_e_o_url_registados(self) -> None:
+        self.assertEqual(fim_de_turno.MODELO_SMART_TURN.relative_to(RAIZ).as_posix(), self.CAMINHO)
+        self.assertEqual(fim_de_turno.URL_DO_SMART_TURN, self.URL)
+
+    def test_o_registo_tem_url_e_sha256(self) -> None:
+        linhas = [linha for linha in self.modelos.splitlines() if f"`{self.CAMINHO}`" in linha and self.URL in linha]
+        self.assertTrue(linhas, "docs/MODELOS.md nao regista o Smart Turn com o URL")
+        for linha in linhas:
+            self.assertIn(fim_de_turno.SHA256_DO_SMART_TURN, linha)
+        self.assertIn("## End of turn: Smart Turn v3", self.modelos)
+        self.assertIn("BSD-2", self.modelos)
+
+    def test_o_ficheiro_no_disco_e_o_registado(self) -> None:
+        caminho = RAIZ / self.CAMINHO
+        if not caminho.is_file():
+            self.skipTest(f"{self.CAMINHO} em falta")
+        self.assertEqual(hashlib.sha256(caminho.read_bytes()).hexdigest(), fim_de_turno.SHA256_DO_SMART_TURN)
+
+    def test_modelos_e_audio_ficam_fora_do_git(self) -> None:
+        ignorados = set((RAIZ / ".gitignore").read_text(encoding="utf-8").splitlines())
+        for padrao in ("models/", "*.onnx", "recordings/", "*.wav"):
+            self.assertIn(padrao, ignorados)
 
 
 if __name__ == "__main__":

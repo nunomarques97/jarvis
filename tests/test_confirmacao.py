@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from jarvis.config import (
@@ -498,7 +499,7 @@ class TestCorrecaoSemPedido(Base):
     def test_sem_pedido_diz_que_nao_ha_nada_para_corrigir(self) -> None:
         for lingua, fala in (
             ("pt", "Não há nenhum pedido à espera para corrigir."),
-            ("en", "There is no pending request to correct."),
+            ("en", "There's nothing waiting to correct."),
         ):
             with self.subTest(lingua=lingua):
                 confirmacao = self.montar(lingua=lingua)
@@ -1042,14 +1043,14 @@ class TestRecap(Base):
                         interpretacao = self.pedido(intencao, projeto, prompt)
                         recap = compor_recap(1, interpretacao, lingua)
                         with self.subTest(lingua=lingua, intencao=intencao, projeto=projeto, prompt=prompt[:20]):
-                            # Um prompt curto e dito com as frases dele; um longo, o pedido falta o projeto
-                            # ou um sem prompt ficam em duas frases.
+                            # Um prompt curto e dito com as frases dele; um longo, o pedido que falta o
+                            # projeto ou um sem prompt ficam numa so frase.
                             curto = recap.pedido.prompt and prompt != self.LONGO and not recap.falta_projeto
-                            maximo = contar_frases(prompt) + 1 if curto else 2
+                            maximo = contar_frases(prompt) if curto else 1
                             self.assertLessEqual(contar_frases(recap.fala), maximo, recap.fala)
                             self.assertTrue(recap.fala.endswith("?"))
                             if curto:
-                                self.assertIn(recap.pedido.prompt.rstrip("."), recap.fala)
+                                self.assertIn(recap.pedido.prompt.rstrip(".!?"), recap.fala)
 
     def test_recap_diz_as_frases_como_estao_no_prompt(self) -> None:
         interpretacao = self.pedido(
@@ -1057,7 +1058,7 @@ class TestRecap(Base):
         )
         recap = compor_recap(1, interpretacao, "en")
         self.assertEqual(
-            recap.fala, "To chamora: Read the README and summarize it in Portuguese. Don't change anything. Send it?"
+            recap.fala, "For chamora: Read the README and summarize it in Portuguese. Don't change anything - send it?"
         )
         self.assertNotIn(", Don't", recap.fala)
         self.assertIn("Read the README and summarize it in Portuguese. Don't change anything.", recap.ecra)
@@ -1068,7 +1069,7 @@ class TestRecap(Base):
             "password validation exactly as it is today, and add a clear error message when the server does not answer."
         )
         recap = compor_recap(1, self.pedido("ditar_prompt", "atlas", longo), "en")
-        self.assertIn("starts with: Fix the login. Then rewrite the form so that it uses the, and the rest", recap.fala)
+        self.assertEqual(recap.fala, "Fix the login, for atlas, the full text is on screen - send it?")
         self.assertNotIn("login, Then", recap.fala)
         self.assertIn(longo, recap.ecra)
 
@@ -1085,7 +1086,7 @@ class TestRecap(Base):
     def test_prompt_curto_e_dito_inteiro(self) -> None:
         confirmacao = self.montar()
         confirmacao.iniciar(self.pedido("ditar_prompt", prompt="Corrige os testes do login."))
-        self.assertEqual(self.falas[-1], "Para o atlas: Corrige os testes do login. Envio?")
+        self.assertEqual(self.falas[-1], "Corrige os testes do login, para o atlas - envio?")
 
     def test_ecra_mostra_o_que_percebeu_e_o_texto_a_enviar(self) -> None:
         confirmacao = self.montar(lingua="en")
@@ -1115,12 +1116,12 @@ class TestRecap(Base):
         confirmacao = self.montar()
         desfecho = confirmacao.iniciar(self.pedido("abrir_pasta", None))
         self.assertIn("Abrir a pasta do <projeto>", self.ecra[-1])
-        self.assertEqual(desfecho.recap.fala, "Percebi o pedido, mas não o projeto. Que projeto?")
+        self.assertEqual(desfecho.recap.fala, "Para que projeto é: atlas, orbita, kanban-lite ou outro?")
 
     def test_acoes_sem_prompt_dizem_a_acao_e_o_projeto(self) -> None:
         confirmacao = self.montar()
         confirmacao.iniciar(self.pedido("parar_run", "orbita"))
-        self.assertEqual(self.falas[-1], "Parar o run do orbita. Confirmas?")
+        self.assertEqual(self.falas[-1], "Parar o run do orbita - confirmas?")
 
 
 # --- Dialogos inteiros com STT, LLM e canal falsos --------------------------
@@ -1344,7 +1345,7 @@ class TestEstadoERelatorioSemConfirmacao(Base):
                 desfecho = confirmacao.iniciar(self.pedido(intencao, None))
                 self.assertEqual(desfecho.estado, "pendente")
                 self.assertTrue(desfecho.recap.falta_projeto)
-                self.assertTrue(self.falas[-1].endswith("Which project?"))
+                self.assertTrue(self.falas[-1].startswith("Which project is it for: "))
                 self.assertNotIn("Send it?", self.falas[-1])
                 self.assertEqual(self.canal.recebidos, [])
                 desfecho = confirmacao.responder("atlas")
@@ -1402,7 +1403,7 @@ class TestProjetoPeloSomNaResposta(Base):
                 self.assertIsNone(interpretacao.projeto)
                 desfecho = confirmacao.iniciar(interpretacao)
                 self.assertTrue(desfecho.recap.falta_projeto)
-                self.assertTrue(self.falas[-1].endswith("Which project?"))
+                self.assertTrue(self.falas[-1].startswith("Which project is it for: "))
                 novo = confirmacao.responder(resposta)
                 self.assertEqual(novo.estado, "pendente")
                 self.assertFalse(novo.recap.falta_projeto)
@@ -1424,7 +1425,7 @@ class TestProjetoPeloSomNaResposta(Base):
     def test_estado_sem_projeto_corre_com_o_nome_pelo_som(self) -> None:
         confirmacao = self.montar_com_chamora([])
         confirmacao.iniciar(self.pedido("estado", None))
-        self.assertTrue(self.falas[-1].endswith("Which project?"))
+        self.assertTrue(self.falas[-1].startswith("Which project is it for: "))
         self.assertEqual(confirmacao.responder("Shamra.").estado, "executado")
         self.assertEqual(self.canal.recebidos, [Pedido("estado", "chamora", "")])
 
@@ -1466,7 +1467,7 @@ class TestCorrecoesDitasNoRecap(TestProjetoPeloSomNaResposta):
         self.assertEqual(len(self.llm.pedidos), 1, "o acrescento passou pelo LLM")
         self.assertEqual(confirmacao.recap.pedido, Pedido("ditar_prompt", "chamora", PROMPT_EM_PORTUGUES))
         self.assertEqual(
-            self.falas[-1], "To chamora: Read the README and summarize it in Portuguese. Don't change anything. Send it?"
+            self.falas[-1], "For chamora: Read the README and summarize it in Portuguese. Don't change anything - send it?"
         )
         self.assertEqual(self.canal.recebidos, [])
         self.assertEqual(confirmacao.responder("yes").estado, "executado")
@@ -1492,7 +1493,7 @@ class TestCorrecoesDitasNoRecap(TestProjetoPeloSomNaResposta):
         desfecho = confirmacao.responder(CORRECAO_DITA)
         self.assertEqual(desfecho.estado, "pendente")
         self.assertEqual(confirmacao.recap.pedido.prompt, "Fix the Wipstone. Don't change the tests.")
-        self.assertEqual(self.falas[-1], "To chamora: Fix the Wipstone. Don't change the tests. Send it?")
+        self.assertEqual(self.falas[-1], "For chamora: Fix the Wipstone. Don't change the tests - send it?")
         self.assertEqual(self.canal.recebidos, [])
 
     def test_regra_financeira_na_correcao_nunca_envia(self) -> None:
@@ -1526,7 +1527,7 @@ class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
 
     def test_fica_pendente_e_pergunta_which_project(self) -> None:
         self.conversa_sem_projeto()
-        self.assertEqual(self.falas, ["I got the request, but not the project. Which project?"])
+        self.assertEqual(self.falas, ["Which project is it for: seekai, jarvis, chamora, atlas or another one?"])
         self.assertEqual(self.canal.recebidos, [])
 
     def test_a_resposta_completa_o_pedido_e_segue_o_recap_normal(self) -> None:
@@ -1536,7 +1537,7 @@ class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
         self.assertFalse(novo.recap.falta_projeto)
         prompt = self.confirmacao_prompt
         self.assertEqual(novo.recap.pedido, Pedido("conversa", "jarvis", prompt))
-        self.assertEqual(self.falas[-1], f"Reply to Claude in jarvis: {prompt} Send it?")
+        self.assertEqual(self.falas[-1], f"Reply to Claude in jarvis: {prompt.rstrip('.')} - send it?")
         self.assertEqual(len(self.llm.pedidos), 1, "a resposta nao e uma frase nova")
         self.assertEqual(self.canal.recebidos, [], "nada sai sem o sim")
         self.assertEqual(confirmacao.responder("yes").estado, "executado")
@@ -1546,7 +1547,7 @@ class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
         confirmacao = self.conversa_sem_projeto()
         self.assertEqual(confirmacao.responder("yes").estado, "pendente")
         self.assertTrue(confirmacao.recap.falta_projeto)
-        self.assertEqual(self.falas[-1], "Which project?")
+        self.assertEqual(self.falas[-1], "Which project is it for: seekai, jarvis, chamora, atlas or another one?")
         self.assertEqual(confirmacao.responder("abort").estado, "cancelado")
         self.assertEqual(self.canal.recebidos, [])
 
@@ -1567,11 +1568,108 @@ class TestConversaSemProjeto(TestProjetoPeloSomNaResposta):
         self.assertEqual((interpretacao.intencao, interpretacao.projeto), ("conversa", None))
         desfecho = confirmacao.iniciar(interpretacao)
         self.assertTrue(desfecho.recap.falta_projeto)
-        self.assertEqual(self.falas[-1], "Percebi o pedido, mas não o projeto. Para que projeto?")
+        self.assertEqual(self.falas[-1], "Para que projeto é: atlas, orbita, kanban-lite ou outro?")
         novo = confirmacao.responder("atlas")
         self.assertEqual(novo.recap.pedido.projeto, "atlas")
         self.assertTrue(self.falas[-1].startswith("Responder ao Claude no atlas: "), self.falas[-1])
         self.assertEqual(self.canal.recebidos, [])
+
+
+# --- Pergunta pelo projeto com os projetos conhecidos e descobertos --------------
+
+
+class TestPerguntaPelosProjetosConhecidos(Base):
+    lingua = "en"
+
+    def montar_com(self, config: Config, respostas_llm=None) -> Confirmacao:
+        self.relogio = RelogioFalso()
+        self.llm = LlmFalso(respostas_llm)
+        self.interprete = Interprete(config, cliente=self.llm)
+        self.canal = CanalFalso()
+        self.falas: list[str] = []
+        self.ecra: list[str] = []
+        self.confirmacao = Confirmacao(
+            self.interprete, self.canal, falar=self.falas.append, mostrar=self.ecra.append, relogio=self.relogio
+        )
+        return self.confirmacao
+
+    @staticmethod
+    def config_com(*nomes: str) -> Config:
+        return Config(
+            microfone="Microfone Ficticio",
+            projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in nomes),
+            ouvido=ConfigOuvido(lingua="en"),
+            interprete=ConfigInterprete(),
+        )
+
+    def test_diz_ate_quatro_projetos_e_mostra_todos_no_ecra(self) -> None:
+        nomes = ("jarvis", "forja", "chamora", "atlas", "orbita", "nimbus")
+        confirmacao = self.montar_com(self.config_com(*nomes))
+        desfecho = confirmacao.iniciar(self.pedido("ditar_prompt", None, "List the tests."))
+        self.assertTrue(desfecho.recap.falta_projeto)
+        self.assertEqual(self.falas, ["Which project is it for: jarvis, forja, chamora, atlas or another one?"])
+        self.assertIn("Known projects: " + ", ".join(nomes), self.ecra[-1])
+        self.assertFalse(any("I got the request" in fala for fala in self.falas))
+        # A pergunta repetida depois de uma resposta que nao se percebe e a mesma.
+        confirmacao.responder("hmm what")
+        self.assertEqual(self.falas[-1], self.falas[0])
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_os_usados_ha_menos_tempo_vem_primeiro(self) -> None:
+        confirmacao = self.montar_com(self.config_com("jarvis", "forja", "chamora", "atlas", "orbita"))
+        for projeto in ("atlas", "orbita"):
+            confirmacao.iniciar(self.pedido("parar_run", projeto))
+            self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(confirmacao.projetos_por_uso(), ("orbita", "atlas", "jarvis", "forja", "chamora"))
+        # Passado o tempo do ultimo projeto, o ditado sem projeto pergunta qual.
+        self.relogio.avancar(ConfigInterprete().ultimo_projeto_min * 60 + 1)
+        confirmacao.iniciar(self.pedido("ditar_prompt", None, "List the tests."))
+        self.assertEqual(self.falas[-1], "Which project is it for: orbita, atlas, jarvis, forja or another one?")
+
+    def test_um_pedido_cancelado_ou_que_falhou_nao_conta_como_usado(self) -> None:
+        confirmacao = self.montar_com(self.config_com("jarvis", "atlas"))
+        confirmacao.iniciar(self.pedido("parar_run", "atlas"))
+        confirmacao.responder("abort")
+        self.canal.falhar = True
+        confirmacao.iniciar(self.pedido("parar_run", "atlas"))
+        self.assertEqual(confirmacao.responder("yes").estado, "falhou")
+        self.assertEqual(confirmacao.projetos_por_uso(), ("jarvis", "atlas"))
+
+    def test_projetos_ditos_em_alternativa_continuam_na_pergunta_do_interprete(self) -> None:
+        confirmacao = self.montar_com(
+            self.config_com("jarvis", "forja", "atlas"), [_llm("ditar_prompt", "", "List the tests.")]
+        )
+        confirmacao.iniciar(self.interprete.interpretar("list the tests in atlas or forja"))
+        self.assertEqual(self.falas[-1], "Which project: forja or atlas?")
+
+    def test_sem_projetos_pergunta_sem_lista(self) -> None:
+        confirmacao = self.montar_com(self.config_com())
+        confirmacao.iniciar(self.pedido("ditar_prompt", None, "List the tests."))
+        self.assertEqual(self.falas, ["Which project is it for?"])
+
+    def test_projeto_descoberto_e_aceite_e_so_segue_com_o_sim(self) -> None:
+        from jarvis.config import ConfigDescoberta
+        from jarvis.projetos import com_projetos_descobertos
+
+        with tempfile.TemporaryDirectory() as pasta:
+            raiz = Path(pasta) / "Repositorios"
+            (raiz / "chamora" / ".git").mkdir(parents=True)
+            configurada = replace(self.config_com("atlas"), descoberta=ConfigDescoberta(pastas=(raiz,)))
+            config = com_projetos_descobertos(configurada, registar=lambda _linha: None)
+        self.assertIn("chamora", [projeto.nome for projeto in config.projetos])
+        confirmacao = self.montar_com(config, [_llm("ditar_prompt", "", "List the tests.")])
+        interpretacao = self.interprete.interpretar("list the tests")
+        self.assertIsNone(interpretacao.projeto)
+        confirmacao.iniciar(interpretacao)
+        self.assertIn("chamora", self.falas[-1])
+        novo = confirmacao.responder("Shamura.")
+        self.assertEqual(novo.estado, "pendente")
+        self.assertEqual(novo.recap.pedido, Pedido("ditar_prompt", "chamora", "List the tests."))
+        self.assertIn("chamora", self.falas[-1])
+        self.assertEqual(self.falas[-1], "List the tests, for chamora - send it?")
+        self.assertEqual(self.canal.recebidos, [], "nada sai sem o sim")
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(self.canal.recebidos, [Pedido("ditar_prompt", "chamora", "List the tests.")])
 
 
 # --- Factos do caderno da memoria -------------------------------------------------
@@ -1587,7 +1685,7 @@ class TestFactosDaMemoria(Base):
         confirmacao = self.montar()
         desfecho = confirmacao.iniciar(self.facto())
         self.assertEqual(desfecho.estado, "pendente")
-        self.assertEqual(self.falas, ["Remember: My favourite team is Benfica. Save it?"])
+        self.assertEqual(self.falas, ["Remember: My favourite team is Benfica - save it?"])
         self.assertIn("Fact to save:", self.ecra[-1])
         self.assertEqual(self.canal.recebidos, [])
         self.relogio.avancar(1)
@@ -1600,7 +1698,7 @@ class TestFactosDaMemoria(Base):
     def test_apagar_um_facto_tem_recap(self) -> None:
         confirmacao = self.montar(lingua="pt")
         confirmacao.iniciar(self.facto(INTENCAO_ESQUECER_FACTO, "Moro em Braga."))
-        self.assertEqual(self.falas, ["Esquecer: Moro em Braga. Apago?"])
+        self.assertEqual(self.falas, ["Esquecer: Moro em Braga - apago?"])
         self.assertIn("Facto a apagar:", self.ecra[-1])
 
     def test_abort_e_prazo_nao_correm_nada(self) -> None:
@@ -1640,6 +1738,351 @@ class TestFactosDaMemoria(Base):
     def test_ficam_fora_do_esquema_do_llm(self) -> None:
         for intencao in INTENCOES_DA_MEMORIA:
             self.assertNotIn(intencao, INTENCOES)
+
+
+# --- Recap leve e projeto assumido ---------------------------------------------
+
+
+class TestRecapLeve(Base):
+    lingua = "en"
+
+    def test_prompt_curto_e_uma_frase_que_acaba_numa_pergunta_leve(self) -> None:
+        confirmacao = self.montar()
+        desfecho = confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", "Add tests to the login page."))
+        self.assertEqual(self.falas, ["Add tests to the login page, for atlas - send it?"])
+        self.assertEqual(contar_frases(self.falas[0]), 1)
+        linhas = self.ecra[-1].splitlines()
+        self.assertIn("Text to send:", linhas)
+        self.assertIn("Add tests to the login page.", linhas)
+        self.assertEqual(desfecho.recap.pergunta, "Send it?")
+        confirmacao.responder("yes")
+        self.assertEqual(self.canal.recebidos[0].prompt, "Add tests to the login page.")
+
+    def test_prompt_longo_diz_o_tema_e_que_o_texto_esta_no_ecra(self) -> None:
+        longo = (
+            "Refactor the whole authentication module so that the session tokens are refreshed in the "
+            "background without blocking the interface, and keep every existing test passing."
+        )
+        confirmacao = self.montar()
+        desfecho = confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", longo))
+        fala = self.falas[-1]
+        self.assertEqual(fala, "Refactor the whole authentication module, for atlas, the full text is on screen - send it?")
+        self.assertEqual(contar_frases(fala), 1)
+        self.assertNotIn("existing test", fala)
+        self.assertIn(longo, self.ecra[-1].splitlines(), "o texto exato esta sempre no ecra")
+        confirmacao.responder("yes")
+        self.assertEqual(self.canal.recebidos, [desfecho.recap.pedido])
+        self.assertEqual(self.canal.recebidos[0].prompt, longo)
+
+    def test_o_tema_nunca_acaba_numa_palavra_de_ligacao(self) -> None:
+        sem_oracao = "Please go through every single file in the source folder and the tests folder and tidy up all of the imports today"
+        recap = compor_recap(1, self.pedido("ditar_prompt", "atlas", sem_oracao), "en")
+        self.assertEqual(
+            recap.fala, "Please go through every single file, for atlas, the full text is on screen - send it?"
+        )
+        primeira_curta = "Fix the login. " + " ".join(["Then check the form carefully."] * 5)
+        recap = compor_recap(1, self.pedido("ditar_prompt", "atlas", primeira_curta), "en")
+        self.assertTrue(recap.fala.startswith("Fix the login, for atlas, the full text is on screen"), recap.fala)
+
+    def test_o_texto_enviado_e_sempre_o_mostrado_no_ecra(self) -> None:
+        prompts = (
+            "Add tests.",
+            "Fix the login. Don't change anything.",
+            "Why is the build slow?",
+            " ".join(["word"] * 40) + ".",
+        )
+        for prompt in prompts:
+            for intencao in ("ditar_prompt", "conversa", "lancar_run"):
+                with self.subTest(prompt=prompt[:15], intencao=intencao):
+                    confirmacao = self.montar()
+                    desfecho = confirmacao.iniciar(self.pedido(intencao, "atlas", prompt))
+                    self.assertTrue(self.falas[-1].endswith(" - send it?"), self.falas[-1])
+                    confirmacao.responder("yes")
+                    enviado = self.canal.recebidos[0]
+                    self.assertEqual(enviado, desfecho.recap.pedido)
+                    self.assertIn(enviado.prompt, self.ecra[0].splitlines())
+
+    def test_acoes_sem_texto_perguntam_se_avanca(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("parar_run", "orbita"))
+        self.assertEqual(self.falas[-1], "Stop the run in orbita - go ahead?")
+        confirmacao.responder("go ahead")
+        self.assertEqual(self.canal.recebidos, [Pedido("parar_run", "orbita", "")])
+
+    def test_o_vocabulario_do_sim_nao_mudou(self) -> None:
+        # "okay" sozinho continua a ser so cortesia: nunca envia.
+        confirmacao = self.montar()
+        for resposta in ("okay", "ok", "please", "yes abort", "yes but cancel", "yes but add docs", "sure, but later"):
+            with self.subTest(resposta=resposta):
+                if not confirmacao.a_espera:
+                    confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", "Add tests."))
+                self.assertNotEqual(confirmacao.responder(resposta).estado, "executado")
+                self.assertEqual(self.canal.recebidos, [])
+
+
+class TestProjetoAssumido(Base):
+    lingua = "en"
+
+    def usar(self, confirmacao: Confirmacao, projeto: str = "atlas") -> None:
+        """Um ditado enviado ao `projeto`: passa a ser o ultimo usado."""
+        confirmacao.iniciar(self.pedido("ditar_prompt", projeto, "List the tests."))
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.canal.recebidos.clear()
+        self.falas.clear()
+
+    @staticmethod
+    def ditado_sem_projeto(prompt: str = "Add tests to the login page.") -> Interpretacao:
+        return Interpretacao(
+            "add tests to the login page", "ditar_prompt", None, prompt, "llm", "teste", pergunta="Which project?"
+        )
+
+    def montar_com_nomes(self, nomes: tuple[str, ...]) -> Confirmacao:
+        confirmacao = self.montar()
+        config = replace(
+            self.interprete.config,
+            projetos=tuple(Projeto(nome, Path("D:/caminho/para") / nome) for nome in nomes),
+        )
+        self.interprete = Interprete(config, cliente=self.llm)
+        confirmacao.interprete = self.interprete
+        return confirmacao
+
+    def test_ditado_sem_projeto_assume_o_ultimo_e_diz_o_no_recap(self) -> None:
+        confirmacao = self.montar()
+        self.usar(confirmacao)
+        self.relogio.avancar(9 * 60)
+        desfecho = confirmacao.iniciar(self.ditado_sem_projeto())
+        self.assertEqual(desfecho.estado, "pendente")
+        self.assertTrue(desfecho.recap.projeto_assumido)
+        self.assertEqual(self.falas, ["Add tests to the login page, still for atlas - send it?"])
+        self.assertIn("last one used", self.ecra[-1])
+        self.assertIn("assumido o ultimo usado, atlas", "\n".join(self.ecra))
+        self.assertEqual(self.canal.recebidos, [], "nada sai sem o sim")
+        self.relogio.avancar(5)
+        self.assertEqual(confirmacao.responder("yes").estado, "executado")
+        self.assertEqual(
+            self.canal.recebidos,
+            [Pedido("ditar_prompt", "atlas", "Add tests to the login page.", projeto_assumido=True)],
+        )
+
+    def test_so_o_sim_envia_ao_projeto_assumido(self) -> None:
+        for resposta in ("okay", "hmm", "yes abort", "yes, for orbita", "yes but for orbita", "for orbita and delete it"):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar()
+                self.usar(confirmacao)
+                confirmacao.iniciar(self.ditado_sem_projeto())
+                desfecho = confirmacao.responder(resposta)
+                self.assertNotEqual(desfecho.estado, "executado")
+                self.assertEqual(self.canal.recebidos, [])
+                if confirmacao.a_espera:
+                    self.assertEqual(confirmacao.recap.pedido.projeto, "atlas", "o projeto nao mudou")
+
+    def test_no_for_outro_projeto_troca_e_recapitula_sem_enviar(self) -> None:
+        for resposta in ("No, for orbita.", "no orbita", "for orbita", "Uh, no, to the orbita.", "no, in orbita please"):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar()
+                self.usar(confirmacao)
+                confirmacao.iniciar(self.ditado_sem_projeto())
+                desfecho = confirmacao.responder(resposta)
+                self.assertEqual(desfecho.estado, "pendente")
+                self.assertEqual(desfecho.recap.pedido.projeto, "orbita")
+                self.assertFalse(desfecho.recap.projeto_assumido)
+                self.assertEqual(self.falas[-1], "Add tests to the login page, for orbita - send it?")
+                self.assertEqual(self.llm.pedidos, [], "a troca nao passa pelo LLM")
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertEqual(confirmacao.responder("yes").estado, "executado")
+                self.assertEqual(
+                    self.canal.recebidos, [Pedido("ditar_prompt", "orbita", "Add tests to the login page.")]
+                )
+
+    def test_nao_para_o_outro_em_portugues(self) -> None:
+        confirmacao = self.montar(lingua="pt")
+        self.usar(confirmacao)
+        confirmacao.iniciar(self.ditado_sem_projeto("Acrescenta testes ao login."))
+        self.assertEqual(self.falas[-1], "Acrescenta testes ao login, outra vez para o atlas - envio?")
+        desfecho = confirmacao.responder("Não, para o orbita.")
+        self.assertEqual(desfecho.recap.pedido.projeto, "orbita")
+        self.assertEqual(self.falas[-1], "Acrescenta testes ao login, para o orbita - envio?")
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_no_sozinho_ou_abort_cancela(self) -> None:
+        for resposta in ("no", "abort", "Uh castle."):
+            with self.subTest(resposta=resposta):
+                confirmacao = self.montar()
+                self.usar(confirmacao)
+                confirmacao.iniciar(self.ditado_sem_projeto())
+                self.assertEqual(confirmacao.responder(resposta).estado, "cancelado")
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_passado_o_tempo_pergunta_o_projeto(self) -> None:
+        confirmacao = self.montar()
+        self.usar(confirmacao)
+        self.relogio.avancar(10 * 60)
+        self.assertEqual(confirmacao.ultimo_projeto(), "atlas", "10 minutos ainda contam")
+        self.relogio.avancar(1)
+        desfecho = confirmacao.iniciar(self.ditado_sem_projeto())
+        self.assertTrue(desfecho.recap.falta_projeto)
+        self.assertFalse(desfecho.recap.projeto_assumido)
+        self.assertTrue(self.falas[-1].startswith("Which project is it for"), self.falas[-1])
+
+    def test_tempo_configuravel_e_zero_desliga(self) -> None:
+        confirmacao = self.montar(ultimo_projeto_min=2.0)
+        self.assertEqual(confirmacao.ultimo_projeto_s, 120.0)
+        self.usar(confirmacao)
+        self.relogio.avancar(121)
+        self.assertTrue(confirmacao.iniciar(self.ditado_sem_projeto()).recap.falta_projeto)
+        confirmacao = self.montar(ultimo_projeto_min=0)
+        self.usar(confirmacao)
+        self.assertTrue(confirmacao.iniciar(self.ditado_sem_projeto()).recap.falta_projeto)
+
+    def test_sem_nenhum_pedido_executado_pergunta(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", "List the tests."))
+        confirmacao.responder("abort")
+        self.canal.falhar = True
+        confirmacao.iniciar(self.pedido("ditar_prompt", "orbita", "List the tests."))
+        self.assertEqual(confirmacao.responder("yes").estado, "falhou")
+        self.assertIsNone(confirmacao.ultimo_projeto(), "cancelado ou falhado nao conta como usado")
+        self.assertTrue(confirmacao.iniciar(self.ditado_sem_projeto()).recap.falta_projeto)
+
+    def test_o_ultimo_usado_e_o_mais_recente(self) -> None:
+        confirmacao = self.montar()
+        self.usar(confirmacao, "atlas")
+        self.usar(confirmacao, "orbita")
+        confirmacao.iniciar(self.ditado_sem_projeto())
+        self.assertEqual(self.falas[-1], "Add tests to the login page, still for orbita - send it?")
+
+    def test_um_projeto_dito_mesmo_mal_ouvido_ou_em_alternativa_nunca_e_substituido(self) -> None:
+        confirmacao = self.montar()
+        self.usar(confirmacao, "atlas")
+        alternativa = Interpretacao(
+            "add tests in orbita or kanban-lite",
+            "ditar_prompt",
+            None,
+            "Add tests.",
+            "llm",
+            "teste",
+            pergunta="Which project: orbita or kanban-lite?",
+        )
+        confirmacao.iniciar(alternativa)
+        self.assertEqual(self.falas[-1], "Which project: orbita or kanban-lite?")
+        dito = Interpretacao("add tests to orbita", "ditar_prompt", None, "Add tests.", "llm", "teste")
+        self.assertTrue(confirmacao.iniciar(dito).recap.falta_projeto)
+
+    def test_a_palavra_de_ativacao_nao_e_o_projeto_jarvis(self) -> None:
+        confirmacao = self.montar_com_nomes(("jarvis", "atlas"))
+        self.usar(confirmacao, "atlas")
+        frase = Interpretacao("Hey Jarvis, add tests.", "ditar_prompt", None, "Add tests.", "llm", "teste")
+        self.assertEqual(confirmacao.iniciar(frase).recap.pedido.projeto, "atlas")
+
+    def test_um_projeto_que_ja_nao_existe_nao_e_assumido(self) -> None:
+        confirmacao = self.montar()
+        self.usar(confirmacao, "atlas")
+        config = replace(self.interprete.config, projetos=(Projeto("orbita", Path("D:/caminho/para/orbita")),))
+        confirmacao.interprete = Interprete(config, cliente=self.llm)
+        self.assertIsNone(confirmacao.ultimo_projeto())
+
+    def test_so_o_ditado_e_as_leituras_assumem(self) -> None:
+        for intencao in ("abrir_editor", "abrir_pasta", "lancar_run", "retomar_run", "parar_run"):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                self.usar(confirmacao)
+                desfecho = confirmacao.iniciar(self.pedido(intencao, None, "Migrate the tests."))
+                self.assertTrue(desfecho.recap.falta_projeto)
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_estado_sem_projeto_usa_o_ultimo_e_corre_logo(self) -> None:
+        for intencao in sorted(INTENCOES_SO_DE_LEITURA):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                self.usar(confirmacao, "orbita")
+                desfecho = confirmacao.iniciar(Interpretacao("what's the status", intencao, None, "", "llm", "teste"))
+                self.assertEqual(desfecho.estado, "executado")
+                self.assertEqual(self.canal.recebidos, [Pedido(intencao, "orbita", "", projeto_assumido=True)])
+                self.assertEqual(self.falas, [], "a resposta e da leitura, que diz o projeto")
+
+    def test_estado_sem_projeto_recente_continua_a_perguntar(self) -> None:
+        confirmacao = self.montar()
+        desfecho = confirmacao.iniciar(Interpretacao("what's the status", "estado", None, "", "llm", "teste"))
+        self.assertTrue(desfecho.recap.falta_projeto)
+        self.assertEqual(self.canal.recebidos, [])
+
+    def test_a_correcao_mantem_o_projeto_assumido(self) -> None:
+        confirmacao = self.montar([_llm("ditar_prompt", "atlas", "Add tests to the settings page.")])
+        self.usar(confirmacao)
+        confirmacao.iniciar(self.ditado_sem_projeto())
+        desfecho = confirmacao.responder("no, change login to settings")
+        self.assertEqual(desfecho.recap.pedido.projeto, "atlas")
+        self.assertTrue(desfecho.recap.projeto_assumido)
+        self.assertEqual(self.falas[-1], "Add tests to the settings page, still for atlas - send it?")
+
+
+class TestNuncaRecapDeDinheiro(Base):
+    lingua = "en"
+
+    def test_um_ditado_de_dinheiro_sem_projeto_nunca_assume_nem_recapitula(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", "List the tests."))
+        confirmacao.responder("yes")
+        self.canal.recebidos.clear()
+        for texto, prompt in (("buy 10 shares of tesla", "Buy 10 shares of Tesla."), ("add tests", "Sell my bitcoin.")):
+            with self.subTest(texto=texto):
+                desfecho = confirmacao.iniciar(Interpretacao(texto, "ditar_prompt", None, prompt, "llm", "teste"))
+                self.assertEqual(desfecho.estado, "recusado")
+                self.assertIsNone(desfecho.recap)
+                self.assertFalse(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [])
+                self.assertNotIn("send it?", self.falas[-1])
+
+    def test_nenhuma_intencao_com_texto_de_dinheiro_chega_a_um_recap(self) -> None:
+        for intencao in sorted(INTENCOES_COM_EFEITO - INTENCOES_SO_DE_LEITURA):
+            with self.subTest(intencao=intencao):
+                confirmacao = self.montar()
+                interpretacao = replace(
+                    self.pedido(intencao, "atlas", "Buy 10 shares of Tesla."), texto="buy 10 shares of tesla"
+                )
+                desfecho = confirmacao.iniciar(interpretacao)
+                self.assertEqual(desfecho.estado, "recusado")
+                self.assertFalse(confirmacao.a_espera)
+                self.assertEqual(self.canal.recebidos, [])
+
+    def test_a_troca_de_projeto_com_dinheiro_nao_envia(self) -> None:
+        confirmacao = self.montar()
+        confirmacao.iniciar(self.pedido("ditar_prompt", "atlas", "List the tests."))
+        confirmacao.responder("yes")
+        self.canal.recebidos.clear()
+        confirmacao.iniciar(Interpretacao("add tests", "ditar_prompt", None, "Add tests.", "llm", "teste"))
+        desfecho = confirmacao.responder("no, for orbita and buy shares")
+        self.assertNotEqual(desfecho.estado, "executado")
+        self.assertNotEqual(desfecho.estado, "pendente", desfecho)
+        self.assertEqual(self.canal.recebidos, [])
+
+
+class TestConfigDoUltimoProjeto(unittest.TestCase):
+    def test_por_omissao_10_minutos_e_validado_no_config_toml(self) -> None:
+        self.assertEqual(ConfigInterprete().ultimo_projeto_min, 10.0)
+        with tempfile.TemporaryDirectory() as pasta:
+            raiz = Path(pasta)
+            (raiz / "projeto").mkdir()
+
+            def carregar(linha: str) -> Config:
+                caminho = raiz / "config.toml"
+                caminho.write_text(
+                    '[microfone]\nnome = "Mic"\n[[projetos]]\nnome = "atlas"\n'
+                    f'caminho = "{(raiz / "projeto").as_posix()}"\n'
+                    f"[interprete]\n{linha}\n",
+                    encoding="utf-8",
+                )
+                return carregar_config(caminho)
+
+            self.assertEqual(carregar("ultimo_projeto_min = 5").interprete.ultimo_projeto_min, 5.0)
+            self.assertEqual(carregar("ultimo_projeto_min = 0").interprete.ultimo_projeto_min, 0.0)
+            for invalido in ("-1", "241", "true", '"10"', "nan", "inf"):
+                with self.subTest(valor=invalido), self.assertRaises(ConfigError):
+                    carregar(f"ultimo_projeto_min = {invalido}")
+
+    def test_o_exemplo_documenta_a_chave(self) -> None:
+        exemplo = (RAIZ / "config.exemplo.toml").read_text(encoding="utf-8")
+        self.assertIn("ultimo_projeto_min = 10.0", exemplo)
 
 
 if __name__ == "__main__":

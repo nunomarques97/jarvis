@@ -210,10 +210,18 @@ PADRAO_DESTINATARIO = re.compile(
     r"|tell|ask|send|write|message)\b(?!\s+(me|nos|us)\b)"
 )
 
+#: "sabes-me dizer", "podes-me dizer" (normalizados "sabes me dizer"): o "me"
+#: antes do verbo tambem faz do proprio jarvis o destinatario.
+_ME_ANTES_DO_VERBO = re.compile(r"\b(?:me|nos)\s+(?:dizer|diz|diga)\b")
+
 # --- Lista branca fechada da D4 (todos casados com re.fullmatch) ------------
 
-#: Prefixo tolerado de "diz-me" / "diga-me" nas perguntas de horas e data.
-_DIZ_ME = r"(?:(?:diz|dizes|diga|dizer)(?:\s+(?:me|nos))?\s+)?"
+#: Prefixo tolerado de "diz-me" / "diga-me" nas perguntas de horas e data,
+#: tambem na forma de pedido: "podes dizer-me", "sabes-me dizer".
+_DIZ_ME = (
+    r"(?:(?:podes|pode|podias|sabes|sabe)(?:\s+(?:me|nos))?\s+)?"
+    r"(?:(?:diz|dizes|diga|dizer)(?:\s+(?:me|nos))?\s+)?"
+)
 
 PADRAO_HORAS = re.compile(
     _DIZ_ME
@@ -234,6 +242,7 @@ PADRAO_DATA = re.compile(
     r"|(?:a\s+)?data\s+de\s+hoje"
     r"|que\s+data\s+(?:e|temos)(?:\s+hoje)?"
     r"|em\s+que\s+mes\s+estamos"
+    r"|em\s+que\s+dia\s+do\s+mes\s+estamos"
     r")"
 )
 
@@ -245,6 +254,7 @@ PADRAO_CALAR = re.compile(
     r"|para\s+de\s+(?:falar|escutar)"
     r"|fica\s+(?:calado|calada|em\s+silencio)"
     r"|chiu"
+    r"|chega(?:\s+ja\s+ouvi\s+o\s+suficiente)?"
     r")"
 )
 
@@ -267,6 +277,7 @@ PADRAO_ACORDAR = re.compile(
     r"|desperta"
     r"|sai\s+(?:da|do)\s+(?:modo\s+de\s+)?espera"
     r"|volta\s+ao\s+trabalho"
+    r"|acorda\s+que\s+ja\s+voltei"
     r")"
 )
 
@@ -298,13 +309,14 @@ PADRAO_ABRIR_PASTA = re.compile(
 # ingles de `_DIZ_ME`. "tell me the time" NAO e dirigido ao Claude Code porque
 # o destinatario e o proprio jarvis (a guarda `PADRAO_DESTINATARIO` ja deixa
 # passar "tell" seguido de "me"/"us", ver acima).
-_TELL_ME_EN = r"(?:tell\s+me\s+)?"
+_TELL_ME_EN = r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?(?:tell\s+me\s+)?"
 
 PADRAO_HORAS_EN = re.compile(
     _TELL_ME_EN
     + r"(?:"
-    r"what\s+time\s+is\s+it(?:\s+now)?"
-    r"|what\s+s\s+the\s+time"
+    r"what\s+time\s+is\s+it(?:\s+(?:right\s+)?now)?"
+    r"|what\s+time\s+it\s+is(?:\s+(?:right\s+)?now)?"
+    r"|what\s+(?:s|is)\s+the\s+time(?:\s+(?:right\s+)?now)?"
     r"|do\s+you\s+know\s+what\s+time\s+it\s+is"
     r"|the\s+time"
     r")"
@@ -329,6 +341,9 @@ PADRAO_CALAR_EN = re.compile(
     r"|stop\s+talking"
     r"|stop\s+listening"
     r"|shush"
+    r"|shut\s+up"
+    r"|(?:that\s+s\s+)?enough"
+    r"|enough\s+i\s+ve\s+heard\s+enough"
     r")"
 )
 
@@ -345,7 +360,7 @@ PADRAO_ADORMECER_EN = re.compile(
 
 PADRAO_ACORDAR_EN = re.compile(
     r"(?:"
-    r"wake\s+up"
+    r"wake\s+up(?:\s+i\s+m\s+back)?"
     r"|wake"
     r"|exit\s+standby(?:\s+mode)?"
     r"|back\s+to\s+work"
@@ -481,6 +496,7 @@ CORTESIAS_FINAIS: tuple[tuple[str, ...], ...] = (
     ("please",),
     ("thanks",),
     ("thank", "you"),
+    ("now",),
 )
 
 #: Comparacao de nomes de projeto, palavra a palavra. Uma palavra com menos do
@@ -683,6 +699,11 @@ def _acoes_bare_que_batem(variante: str) -> list[tuple[str, str | None]]:
     return encontradas
 
 
+def _dirigida_a_outro(normalizado: str) -> bool:
+    """A frase manda dizer, perguntar ou enviar algo a alguem que nao e o jarvis."""
+    return bool(PADRAO_DESTINATARIO.search(_ME_ANTES_DO_VERBO.sub("me", normalizado)))
+
+
 def _motivo_do_texto(normalizado: str) -> str:
     """Motivo a escrever no log quando a frase segue como texto."""
     if PADRAO_FINANCEIRO.search(normalizado):
@@ -752,7 +773,7 @@ def encaminhar(
     # --- Guardas: uma frase negada ou dirigida a alguem nunca e comando ----
     if PADRAO_NEGACAO.search(normalizado):
         return como_texto("frase com negacao: nunca vira acao local (D4)")
-    if PADRAO_DESTINATARIO.search(normalizado):
+    if _dirigida_a_outro(normalizado):
         return como_texto("frase dirigida a um destinatario: e texto, nunca acao local (D4)")
 
     # --- Lista branca FECHADA da D4/D58a: fullmatch contra a frase inteira,
@@ -806,6 +827,161 @@ def encaminhar(
             )
 
     return como_texto(motivo_da_recusa or _motivo_do_texto(normalizado))
+
+
+# --- Caminho rapido do interprete: pedidos comuns sem esperar pelo LLM -------
+#
+# Fora da lista branca da D4 e sem nenhuma acao nova: estes padroes so dizem
+# ao interprete que intencao a frase tem quando ela e inequivoca (o estado ou
+# o relatorio de um projeto dito pelo nome, ou uma pergunta geral com
+# abertura e tema claros). O resultado e o mesmo que o LLM daria, sem o
+# segundo de espera; o que nao casa aqui segue para o LLM como antes.
+# `encaminhar()` nao usa nada disto. A regra financeira e as outras guardas
+# do interprete correm antes e depois, no interprete.
+
+#: A cauda com o nome do projeto. Preguicosa: com `fullmatch`, para antes das
+#: palavras que fecham o padrao ("run", "report", "going"...).
+_PROJETO = r"(?P<projeto>[a-z0-9][a-z0-9\s]*?)"
+
+#: Pedir o estado de um projeto nomeado ("what's the status of atlas", "how
+#: is the atlas run going", "qual e o estado do atlas").
+PADROES_DO_ESTADO: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:(?:tell|give)\s+me\s+)?(?:what\s+(?:s|is)\s+)?(?:the\s+)?(?:status|state|progress)"
+        r"\s+(?:of|on|for|in)\s+(?:the\s+)?(?:project\s+)?" + _PROJETO + r"(?:\s+(?:run|session|project))?"
+    ),
+    re.compile(r"(?:what\s+(?:s|is)\s+)?(?:the\s+)?" + _PROJETO + r"\s+(?:status|progress)"),
+    re.compile(
+        r"how\s+(?:is|s)\s+(?:the\s+)?(?:project\s+)?" + _PROJETO
+        + r"(?:\s+(?:run|session|project|work))?\s+(?:going|doing|getting\s+on)"
+    ),
+    re.compile(r"how\s+(?:is|s)\s+it\s+going\s+(?:with|in|on)\s+(?:the\s+)?" + _PROJETO),
+    re.compile(
+        r"(?:has|is)\s+the\s+" + _PROJETO + r"\s+(?:run|session)\s+(?:finished|done|over|complete|completed)"
+        r"(?:\s+yet)?"
+    ),
+    re.compile(
+        r"(?:qual\s+(?:e\s+)?)?(?:o\s+)?(?:estado|ponto\s+de\s+situacao)\s+(?:do|da|de)\s+" + _PROJETO
+    ),
+    re.compile(
+        r"como\s+(?:esta|vai|anda)\s+(?:o\s+|a\s+)?(?:(?:run|sessao|projeto|trabalho)\s+(?:do|da|de|no|na)\s+)?"
+        + _PROJETO
+    ),
+    re.compile(
+        r"em\s+que\s+ponto\s+(?:esta|vai)\s+(?:o\s+|a\s+)?(?:(?:run|sessao|projeto)\s+(?:do|da|de)\s+)?" + _PROJETO
+    ),
+    re.compile(r"(?:o\s+|a\s+)?(?:run|sessao)\s+(?:do|da|de)\s+" + _PROJETO + r"\s+(?:ja\s+)?(?:acabou|terminou)"),
+)
+
+#: Pedir o relatorio de um projeto nomeado ("read the atlas report", "le o
+#: relatorio do atlas").
+PADROES_DO_RELATORIO: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"read\s+(?:me\s+)?(?:the\s+)?(?:last\s+|latest\s+)?" + _PROJETO + r"(?:\s+run)?\s+(?:report|summary)"
+    ),
+    re.compile(
+        r"read\s+(?:me\s+)?(?:the\s+)?(?:last\s+|latest\s+)?(?:report|summary)\s+(?:of|for|from|on)\s+"
+        r"(?:the\s+)?(?:last\s+|latest\s+)?" + _PROJETO + r"(?:\s+(?:run|session|project))?"
+    ),
+    re.compile(r"what\s+(?:does|did)\s+the\s+" + _PROJETO + r"\s+(?:report|summary)\s+say"),
+    re.compile(
+        r"(?:le|ler|leia)(?:\s+me)?\s+(?:o\s+)?(?:ultimo\s+)?(?:relatorio|resumo)\s+(?:do|da|de)\s+"
+        r"(?:ultimo\s+)?(?:(?:run|sessao)\s+(?:do|da|de)\s+)?" + _PROJETO
+    ),
+    re.compile(r"o\s+que\s+diz\s+o\s+(?:ultimo\s+)?(?:relatorio|resumo)\s+(?:do|da|de)\s+" + _PROJETO),
+)
+
+#: Hesitacoes e arranques que podem vir antes da abertura de uma pergunta.
+_ARRANQUES_DA_PERGUNTA = frozenset(
+    {"uh", "um", "uhm", "er", "ah", "hmm", "hum", "eh", "so", "well", "hey", "olha", "entao", "ok", "okay"}
+)
+
+#: Abertura clara de uma pergunta, no inicio da frase.
+PADRAO_ABERTURA_DE_PERGUNTA = re.compile(
+    r"(?:what|whats|who|where|when|which"
+    r"|how\s+(?:many|much|far|old|long|big|tall|hot|cold|warm)"
+    r"|will\s+it|is\s+it\s+(?:going\s+to|gonna)|is\s+there|are\s+there"
+    r"|tell\s+me|do\s+you\s+know"
+    r"|qual|quais|quem|onde|quando|quanto|quantos|quantas|que|como|vai|sabes|diz\s+me)\b"
+)
+
+#: Temas de conhecimento geral ou de atualidade. Uma pergunta com abertura
+#: clara e um destes temas e uma pergunta geral, sem precisar do LLM.
+PADRAO_TEMA_GERAL = re.compile(
+    r"\b(?:weather|temperature|rain|raining|snow|snowing|forecast|sunny|news|headlines"
+    r"|football|soccer|games?|match|matches|score|league|cup|won|win|champions?"
+    r"|capital|president|prime\s+minister|population|country|city|recipe|movies?|films?|songs?|traffic"
+    r"|temperatura|chuva|chover|chove|neve|nevar|previsao|noticias|futebol|jogos?|partida|liga|taca"
+    r"|campeonato|ganhou|venceu|campeao|campeoes|capital|presidente|primeiro\s+ministro|populacao"
+    r"|pais|cidade|receita|filmes?|cancao|musica|transito"
+    r"|(?<!quanto\s)(?:o|que)\s+tempo)\b"
+)
+
+#: Uma pergunta geral clara e curta: com mais palavras do que isto pode trazer
+#: um pedido junto, e segue para o LLM.
+MAXIMO_DE_PALAVRAS_DA_PERGUNTA = 20
+
+
+@dataclass(frozen=True)
+class PedidoRapido:
+    """A intencao de uma frase inequivoca: nunca executa nada, so descreve."""
+
+    intencao: Literal["estado", "ler_relatorio", "pergunta_geral"]
+    projeto: Projeto | None
+    motivo: str
+
+
+def _variantes_para_o_caminho_rapido(texto: str | None) -> tuple[str, list[str]]:
+    normalizado = _normalizar(texto or "")
+    normalizado, _residuo = _remover_residuo_wake_word(normalizado)
+    return normalizado, _variantes_sem_cortesias(normalizado) if normalizado else []
+
+
+def pedido_do_projeto(texto: str | None, config: Config) -> PedidoRapido | None:
+    """Estado ou relatorio de um projeto dito pelo nome, pela frase inteira.
+
+    O fragmento do nome passa pela mesma comparacao estrita da lista branca:
+    um nome desconhecido, parecido ou ambiguo nao e o projeto, e a frase
+    segue para o LLM. Uma frase negada tambem.
+    """
+    normalizado, variantes = _variantes_para_o_caminho_rapido(texto)
+    if not normalizado or PADRAO_NEGACAO.search(normalizado):
+        return None
+    for variante in variantes:
+        for intencao, padroes in (("estado", PADROES_DO_ESTADO), ("ler_relatorio", PADROES_DO_RELATORIO)):
+            for padrao in padroes:
+                casou = padrao.fullmatch(variante)
+                if casou is None:
+                    continue
+                projeto, _porque_nao = _projeto_do_fragmento(casou.group("projeto").strip(), config.projetos)
+                if projeto is not None:
+                    return PedidoRapido(intencao, projeto, f"{intencao} do projeto '{projeto.nome}' dito pelo nome")
+    return None
+
+
+def pergunta_geral_clara(texto: str | None) -> PedidoRapido | None:
+    """Uma pergunta com abertura clara ("what's", "who won", "vai chover") e um tema geral.
+
+    So o texto: quem chama ainda verifica que a frase nao diz nenhum projeto
+    nem fala de trabalho num projeto. Negacao, destinatario explicito,
+    vocabulario financeiro ou uma frase longa seguem para o LLM.
+    """
+    normalizado, _variantes = _variantes_para_o_caminho_rapido(texto)
+    palavras = normalizado.split()
+    while palavras and palavras[0] in _ARRANQUES_DA_PERGUNTA:
+        palavras = palavras[1:]
+    frase = " ".join(palavras)
+    if not frase or len(palavras) > MAXIMO_DE_PALAVRAS_DA_PERGUNTA:
+        return None
+    if PADRAO_NEGACAO.search(frase) or _dirigida_a_outro(frase) or PADRAO_FINANCEIRO.search(frase):
+        return None
+    abertura = PADRAO_ABERTURA_DE_PERGUNTA.match(frase)
+    tema = PADRAO_TEMA_GERAL.search(frase)
+    if abertura is None or tema is None:
+        return None
+    return PedidoRapido(
+        "pergunta_geral", None, f"pergunta geral clara (abertura '{abertura.group(0)}', tema '{tema.group(0)}')"
+    )
 
 
 # --- Autoteste das partes puras (config ficticia em memoria) ---------------

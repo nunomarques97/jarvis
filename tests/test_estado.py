@@ -20,6 +20,7 @@ from unittest import mock
 
 from jarvis.config import Config, ConfigForja, Projeto
 from jarvis.confirmacao import contar_frases
+from jarvis.persona import VARIANTES
 from jarvis.estado import (
     Estado,
     SaidaDoCli,
@@ -271,6 +272,7 @@ class TestEstadoDoRun(_ComCLIsFalsos):
                 "claude": {"saida": "[]"},
             }
         )
+        VARIANTES.esquecer()  # a primeira forma de cada frase
         falado = self.clis.estado().estado("atlas", "en").falado
         self.assertEqual(
             falado,
@@ -490,6 +492,7 @@ class TestRelatorio(_ComCLIsFalsos):
     def test_dos_relatorios_markdown_ganha_o_mais_recente(self) -> None:
         self._escrever_md("REPORT-2026-09-01.md", "## Summary\n\nOld report.\n", quando=time.time() - 7200)
         self._escrever_md("REPORT-2026-09-02.md", "## Summary\n\nNew report.\n", quando=time.time() - 60)
+        VARIANTES.esquecer()  # a primeira forma de cada frase
         self.assertEqual(
             self.clis.estado().relatorio("atlas", "en").falado, "Summary of the atlas report: New report."
         )
