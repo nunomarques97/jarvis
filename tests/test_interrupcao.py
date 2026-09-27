@@ -13,7 +13,7 @@ o pedido seguinte sem palavra de ativacao). O que estes testes protegem:
     mesma frase um pouco atras, calar durante a pausa acaba-a;
   * o jarvis: falsa retoma, a serio para e segue, o resto fica no ecra; o
     recap (um "sim" por cima nunca envia; "aborta" por cima cancela), os
-    avisos e uma resposta geral a meio portam-se bem; uma pausa sem frase
+    avisos e uma resposta do cerebro a meio portam-se bem; uma pausa sem frase
     retoma sozinha; `[escuta] interromper = false` e sem voz desligam tudo;
   * as linhas do log sao as que `scripts/sessao_naturalidade.py` le;
   * o VAD Silero real (quando o ficheiro existe): silencio e ruido fraco nao
@@ -27,7 +27,6 @@ Nenhum teste toca som nem abre o microfone.
 from __future__ import annotations
 
 import datetime
-import queue
 import tempfile
 import threading
 import time
@@ -38,7 +37,8 @@ from unittest import mock
 from jarvis import app, voz
 from jarvis.app import Jarvis, construir_ouvido, e_so_acompanhamento
 from jarvis.avisos import FALADO, Aviso
-from jarvis.config import ConfigEscuta
+from jarvis.cerebro import Cerebro
+from jarvis.config import ConfigCerebro, ConfigEscuta
 from jarvis.interprete import Interprete
 from jarvis.ouvido import (
     BYTES_POR_CHUNK,
@@ -59,14 +59,7 @@ from jarvis.resposta_falada import rotulo_da_origem
 from jarvis.voz import MOTIVO_SILENCIADO, FalaResidente, ResultadoFala, ResultadoSilencio
 from tests.test_app import CanalFalso, LlmFalso, LogFalso, config_de_teste, resposta_llm
 from tests.test_ouvido import SILENCIO, DetetorFalso, MotorFalso, TeclaFixa, VadFalso, chunk
-from tests.test_pergunta_geral import (
-    LINHA_DE_ARRANQUE,
-    LINHA_DE_MENSAGEM,
-    ArranqueFalso,
-    linha_de_texto,
-    perguntas_de_teste,
-    resultado_json,
-)
+from tests.test_cerebro import CLI_FALSO, HOJE, CliFalso, bloqueada
 
 ESPERA_S = 5.0
 FALA = 0x55
@@ -423,7 +416,7 @@ class VozFalsa:
 class Cena:
     """Um Jarvis com a thread das frases a correr, voz falsa que bloqueia e relogio real."""
 
-    def __init__(self, respostas_llm=None, *, perguntas=None, escuta=None, com_voz=True) -> None:
+    def __init__(self, respostas_llm=None, *, cerebro=None, escuta=None, com_voz=True) -> None:
         self.log = LogFalso()
         self.config = config_de_teste("en", escuta=escuta)
         self.interprete = Interprete(self.config, cliente=LlmFalso(respostas_llm))
@@ -442,7 +435,6 @@ class Cena:
             self.log,
             interprete=self.interprete,
             canal=self.canal,
-            perguntas=perguntas,
             falar=self.voz.falar,
             calar=self.voz.calar,
             pausar=self.voz.pausar,
@@ -451,6 +443,7 @@ class Cena:
             com_voz=com_voz,
             relogio=time.perf_counter,
             espera_do_aviso_s=ESPERA_S,
+            cerebro=cerebro,
         )
         self.jarvis.iniciar()
 
@@ -682,48 +675,51 @@ class TestAvisoInterrompido(_BaseCena):
         self.assertEqual(cena.voz.calados, [])
 
 
-class TestRespostaGeralInterrompida(_BaseCena):
+class TestRespostaDoCerebroInterrompida(_BaseCena):
     PRIMEIRA = "It is 22 degrees in Porto today."
     RESTO = "Tomorrow it will rain in the afternoon."
 
-    def montar(self) -> tuple[Cena, queue.Queue, ArranqueFalso]:
+    def montar(self) -> tuple[Cena, threading.Event, CliFalso]:
         temporaria = tempfile.TemporaryDirectory()
         self.addCleanup(temporaria.cleanup)
-        linhas: queue.Queue = queue.Queue()
-        arranque = ArranqueFalso(linhas)
-        perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-        cena = self.cena([resposta_llm("pergunta_geral", "", "what's the weather in Porto")], perguntas=perguntas)
+        porta = threading.Event()
+        self.addCleanup(porta.set)
+        cli = CliFalso(bloqueada(self.PRIMEIRA + " Tomorrow", porta=porta, depois=(" it will rain in the afternoon.",)))
+        cerebro = Cerebro(
+            ConfigCerebro(limite_s=ESPERA_S * 2),
+            "en",
+            localizacao="Porto, Portugal",
+            nomes_de_projeto=["atlas", "orbita"],
+            cli=CLI_FALSO,
+            arrancar=cli,
+            pasta=Path(temporaria.name) / "neutra",
+            hoje=lambda: HOJE,
+        )
+        cena = self.cena(cerebro=cerebro)
         cena.voz.presa.set()
         cena.ouvir("what's the weather in Porto")
-        for linha in (LINHA_DE_ARRANQUE, LINHA_DE_MENSAGEM, linha_de_texto(self.PRIMEIRA + " Tomorrow")):
-            linhas.put(linha)
         self.assertTrue(cena.voz.esperar_fala(self.PRIMEIRA))
-        return cena, linhas, arranque
-
-    def acabar(self, linhas: queue.Queue) -> None:
-        linhas.put(linha_de_texto(" it will rain in the afternoon."))
-        linhas.put(resultado_json(f"{self.PRIMEIRA} {self.RESTO}"))
-        linhas.put(None)
+        return cena, porta, cli
 
     def test_fala_a_serio_para_a_resposta_o_resto_nao_se_diz_e_aparece_no_ecra(self) -> None:
-        cena, linhas, arranque = self.montar()
+        cena, porta, cli = self.montar()
         cena.interromper("What time is it?", soltar=True)
         self.assertTrue(cena.ocioso())
-        self.acabar(linhas)
+        porta.set()
         self.assertTrue(cena.jarvis.esperar_pergunta(ESPERA_S))
-        self.assertFalse(arranque.ultimo.morto.is_set(), "a resposta interrompida continua a chegar")
+        self.assertEqual(cli.processos[0].interrupcoes, 0, "a resposta interrompida continua a chegar")
         self.assertNotIn(self.RESTO, " ".join(cena.voz.falados))
         self.assertEqual(cena.locais, ["horas"])
         texto = cena.texto()
-        self.assertIn("pergunta | resposta interrompida", texto)
+        self.assertIn("cerebro | resposta interrompida", texto)
         self.assertIn(f"{rotulo_da_origem('en')} '{self.PRIMEIRA} {self.RESTO}'", texto)
 
     def test_um_acompanhamento_deixa_a_resposta_continuar_inteira(self) -> None:
-        cena, linhas, _arranque = self.montar()
+        cena, porta, _cli = self.montar()
         cena.interromper("Okay.")
         self.assertEqual(cena.voz.retomadas, 1)
         cena.voz.presa.clear()
-        self.acabar(linhas)
+        porta.set()
         self.assertTrue(cena.jarvis.esperar_pergunta(ESPERA_S))
         self.assertTrue(cena.ocioso())
         self.assertIn(self.RESTO, " ".join(cena.voz.falados))

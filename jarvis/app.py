@@ -2,10 +2,12 @@ r"""O jarvis residente: ouve, percebe, confirma, faz e responde, num so processo
 
     .venv\Scripts\python -m jarvis
 
-arranca o processo residente. No arranque aquece, em paralelo, as tres pecas
+arranca o processo residente. No arranque aquece, em paralelo, as pecas
 pesadas: a transcricao (`jarvis.stt`, pelo ouvido), a voz (`jarvis.voz`) e o
-interprete (LLM local no Ollama). Fica pronto em poucos segundos (a meta e
-<= 30 s) e escreve "PRONTO" com o tempo que levou e a VRAM livre antes e
+cerebro (`jarvis.cerebro`). O interprete (LLM local no Ollama) so e aquecido
+sem cerebro; com ele, carrega-se na primeira frase que cai no recurso, o que
+deixa a GPU livre para outros modelos. Fica pronto em poucos segundos (a meta
+e <= 30 s) e escreve "PRONTO" com o tempo que levou e a VRAM livre antes e
 depois.
 
 O CAMINHO VIVO de cada frase:
@@ -20,22 +22,11 @@ O CAMINHO VIVO de cada frase:
               para Y" e "acrescenta ..." corrigem, "aborta" (ou "cancela")
               cancela. Ver o estado e ler o relatorio de um projeto so leem
               e correm logo, tal como horas/data, calar, dormir e acordar.
-  perguntas   uma pergunta geral ou de atualidade (tempo, desporto,
-              noticias, factos) que nao e sobre um projeto corre logo, sem
-              recap: passa-a ao Claude Code headless numa pasta neutra, so
-              com pesquisa na web (`jarvis.pergunta_geral`), e a resposta
-              chega em streaming: cada frase que passa o filtro da resposta
-              falada e dita logo, enquanto o resto ainda se escreve. So se a
-              primeira frase demorar mais do que ~1 s o jarvis diz antes um
-              aviso curto e variado ("One sec."). "cala-te", Ctrl+C, "dorme"
-              ou um pedido novo matam o processo e nada mais se diz.
-  memoria     (`jarvis.memoria`) as ultimas perguntas gerais respondidas e
-              as respostas ditas vao com a pergunta seguinte (so em RAM,
-              com teto e prazo; "new conversation" esquece-as); o caderno de
-              factos ("remember that ...", "forget that ...", "what do you
-              remember about me?") fica num ficheiro local fora do Git e vai
-              com cada pergunta geral. Guardar ou apagar um facto tem recap e
-              "sim"; segredos e dados financeiros sao recusados antes.
+  memoria     (`jarvis.memoria`) o caderno de factos ("remember that ...",
+              "forget that ...", "what do you remember about me?") fica num
+              ficheiro local fora do Git e vai para o cerebro como dados.
+              Guardar ou apagar um facto tem recap e "sim"; segredos e dados
+              financeiros sao recusados antes.
   executor    as accoes locais (`jarvis.acoes_locais`), o estado e os runs
               FORJA do projeto (`jarvis.forja_voz`) ou o canal para a
               sessao do Claude Code do projeto (`jarvis.sessoes`): o prompt
@@ -44,24 +35,45 @@ O CAMINHO VIVO de cada frase:
               canal nao registar.
   voz         a resposta falada pela voz residente, em streaming.
 
+Cerebro (`jarvis.cerebro`, `[cerebro] ativo`): com ele, o interprete sai do
+caminho vivo. O caminho rapido so por regras (calar, dormir/acordar, horas e
+data, a resposta a um recap, "that's all", ruido na janela de seguimento e a
+recusa financeira) nunca chama o cerebro nem o interprete; tudo o resto vai
+ao cerebro, um processo `claude` persistente aquecido no arranque, e a
+resposta e dita frase a frase assim que cada uma passa o filtro da resposta
+falada (aviso curto sem frase em ~1 s, segundo aviso numa pesquisa longa,
+nada dito depois de um silencio, de dormir, de uma interrupcao ou de uma
+frase nova). Uma frase
+ouvida so pela janela de seguimento vai marcada como tal, e o cerebro pode
+responder que nao era para ele: nada e dito e a janela mantem o prazo. Sem
+cerebro (nao arranca, sem quota, sem sessao iniciada ou duas falhas
+seguidas), as frases seguem pelo interprete durante `[cerebro] reintentar_s`,
+com uma frase curta dita uma vez; nesse recurso os projetos, a memoria e os
+comandos locais continuam, e uma pergunta geral ouve que nao esta
+disponivel. As ferramentas com efeito do cerebro
+(enviar a um projeto, lancar, parar ou retomar um run, guardar ou apagar um
+facto) nunca executam: reservam o recap de sempre, o resto desse turno do
+cerebro nao se diz, e o jarvis diz o recap; so o "sim" falado ao jarvis
+executa, e o desfecho vai como dado (EVENTS) na mensagem seguinte ao cerebro.
+Um recap de cada vez: outra ferramenta com efeito recebe "busy".
+
 Conversa (`jarvis.conversa`): quando a resposta do Claude acaba numa pergunta,
 abre-se uma janela de escuta de 8 s sem palavra de ativacao; a resposta, sem
 hesitacoes nem o endereco ao jarvis, vai logo se for curta (ate 5 palavras,
 o jarvis diz "Sent.") e, se for mais longa, vai para a confirmacao rapida e
 so um "sim" a envia. "sai da conversa" ou 8 s sem resposta fecham a janela.
-Quando a resposta falada a uma pergunta geral acaba numa pergunta, a frase
-dita na janela de seguimento continua a pergunta geral, com a memoria recente
-e sem as intencoes de projeto (`_continuar_a_pergunta`).
 
 Modo de conversa (a janela de seguimento): depois de cada resposta falada o
 jarvis continua a ouvir sem palavra de ativacao, e a janela recomeca depois
 de cada resposta; fecha com `[escuta] seguimento_s` de silencio (15 s por
 omissao) ou com "that's all" / "thanks, that's it". O som "abrir" so toca
 quando a escuta abre pela primeira vez (nao quando reabre depois de uma
-resposta, de um recap ou enquanto uma pergunta geral esta a caminho) e o
-"fechar" quando ela acaba de vez. A fala de fundo fica contida: silencio,
-hesitacoes, so cortesia, uma frase sem intencao ou uma pergunta geral que nao
-e dita como pergunta ao jarvis nao fazem nada nem gastam a janela; o que tem
+resposta, de um recap ou enquanto uma resposta do cerebro esta a caminho) e
+o "fechar" quando ela acaba de vez. A fala de fundo fica contida: silencio,
+hesitacoes e so cortesia nao fazem nada nem gastam a janela; com o cerebro,
+ele pode responder que a frase nao era para o jarvis; no recurso, uma frase
+sem intencao ou uma pergunta geral que nao e dita como pergunta ao jarvis
+tambem nao; o que tem
 efeito continua a precisar do recap e do "sim". A tecla e a palavra de
 ativacao funcionam sempre (a palavra dita dentro da janela sai do texto).
 
@@ -80,9 +92,16 @@ fala continuam ignoradas; "calar" ou "dormir" com a palavra de ativacao nao
 acordam e ouvem uma vez como se acorda.
 
 Avisos (`jarvis.avisos`): a sessao de um projeto acabou ou esta a espera do
-utilizador (hooks do Claude Code, pelo IPC do canal), ou um run FORJA terminou
-ou bloqueou (sondagem de `core status`). Cada aviso e uma frase fixa com o
-nome do projeto, dita quando o jarvis esta livre, nunca por cima de ninguem.
+utilizador (hooks do Claude Code, pelo IPC do canal), um run FORJA terminou
+ou bloqueou (sondagem de `core status`), ou a resposta de um projeto chegou a
+meio da conversa (essa nunca e dita: o texto fica so no ecra e no log). Os
+avisos ficam numa fila e nunca sao ditos com a conversa ativa: um turno do
+cerebro, a voz a falar, um recap pendente, uma janela de conversa ou de
+seguimento aberta, ou o utilizador a falar. Com a conversa ativa, o cerebro
+leva-os uma unica vez como dados (NOTICES) na mensagem seguinte e pela
+ferramenta `avisos_pendentes`, e menciona-os quando for natural; um aviso
+passado ao cerebro nunca e dito. Os que sobram sao ditos juntos, numa frase
+curta, depois de `[cerebro] espera_dos_avisos_s` sem conversa.
 
 Depois de o recap ser dito (e de cada recap corrigido ou pergunta repetida),
 o jarvis abre no ouvido uma escuta sem palavra de ativacao ate ao fim do prazo
@@ -98,7 +117,7 @@ cada frase: o primeiro sinal de vida (fim da fala -> linha A PENSAR, com o
 texto ja transcrito) e o inicio da resposta falada (fim da fala -> primeiro
 bloco de audio da resposta ou do recap). Quando o ouvido sabe o ultimo chunk
 com voz (o fim verdadeiro da fala, antes do silencio que fecha a frase), a
-frase escreve-o tambem, e a resposta falada e a resposta a uma pergunta geral
+frase escreve-o tambem, e a resposta falada e a resposta do cerebro
 medem-se a partir dele (`scripts/sessao_naturalidade.py` le essas linhas).
 
 Silencio: Ctrl+C, fechar a janela e "cala-te" passam todos por
@@ -115,14 +134,14 @@ log) e a frase segue como o pedido seguinte, sem palavra de ativacao.
 Durante o recap, um "sim" dito por cima nao envia nada: o recap acaba e o
 "sim" diz-se depois, como sempre; outra resposta ("aborta", "nao, muda X
 para Y") para o recap e responde-lhe. Um aviso interrompido nao se repete.
-Uma resposta geral interrompida deixa de se dizer, mas continua a chegar e
-aparece inteira no ecra.
+Uma resposta do cerebro interrompida deixa de se dizer, mas continua a chegar
+e aparece inteira no ecra.
 
-Nada disto envia texto para fora do PC antes do "sim", com uma excecao: as
-perguntas gerais saem do PC sem "sim" (so leem, nao fazem nada) para o
-Claude Code com pesquisa na web, e gastam quota da subscricao Claude. Pedidos
-de dinheiro ou de bolsa sao recusados antes de sair. O interprete corre no
-Ollama local e o canal so recebe o prompt que o utilizador confirmou.
+Nada disto executa nada antes do "sim". As frases que nao sao do caminho
+rapido vao ao cerebro sem "sim" (conversar e pesquisar na web nao tem
+efeitos) e gastam quota da subscricao Claude. Pedidos de dinheiro ou de bolsa
+sao recusados antes de sair. O interprete corre no Ollama local e o canal so
+recebe o prompt que o utilizador confirmou.
 
 Uso:
 
@@ -158,8 +177,22 @@ from typing import Callable, Iterable, Protocol
 from jarvis import acoes_locais, conversa, sinais, voz
 from jarvis.adaptacao import criar_adaptacao
 from jarvis.audio_util import RAIZ, garantir_pasta
-from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns
+from jarvis.avisos import DESCARTADO, FALADO, OCUPADO, SO_ECRA, Aviso, Avisos, VigiaDosRuns, frase_agrupada
 from jarvis.bolinha import LigacaoABolinha, PonteDaBolinha
+from jarvis.cerebro import Cerebro, ResultadoDoTurno, e_marca_nao_dirigida
+from jarvis.cerebro_mcp import (
+    FICHEIRO_IPC_DO_CEREBRO,
+    NOMES_PARA_O_CEREBRO,
+    PROPOSTA_A_ESPERA,
+    PROPOSTA_INDISPONIVEL,
+    PROPOSTA_OCUPADA,
+    CentralDoCerebro,
+    FerramentasComEfeito,
+    FerramentasDeLeitura,
+    PropostaDoCerebro,
+    executor_das_ferramentas,
+    servidor_para_o_cerebro,
+)
 from jarvis.config import CAMINHO_CONFIG_PADRAO, Config, ConfigDescoberta, ConfigError, carregar_config
 from jarvis.confirmacao import (
     INTENCAO_ESQUECER_FACTO,
@@ -185,12 +218,11 @@ from jarvis.interprete import (
     INTENCAO_PERGUNTA_GERAL,
     INTENCAO_RECUSADA,
     INTENCAO_SOCIAL,
-    INTENCOES_COM_PROJETO,
     Interpretacao,
     Interprete,
-    comando_de_memoria,
     limpar_texto,
     medir_vram,
+    pedido_financeiro,
     projetos_mencionados,
     sem_palavra_de_ativacao,
     so_cortesia,
@@ -225,17 +257,14 @@ from jarvis.memoria import (
     CadernoDeFactos,
     FactoRecusado,
     FrasesRecentes,
-    HistoricoDePerguntas,
     contexto_do_interprete,
     facto_mais_parecido,
     recusa_do_facto,
     texto_do_facto,
 )
-from jarvis.pergunta_geral import Consulta, PerguntasGerais
 from jarvis.persona import CASO_SOCIAL, ClienteOllamaEmFluxo, Persona, Variantes
 from jarvis.projetos import com_projetos_descobertos
 from jarvis.resposta_falada import (
-    FRASES_DE_RECURSO,
     MAXIMO_ABSOLUTO_FALADO,
     ResumoEmFluxo,
     cortar_no_limite,
@@ -258,12 +287,34 @@ LIMITE_DO_ARRANQUE_S = 30.0
 #: Codigo de saida quando outro jarvis com o microfone ja esta aberto.
 CODIGO_OUTRA_INSTANCIA = 3
 
-#: Uma pergunta geral cuja primeira frase nao esteja pronta ao fim disto leva
-#: antes um aviso curto ("One sec.").
+#: Uma resposta do cerebro cuja primeira frase nao esteja pronta ao fim disto
+#: leva antes um aviso curto ("One sec.").
 ESPERA_DO_AVISO_S = 1.0
-#: Enquanto a resposta a uma pergunta geral se diz aos bocados, cada espera
+#: Enquanto a resposta do cerebro se diz aos bocados, cada espera
 #: pela vez (frases por tratar passam a frente) verifica o cancelamento a este ritmo.
 PASSO_DA_ESPERA_DA_VEZ_S = 0.05
+
+#: Uma resposta do cerebro sem nenhuma frase ao fim disto, com uma pesquisa
+#: na web a correr, leva um segundo aviso curto ("Still looking.").
+ESPERA_DO_SEGUNDO_AVISO_S = 8.0
+#: O ritmo a que a thread da resposta do cerebro olha para o segundo aviso.
+PASSO_DO_SEGUNDO_AVISO_S = 0.05
+#: Falhas seguidas do cerebro que o poem de parte (as frases passam ao interprete local).
+FALHAS_SEGUIDAS_DO_CEREBRO = 2
+#: Desfechos do cerebro que o poem logo de parte: nao arranca, sem quota, sem sessao iniciada.
+CEREBRO_EM_BAIXO = frozenset({"indisponivel", "rate_limit", "autenticacao"})
+#: O desfecho de um pedido do cerebro, na mensagem seguinte a ele (EVENTS).
+DESFECHOS_DA_ACAO_DO_CEREBRO = {
+    "cancelado": "cancelled",
+    "expirado": "expired",
+    "falhou": "failed",
+    "recusado": "refused",
+    "ocupado": "busy",
+    "nao_percebido": "failed",
+}
+#: Com o cerebro ativo, so estes comandos da lista branca do router ficam no
+#: caminho rapido (so regras, sem cerebro nem interprete).
+RAPIDAS_COM_CEREBRO = {"horas_e_data": "horas", "calar": "calar", "adormecer": "dormir", "acordar": "acordar"}
 
 #: Frases ja transcritas a espera de vez. Cheia, a frase nova e descartada
 #: com uma linha no log (nunca cresce sem limite).
@@ -347,10 +398,11 @@ _TEXTOS = {
         "sem_resposta": "Não recebi resposta do {projeto}. Os detalhes estão no ecrã.",
         "conversa_fim": "Saí da conversa.",
         "a_verificar": ("Deixa-me ver.", "Um segundo.", "Vou ver.", "Já vejo."),
+        "ainda_a_ver": ("Ainda estou a ver.", "Quase lá."),
+        "cerebro_em_baixo": "Não consigo falar com o Claude agora; fico pelo básico por uns minutos.",
         "pergunta_falhou": "Não consegui obter resposta a isso.",
         "pergunta_falhou_a_meio": "Desculpa, perdi o resto da resposta.",
-        "pergunta_recusada": "Isso não faço por voz: pedidos de dinheiro ou de bolsa ficam de fora.",
-        "sem_perguntas": "As perguntas gerais não estão disponíveis.",
+        "sem_perguntas": "Sem o Claude não consigo responder a perguntas gerais.",
         "cortesia": "Está bem.",
         "um_momento": "Um momento.",
         "social_como_estas": "Estou bem, obrigado por perguntares.",
@@ -406,20 +458,20 @@ _TEXTOS = {
         ),
         "conversa_fim": ("Left the conversation.", "Okay, conversation closed.", "Alright, I'm out of the conversation."),
         "a_verificar": ("One sec.", "Let me see.", "Let me look.", "Give me a second."),
+        "ainda_a_ver": ("Still looking.", "Nearly there.", "Still searching."),
+        "cerebro_em_baixo": (
+            "I can't reach Claude right now, so I'll keep to the basics for a bit.",
+            "Claude isn't reachable at the moment; I'll stick to the basics for now.",
+        ),
         "pergunta_falhou": (
             "Sorry, I couldn't find an answer to that.",
             "No luck with that one, sorry.",
             "I couldn't get an answer to that, sorry.",
         ),
         "pergunta_falhou_a_meio": ("Sorry, I lost the rest of that.", "Sorry, the rest of that got lost."),
-        "pergunta_recusada": (
-            "Sorry, I don't do money and trading requests by voice.",
-            "Money and trading requests are off limits for me.",
-            "I never do money and trading requests by voice.",
-        ),
         "sem_perguntas": (
-            "I can't answer general questions right now.",
-            "General questions aren't available at the moment.",
+            "I can't answer general questions without Claude.",
+            "General questions need Claude, and I can't reach it right now.",
         ),
         "cortesia": ("Okay.", "Sure.", "Alright.", "No problem."),
         "um_momento": ("One moment.", "Just a moment.", "Hang on a second."),
@@ -1045,10 +1097,124 @@ class _FalaAtual:
     """O que a voz esta a dizer agora, para uma interrupcao saber o que parou."""
 
     texto: str
-    #: A pergunta geral de que esta fala e parte, ou None.
-    consulta: Consulta | None = None
+    #: O turno do cerebro de que esta fala e parte, ou None.
+    consulta: "_ConsultaDoCerebro | None" = None
     #: Parada de vez por fala a serio dita por cima.
     interrompida: bool = False
+
+
+class _AcaoDoCerebro:
+    """Um pedido com efeito do cerebro, desde a ferramenta ate ao desfecho (so por identidade)."""
+
+    def __init__(self, proposta: PropostaDoCerebro, projeto_assumido: bool) -> None:
+        self.proposta = proposta
+        #: O utilizador nao disse o projeto nesta frase: o recap diz qual e.
+        self.projeto_assumido = projeto_assumido
+        self.fechada = False
+
+
+@dataclass(frozen=True)
+class _RespostaDoCerebro:
+    """O desfecho de um turno do cerebro, na forma que a fala em fluxo usa."""
+
+    estado: str
+    texto: str
+    motivo: str
+    duracao_s: float
+    #: O resultado completo do cerebro (tokens, usos da web); None se nao chegou a correr.
+    turno: ResultadoDoTurno | None = None
+
+    @property
+    def respondida(self) -> bool:
+        return self.estado == "respondida"
+
+
+#: Como cada desfecho do cerebro e tratado na conversa. A recusa financeira ja
+#: vem como texto da resposta, por isso diz-se como uma resposta.
+_ESTADOS_DO_CEREBRO = {
+    "respondido": "respondida",
+    "recusado": "respondida",
+    "cancelado": "cancelada",
+    "tempo_esgotado": "tempo_esgotado",
+}
+
+
+class _ConsultaDoCerebro:
+    """Um turno do cerebro, dito frase a frase pela fala em fluxo (`Jarvis._consultar`).
+
+    Cancelar so desiste deste turno (o cerebro ve-o no passo seguinte); um
+    turno novo nunca e cancelado por um antigo.
+    """
+
+    def __init__(self, cerebro: Cerebro, frase: str, *, sem_ativacao: bool = False) -> None:
+        self.cerebro = cerebro
+        #: A frase tal como foi transcrita (o recurso do interprete tambem a usa).
+        self.pergunta = frase
+        #: Ouvida sem palavra de ativacao nem tecla: pode nao ser para o jarvis.
+        self.sem_ativacao = sem_ativacao
+        #: Posto quando o cerebro comeca a usar a web neste turno.
+        self.web = threading.Event()
+        #: O aviso curto ja foi dito na thread da frase.
+        self.aviso_dito = False
+        self._cancelamento = threading.Event()
+        self._trinco = threading.Lock()
+
+    @property
+    def cancelada(self) -> bool:
+        return self._cancelamento.is_set()
+
+    def cancelar(self) -> bool:
+        """Desiste do turno. Devolve True se ainda nao estava cancelado."""
+        with self._trinco:
+            ja = self._cancelamento.is_set()
+            self._cancelamento.set()
+        return not ja
+
+    def correr(self, ao_texto: Callable[[str], object] | None = None) -> _RespostaDoCerebro:
+        if self.cancelada:
+            return _RespostaDoCerebro("cancelada", "", "cancelado antes de comecar", 0.0)
+        turno = self.cerebro.turno(
+            self.pergunta,
+            ao_texto,
+            sem_ativacao=self.sem_ativacao,
+            cancelamento=self._cancelamento,
+            ao_usar_a_web=self.web.set,
+        )
+        estado = _ESTADOS_DO_CEREBRO.get(turno.estado, "falhou")
+        return _RespostaDoCerebro(estado, turno.texto, turno.motivo, turno.duracao_s, turno)
+
+
+def resumo_do_turno_do_cerebro(resultado: _RespostaDoCerebro | None, lingua: str) -> str:
+    """A linha do log de um turno do cerebro: desfecho, pesquisa web, tokens e o texto dito."""
+    turno = resultado.turno if resultado is not None else None
+    if turno is None:
+        motivo = resultado.motivo if resultado is not None else "erro"
+        return f"cerebro | {resultado.estado if resultado is not None else 'falhou'} ({motivo}) | intencao=cerebro"
+    uso = turno.uso or {}
+    tokens = " ".join(
+        f"{nome}={uso[campo]}"
+        for campo, nome in (
+            ("input_tokens", "input"),
+            ("cache_read_input_tokens", "cache_read"),
+            ("cache_creation_input_tokens", "cache_creation"),
+            ("output_tokens", "output"),
+        )
+        if campo in uso
+    )
+    pesquisas = uso.get("web_search_requests")
+    web = f"sim ({turno.usos_web} uso(s)" + (f", {pesquisas} pesquisa(s)" if pesquisas is not None else "") + ")"
+    primeiro = "?" if turno.primeiro_texto_s is None else f"{turno.primeiro_texto_s * 1000:.0f} ms"
+    linha = (
+        f"cerebro | {turno.estado} em {turno.duracao_s:.1f} s ({turno.motivo}) | intencao=cerebro "
+        f"| pesquisa web: {web if turno.usos_web else 'nao'} | tokens: {tokens or '?'} "
+        f"| contexto: {turno.contexto_tokens if turno.contexto_tokens is not None else '?'} tokens "
+        f"| primeiro texto: {primeiro}"
+        + (" | sessao nova" if turno.sessao_nova else "")
+        + (f" (antes: {turno.renovacao})" if turno.renovacao else "")
+    )
+    if turno.texto:
+        linha += f": {rotulo_da_origem(lingua)} {turno.texto!r}"
+    return linha
 
 
 class Jarvis:
@@ -1067,7 +1233,6 @@ class Jarvis:
         interprete: Interprete,
         canal: CanalParaSessoes | None = None,
         forja: ForjaPorVoz | None = None,
-        perguntas: PerguntasGerais | None = None,
         falar: Callable[[str], voz.ResultadoFala] = _falar_com_som,
         calar: Callable[..., voz.ResultadoSilencio] = voz.calar_agora,
         pausar: Callable[[], float | None] = voz.pausar_agora,
@@ -1080,24 +1245,35 @@ class Jarvis:
         avisos: Avisos | None = None,
         janela_de_conversa_s: float = conversa.JANELA_S,
         sons: Callable[[str], object] | None = None,
-        historico: HistoricoDePerguntas | None = None,
         caderno: CadernoDeFactos | None = None,
         frases_recentes: FrasesRecentes | None = None,
         espera_do_aviso_s: float = ESPERA_DO_AVISO_S,
         aleatorio: random.Random | None = None,
         persona: Persona | None = None,
         interromper: bool | None = None,
+        cerebro: Cerebro | None = None,
     ) -> None:
         self.config = config
         self.log = log
         self.interprete = interprete
+        #: O cerebro de conversa; None: todas as frases seguem pelo interprete local.
+        self.cerebro = cerebro
+        #: O IPC das ferramentas do cerebro (lado do jarvis); None sem ferramentas do jarvis.
+        self.central_do_cerebro: CentralDoCerebro | None = None
+        #: Com o cerebro posto de parte (falhou), ate quando as frases seguem pelo interprete.
+        self._cerebro_de_parte_ate: float | None = None
+        #: Falhas seguidas do cerebro (volta a zero numa resposta).
+        self._falhas_do_cerebro = 0
+        #: A frase "nao consigo falar com o Claude" ja foi dita (ate o cerebro voltar a responder).
+        self._recurso_avisado = False
+        #: Com o cerebro, o interprete nao e aquecido no arranque: a primeira frase que o usa carrega-o.
+        self._interprete_por_carregar = cerebro is not None
+        #: Sem frase da resposta do cerebro ao fim disto, com pesquisa na web, o segundo aviso.
+        self.espera_do_segundo_aviso_s = ESPERA_DO_SEGUNDO_AVISO_S
         # Com o modelo do interprete a carregar, o jarvis diz "um momento".
         self.interprete.ao_demorar = self._avisar_demora
         self.canal = canal
         self.forja = forja
-        self.perguntas = perguntas
-        #: As ultimas perguntas gerais respondidas (so em RAM, com teto e prazo).
-        self.historico = historico if historico is not None else HistoricoDePerguntas.da_config(config.memoria)
         #: O caderno de factos; None: os comandos de factos dizem que nao esta disponivel.
         self.caderno = caderno
         #: As ultimas frases interpretadas e o que o jarvis fez com elas, para
@@ -1129,8 +1305,24 @@ class Jarvis:
             relogio=relogio,
             persona=persona,
         )
-        #: Avisos por voz (sessao acabou ou a espera, run FORJA mudou).
-        self.avisos = avisos or Avisos(self._entregar_aviso, lingua=self.lingua, escrever=self.log.linha)
+        # O desfecho de um recap pedido pelo cerebro volta para ele como dado.
+        self.confirmacao.ao_fechar = self._acao_do_cerebro_fechada
+        # Com o cerebro ativo, uma correcao ao recap nunca carrega o interprete local.
+        self.confirmacao.llm_na_correcao = self._llm_na_correcao
+        #: O pedido com efeito do cerebro, da ferramenta ao desfecho; None sem nenhum.
+        self._acao_do_cerebro: _AcaoDoCerebro | None = None
+        self._tranca_da_acao = threading.Lock()
+        #: Avisos por voz (sessao acabou ou a espera, run FORJA mudou, resposta a meio da conversa).
+        self.avisos = avisos or Avisos(
+            self._entregar_aviso, lingua=self.lingua, escrever=self.log.linha, relogio=relogio
+        )
+        #: Sem conversa ha este tempo, os avisos em fila sao ditos juntos.
+        self.espera_dos_avisos_s = config.cerebro.espera_dos_avisos_s
+        #: A ultima vez que se viu conversa (fala, turno, recap, janela); None: ainda nenhuma.
+        self._atividade_em: float | None = None
+        if cerebro is not None:
+            # Com a conversa ativa, os avisos em fila vao na mensagem seguinte ao cerebro.
+            cerebro.avisos = self.avisos
         #: Sondagem dos runs FORJA, ligada por `main` quando ha [forja].
         self.vigia: VigiaDosRuns | None = None
         #: Janela de escuta de uma conversa com o Claude (mesmo relogio das frases).
@@ -1172,15 +1364,10 @@ class Jarvis:
         self._silencios = 0
         #: A linha de estado ainda tem de dizer que a escuta fechou.
         self._escuta_fechou = False
-        #: A janela de seguimento aberta por uma resposta geral que acabou numa
-        #: pergunta: a frase dita nela continua a pergunta geral. So vale
-        #: enquanto for a mesma janela (`seguimento.atual`); qualquer fala
-        #: nova, silencio ou pedido fecha-a e ela deixa de contar.
-        self._continuacao: conversa.EstadoDaJanela | None = None
-        #: A pergunta geral em curso e a thread que espera pela resposta. So a
-        #: consulta mais recente pode ser dita.
+        #: O turno do cerebro em curso e a thread que espera pela resposta. So o
+        #: turno mais recente pode ser dito.
         self._tranca_da_pergunta = threading.Lock()
-        self._consulta: Consulta | None = None
+        self._consulta: _ConsultaDoCerebro | None = None
         self._fio_da_pergunta: threading.Thread | None = None
         #: Sem a primeira frase da resposta ao fim disto, diz-se o aviso curto.
         self.espera_do_aviso_s = espera_do_aviso_s
@@ -1197,9 +1384,9 @@ class Jarvis:
         self._fala_atual: _FalaAtual | None = None
         self._interrupcoes_pendentes = 0
         self._voz_pausada_em: float | None = None
-        #: Uma pergunta geral cuja resposta foi interrompida: continua a chegar
-        #: so para o ecra; nunca mais e dita.
-        self._consulta_largada: Consulta | None = None
+        #: Um turno do cerebro cuja resposta foi interrompida: continua a chegar
+        #: so para o ecra; nunca mais e dito.
+        self._consulta_largada: _ConsultaDoCerebro | None = None
 
     # -- textos
 
@@ -1250,6 +1437,17 @@ class Jarvis:
                 canal.fechar()
             except Exception as erro:  # noqa: BLE001 - fechar nunca levanta
                 self.log.linha(f"canal | erro ao fechar: {erro!r}")
+        if self.cerebro is not None:
+            try:
+                self.cerebro.fechar()
+            except Exception as erro:  # noqa: BLE001 - fechar nunca levanta
+                self.log.linha(f"cerebro | erro ao fechar: {erro!r}")
+        central, self.central_do_cerebro = self.central_do_cerebro, None
+        if central is not None:
+            try:
+                central.parar()
+            except Exception as erro:  # noqa: BLE001 - fechar nunca levanta
+                self.log.linha(f"cerebro | erro ao fechar o IPC das ferramentas: {erro!r}")
 
     def ligar_bolinha(self, ponte: PonteDaBolinha) -> None:
         """A bolinha passa a seguir o painel, a escuta, o recap e a voz."""
@@ -1496,6 +1694,7 @@ class Jarvis:
             self._tratar(*item)
 
     def _concluir(self) -> None:
+        self._marcar_atividade()
         with self._condicao:
             self._pendentes -= 1
             self.frases_concluidas += 1
@@ -1547,8 +1746,6 @@ class Jarvis:
             gatilho = "resposta ao recap (escuta sem palavra de ativacao)"
         elif frase.gatilho == GATILHO_JANELA and self.janela.aberta():
             gatilho = "janela de conversa (sem palavra de ativacao)"
-        elif frase.gatilho == GATILHO_JANELA and self._na_continuacao(frase):
-            gatilho = "escuta de seguimento depois de uma pergunta geral (sem palavra de ativacao)"
         elif frase.gatilho == GATILHO_JANELA:
             gatilho = "escuta de seguimento (sem palavra de ativacao)"
         else:
@@ -1590,6 +1787,7 @@ class Jarvis:
             else:
                 self._acordar_com_pedido(registo)
 
+        com_cerebro = self._cerebro_ativo()
         if acordar_pela_palavra:
             registo.marcar(3, "palavra de ativacao seguida de um acordar curto (nada interpretado)")
             desfecho = self._decidir(
@@ -1616,26 +1814,28 @@ class Jarvis:
             medida.intencao = INTENCAO_CORTESIA if so_cortesia(frase.texto) else "ruido"
             registo.marcar(3, "escuta de seguimento: so hesitacoes ou cortesia (nada interpretado, nada dito)")
             desfecho = Desfecho("ignorado", "ruido na janela de seguimento")
-        elif rapida is None and self._continua_a_pergunta(frase, registo):
-            desfecho = self._continuar_a_pergunta(frase, registo, medida)
         elif rapida is None and self.confirmacao.e_correcao_sem_pedido(frase.texto):
             # "nao, muda X para Y" sem nada a espera nao vira um ditado novo.
             registo.marcar(3, "correcao sem nenhum pedido pendente (nada interpretado)")
             self._consumir_seguimento()
             desfecho = self.confirmacao.correcao_sem_pedido()
-        elif rapida is None and so_cortesia(frase.texto):
+        elif rapida is None and so_cortesia(frase.texto) and (not com_cerebro or self._pergunta_a_caminho()):
             # "Excellent.", "Yeah." soltos: nada a pedir, nunca vao ao LLM nem
             # ao Claude, e nao cortam uma resposta que ainda esteja a caminho.
+            # Com o cerebro e nada a caminho, a cortesia e conversa: vai a ele.
             medida.intencao = INTENCAO_CORTESIA
             registo.marcar(3, "so cortesia fora de um recap ou de uma conversa (nada interpretado)")
             self._consumir_seguimento()
             desfecho = self._decidir(Interpretacao(frase.texto, INTENCAO_CORTESIA, None, "", "regra", "so cortesia"))
+        elif com_cerebro:
+            desfecho = self._com_o_cerebro(frase, registo, medida, rapida)
         else:
             # Ouvida sem palavra de ativacao nem tecla: pode ser conversa a volta,
             # por isso so gasta a janela (e cancela o resto) se for um pedido.
             de_fundo = rapida is None and self._so_pela_escuta_de_seguimento(frase)
             if not de_fundo:
                 self._tomar_o_pedido(rapida)
+                self._avisar_do_recurso(frase.texto)
             contexto = contexto_do_interprete(frase.texto, self.frases_recentes, self.caderno)
             interpretacao = self._interpretar(frase.texto, contexto)
             medida.intencao, medida.projeto = interpretacao.intencao, interpretacao.projeto
@@ -1768,8 +1968,8 @@ class Jarvis:
 
     def _terminar_escuta(self, motivo: str) -> None:
         """A escuta sem palavra de ativacao acaba sem continuar: fecha e toca "fechar"."""
+        self._marcar_atividade()
         self.seguimento.fechar()
-        self._continuacao = None
         self._fechar_escuta()
         para, self._escuta_de = self._escuta_de, None
         if para is None:
@@ -1780,104 +1980,14 @@ class Jarvis:
 
     def _consumir_seguimento(self) -> None:
         """Um pedido tomado gasta a janela de seguimento (a resposta dele pode abrir outra)."""
-        self._continuacao = None
         if self.seguimento.fechar() is not None:
             self._fechar_escuta()
-
-    # -- continuacao de uma pergunta geral que acabou numa pergunta
-
-    def _na_continuacao(self, frase: Frase) -> bool:
-        """A frase comecou na janela de seguimento aberta por uma resposta geral que acabou numa pergunta.
-
-        So a mesma janela conta: uma fala nova (outra resposta, um aviso, o
-        recap) fecha-a e abre outra, e uma frase que comecou antes dessa nao
-        e aceite por ela.
-        """
-        continuacao = self._continuacao
-        return (
-            continuacao is not None
-            and continuacao is self.seguimento.atual
-            and self.seguimento.aceita(frase.inicio_da_escuta)
-        )
-
-    def _continua_a_pergunta(self, frase: Frase, registo: RegistoDaFrase) -> bool:
-        """A frase dita na janela continua a pergunta geral, salvo as excecoes que passam a frente.
-
-        Calar, dormir e acordar ja passaram antes (`_acao_rapida`). Aqui ficam
-        de fora: so cortesia ("Thank you."), um comando da memoria ("new
-        conversation") e um comando local da lista branca dito inteiro ("what
-        time is it"). Um projeto nomeado decide-se em `_continuar_a_pergunta`.
-        """
-        if not self._na_continuacao(frase):
-            return False
-        texto = frase.texto
-        if not conversa.limpar_resposta(texto, self.lingua):
-            return False
-        if so_cortesia(texto) and not conversa.responde_a_pergunta(texto):
-            excecao = "so cortesia"
-        elif comando_de_memoria(sem_palavra_de_ativacao(limpar_texto(texto))) is not None:
-            excecao = "comando da memoria"
-        elif self._comando_local(texto):
-            excecao = "comando local da lista branca"
-        else:
-            return True
-        registo.nota(f"continuacao da pergunta geral: nao ({excecao}); segue o caminho normal")
-        return False
-
-    def _comando_local(self, texto: str) -> bool:
-        try:
-            return encaminhar(texto, self.config).tipo == "local"
-        except Exception:  # noqa: BLE001 - na duvida, continua a pergunta
-            return False
-
-    def _continuar_a_pergunta(
-        self, frase: Frase, registo: RegistoDaFrase, medida: MedidaDaFrase
-    ) -> Desfecho | None:
-        """A frase continua a pergunta geral, com a memoria da conversa recente.
-
-        Nunca vai as intencoes de projeto nem pergunta "Which project?". So uma
-        frase que nomeia um projeto conhecido E que o interprete le como um
-        pedido a esse projeto (ditado, estado, ...) segue o caminho normal.
-        """
-        self._consumir_seguimento()
-        self._cancelar_pergunta("pedido novo")
-        nomes = self._nomes_de_projeto()
-        interpretacao: Interpretacao | None = None
-        if projetos_mencionados(conversa.limpar_resposta(frase.texto, self.lingua), nomes):
-            contexto = contexto_do_interprete(frase.texto, self.frases_recentes, self.caderno)
-            lida = self._interpretar(frase.texto, contexto)
-            if lida.intencao in INTENCOES_COM_PROJETO and lida.projeto:
-                registo.marcar(
-                    3,
-                    f"continuacao da pergunta geral: nao, a frase nomeia o projeto {lida.projeto} | "
-                    + self._detalhe_da_interpretacao(lida),
-                )
-                interpretacao = lida
-        if interpretacao is None:
-            interpretacao = conversa.pergunta_de_seguimento(frase.texto, nomes, lingua=self.lingua)
-            registo.marcar(
-                3,
-                "continuacao da pergunta geral (a resposta anterior acabou numa pergunta; "
-                "sem intencoes de projeto) | " + self._detalhe_da_interpretacao(interpretacao),
-            )
-        medida.intencao, medida.projeto = interpretacao.intencao, interpretacao.projeto
-        desfecho = self._decidir(interpretacao)
-        self._lembrar_frase(interpretacao, desfecho)
-        return desfecho
-
-    def _abrir_continuacao(self, falado: str) -> None:
-        """A resposta geral dita acabou numa pergunta: a janela de seguimento que ela abriu continua-a."""
-        janela = self.seguimento.atual
-        if janela is None or not conversa.acaba_em_pergunta(falado):
-            return
-        self._continuacao = janela
-        self.log.linha("seguimento | a resposta acabou numa pergunta: a frase seguinte continua a pergunta geral")
 
     def _tomar_o_pedido(self, rapida: str | None) -> None:
         """Uma frase que e um pedido fecha a conversa e a janela de seguimento, e cancela o que ja nao conta."""
         self._fechar_conversa(f"'{rapida}' dito" if rapida else "frase fora da janela")
         self._consumir_seguimento()
-        # Um pedido novo: a resposta de uma pergunta anterior ja nao se diz.
+        # Um pedido novo: a resposta anterior do cerebro ja nao se diz.
         self._cancelar_pergunta("pedido novo")
         if self.confirmacao.a_espera and rapida == "dormir":
             self._desfecho_do_recap(self.confirmacao.cancelar("o jarvis foi dormir"))
@@ -1917,8 +2027,6 @@ class Jarvis:
             return False
         if not conversa.limpar_resposta(frase.texto, self.lingua):
             return True
-        if self._na_continuacao(frase) and conversa.responde_a_pergunta(frase.texto):
-            return False  # "Yes." e a resposta a pergunta com que a resposta geral acabou
         return so_cortesia(frase.texto)
 
     def _assentar_escuta(self, *, seguimento: bool = True) -> None:
@@ -1958,17 +2066,16 @@ class Jarvis:
         elif self.seguimento.aberta() and self._reabrir_seguimento():
             return
         if self._escuta_de is not None and self._pergunta_a_caminho():
-            # A resposta a uma pergunta geral ainda vem e reabre a escuta quando
-            # for dita: a conversa continua, sem som de fecho nem de abertura.
+            # A resposta do cerebro ainda vem e reabre a escuta quando for
+            # dita: a conversa continua, sem som de fecho nem de abertura.
             self.seguimento.fechar()
-            self._continuacao = None
             self._fechar_escuta()
-            self.log.linha("escuta | em pausa ate a resposta da pergunta geral ser dita")
+            self.log.linha("escuta | em pausa ate a resposta do cerebro ser dita")
             return
         self._terminar_escuta("nada a continuar")
 
     def _pergunta_a_caminho(self) -> bool:
-        """Ha uma pergunta geral cuja resposta ainda vai ser dita por outra thread."""
+        """Ha um turno do cerebro cuja resposta ainda vai ser dita por outra thread."""
         with self._tranca_da_pergunta:
             consulta, fio = self._consulta, self._fio_da_pergunta
         return (
@@ -2043,8 +2150,37 @@ class Jarvis:
 
     # -- avisos
 
-    def _entregar_aviso(self, aviso: Aviso) -> str:
-        """Diz um aviso da fila se ninguem estiver a falar nem a espera; senao, espera."""
+    def _marcar_atividade(self) -> None:
+        self._atividade_em = self.relogio()
+
+    def _em_conversa(self) -> bool:
+        """Ha conversa: o utilizador a falar, uma frase ou um turno a caminho, a voz, um recap ou uma janela.
+
+        Enquanto houver, a hora da ultima conversa vai-se atualizando.
+        """
+        ativa = (
+            self._alguem_a_falar()
+            or self._pergunta_a_caminho()
+            or self._tranca_da_voz.locked()
+            or self.confirmacao.a_espera
+            or self.janela.aberta()
+            or self.seguimento.aberta()
+        )
+        if ativa:
+            self._marcar_atividade()
+        return ativa
+
+    def _sem_conversa_ha(self) -> float | None:
+        """Ha quantos segundos nao ha conversa (None com ela ativa; infinito se nunca houve)."""
+        if self._em_conversa():
+            return None
+        if self._atividade_em is None:
+            return float("inf")
+        return self.relogio() - self._atividade_em
+
+    def _entregar_aviso(self, grupo: "Aviso | Iterable[Aviso]") -> str:
+        """Diz os avisos da fila numa frase so, sem conversa ha `espera_dos_avisos_s`; senao, espera."""
+        grupo = (grupo,) if isinstance(grupo, Aviso) else tuple(grupo)
         if self.estado.adormecido:
             return DESCARTADO
         if self.estado.mudo or not self.com_voz or voz.esta_calado():
@@ -2052,16 +2188,12 @@ class Jarvis:
         if not self._tranca.acquire(blocking=False):
             return OCUPADO
         try:
-            if (
-                self._alguem_a_falar()
-                or self.confirmacao.a_espera
-                or self.janela.aberta()
-                or self.seguimento.aberta()
-            ):
+            livre = self._sem_conversa_ha()
+            if livre is None or livre < self.espera_dos_avisos_s:
                 return OCUPADO
             self._local.registo = None
             self._local.medida = None
-            self._dizer(aviso.texto, abre_seguimento=False)
+            self._dizer(frase_agrupada(grupo, self.lingua), abre_seguimento=False)
             self._mostrar_repouso()
             return FALADO
         finally:
@@ -2070,11 +2202,30 @@ class Jarvis:
     def _interpretar(self, texto: str, contexto) -> Interpretacao:
         """O interprete, com o inicio e o fim da chamada guardados para os tempos da frase."""
         registo: RegistoDaFrase | None = getattr(self._local, "registo", None)
+        self._interprete_a_carregar("primeira frase")
         inicio = self.relogio()
         interpretacao = self.interprete.interpretar(texto, contexto=contexto)
         if registo is not None:
             registo.interprete = (inicio, self.relogio(), interpretacao.origem)
         return interpretacao
+
+    def _interprete_a_carregar(self, o_que: str) -> None:
+        """Escreve no log, uma vez por recurso, que o interprete local volta a ser usado."""
+        if not self._interprete_por_carregar:
+            return
+        self._interprete_por_carregar = False
+        self.log.linha(
+            f"interprete | recurso: {o_que} pelo interprete local ({self.interprete.modelo}); "
+            "nao foi aquecido, por isso carrega agora se o Ollama ainda nao o tiver"
+        )
+
+    def _llm_na_correcao(self) -> bool:
+        """Se uma correcao ao recap pode usar o LLM local: so sem o cerebro ativo."""
+        if self._cerebro_ativo():
+            self.log.linha("confirmacao | cerebro ativo: correcao so a letra, sem o interprete local")
+            return False
+        self._interprete_a_carregar("primeira correcao")
+        return True
 
     @staticmethod
     def _detalhe_da_interpretacao(interpretacao: Interpretacao) -> str:
@@ -2153,11 +2304,10 @@ class Jarvis:
         """Um comando da memoria. Guardar ou apagar um facto passa pelo recap e pelo "sim"."""
         comando = interpretacao.detalhe
         if comando == "nova_conversa":
-            quantas = self.historico.limpar()
-            # A conversa nova tambem comeca sem as frases recentes do interprete.
-            self.frases_recentes.limpar()
+            # A conversa nova comeca sem as frases recentes do interprete.
+            quantas = self.frases_recentes.limpar()
             self._frase_do_recap = None
-            self._marcar_decisao(f"memoria: conversa recente esquecida ({quantas} troca(s))")
+            self._marcar_decisao(f"memoria: conversa recente esquecida ({quantas} frase(s))")
             self._dizer(self._texto("memoria_nova_conversa"))
             return Desfecho("executado", "memoria: nova conversa")
         if self.caderno is None:
@@ -2278,7 +2428,7 @@ class Jarvis:
         *,
         aviso: bool = False,
         abre_seguimento: bool = True,
-        consulta: Consulta | None = None,
+        consulta: _ConsultaDoCerebro | None = None,
     ) -> voz.ResultadoFala | None:
         """Fala (ou mostra) uma resposta do jarvis, e regista quando comecou a soar.
 
@@ -2321,7 +2471,6 @@ class Jarvis:
             # Nunca ouvir a propria voz: fecha sem som e reabre quando ela acaba.
             self._fechar_escuta()
         self.seguimento.fechar()
-        self._continuacao = None
         silencios = self._silencios
         fala = _FalaAtual(falado, consulta)
         with self._tranca_da_voz:
@@ -2337,6 +2486,7 @@ class Jarvis:
                 with self._tranca_da_interrupcao:
                     self._fala_atual = None
                     self._voz_pausada_em = None
+                self._marcar_atividade()
         if getattr(resultado, "falou", False):
             # Interrompida por um cala-te ou um clique na bolinha: nao continua.
             if abre_seguimento and not aviso and silencios == self._silencios:
@@ -2416,7 +2566,10 @@ class Jarvis:
             self._dizer(self._com_o_projeto_assumido(pedido, resposta.falado))
             return resposta
         if intencao == INTENCAO_PERGUNTA_GERAL:
-            return self._perguntar(pedido.prompt)
+            # So o cerebro responde a perguntas gerais; aqui esta desligado ou de parte.
+            self.log.linha("pergunta geral | sem o cerebro: nada saiu do PC")
+            self._dizer(self._texto("sem_perguntas"))
+            return None
         if intencao in (INTENCAO_LEMBRAR_FACTO, INTENCAO_ESQUECER_FACTO):
             return self._gravar_facto(pedido)
         if intencao in INTENCOES_DO_CANAL and pedido.projeto:
@@ -2474,6 +2627,14 @@ class Jarvis:
         if self.estado.adormecido or not falar:
             return
         with self._tranca:
+            if self._em_conversa():
+                # Nunca corta a conversa: o texto ja esta no ecra e no log; fica so o aviso.
+                self.log.linha(
+                    f"canal | a resposta do {projeto} chegou a meio da conversa: nao e dita; "
+                    "o texto fica no ecra e o aviso na fila"
+                )
+                self.avisos.receber_resposta(projeto, falhou=bool(erro))
+                return
             self._local.registo = None
             self._local.medida = None
             self._dizer(falar)
@@ -2488,72 +2649,377 @@ class Jarvis:
                 self._assentar_escuta()
             self._mostrar_repouso()
 
-    # -- perguntas gerais (Claude Code com pesquisa na web)
+    # -- conversa pelo cerebro (um processo claude persistente)
 
-    def _perguntar(self, pergunta: str) -> Consulta | None:
-        """Pergunta em segundo plano; a resposta e dita aos bocados por `_consultar`.
+    def aquecer_cerebro(self) -> str:
+        """Arranca o processo do cerebro no arranque; sem ele as frases seguem pelo interprete."""
+        if self.cerebro is None:
+            return "desligado ([cerebro] ativo = false)"
+        self._abrir_as_ferramentas_do_cerebro()
+        if self.cerebro.aquecer():
+            return f"processo pronto ({self.cerebro.config.modelo})"
+        self._por_de_parte("o processo nao arrancou no aquecimento")
+        return "nao arrancou; as frases seguem pelo interprete local"
 
-        So quando a primeira frase da resposta nao fica pronta em
-        `espera_do_aviso_s` o jarvis diz antes um aviso curto e variado.
-        """
-        if self.perguntas is None:
-            self.log.linha("pergunta | indisponivel: a pergunta NAO foi feita")
-            self._dizer(self._texto("sem_perguntas"))
+    def _abrir_as_ferramentas_do_cerebro(self) -> None:
+        """Abre o IPC das ferramentas do cerebro; sem ele o cerebro conversa, e as ferramentas dao erro."""
+        central = self.central_do_cerebro
+        if central is None or central.endereco is not None:
+            return
+        try:
+            central.iniciar()
+        except Exception as erro:  # noqa: BLE001 - sem ferramentas, o cerebro conversa na mesma
+            self.log.linha(
+                f"AVISO: IPC das ferramentas do cerebro por arrancar ({erro}); as ferramentas do jarvis respondem com erro"
+            )
+            return
+        self.log.linha("cerebro | ferramentas do jarvis prontas no IPC local (127.0.0.1)")
+
+    def _cerebro_ativo(self) -> bool:
+        """O cerebro existe e nao esta posto de parte; passado o intervalo, volta a ser tentado."""
+        if self.cerebro is None:
+            return False
+        ate = self._cerebro_de_parte_ate
+        if ate is None:
+            return True
+        if self.relogio() < ate:
+            return False
+        self._cerebro_de_parte_ate = None
+        self.log.linha("cerebro | passou o intervalo: a frase seguinte volta a tentar o cerebro")
+        return True
+
+    def _por_de_parte(self, motivo: str) -> None:
+        """O cerebro nao esta disponivel: as frases seguem pelo interprete durante `reintentar_s`."""
+        intervalo = self.cerebro.config.reintentar_s if self.cerebro is not None else 0.0
+        self._cerebro_de_parte_ate = self.relogio() + intervalo
+        self._falhas_do_cerebro = 0
+        self.log.linha(
+            f"cerebro | indisponivel ({motivo}): as frases seguem pelo interprete local; "
+            f"volta a ser tentado daqui a {intervalo:g} s"
+        )
+
+    def _registar_desfecho_do_cerebro(self, resultado: _RespostaDoCerebro | None) -> bool:
+        """Conta as falhas do cerebro; True quando este turno o pos de parte."""
+        estado = resultado.turno.estado if resultado is not None and resultado.turno is not None else "falhou"
+        motivo = resultado.motivo if resultado is not None else "erro"
+        if estado in ("respondido", "recusado"):
+            if self._recurso_avisado:
+                self.log.linha("cerebro | voltou a responder")
+            # O Ollama pode descarregar o interprete entretanto: o proximo recurso volta ao log.
+            self._interprete_por_carregar = True
+            self._falhas_do_cerebro = 0
+            self._recurso_avisado = False
+            return False
+        if estado == "cancelado":
+            return False
+        if estado in CEREBRO_EM_BAIXO:
+            self._por_de_parte(f"{estado}: {motivo}")
+            return True
+        self._falhas_do_cerebro += 1
+        if self._falhas_do_cerebro >= FALHAS_SEGUIDAS_DO_CEREBRO:
+            self._por_de_parte(f"{self._falhas_do_cerebro} falhas seguidas, a ultima {estado}: {motivo}")
+            return True
+        return False
+
+    def _frase_do_recurso(self) -> str:
+        """A frase curta de que o cerebro nao esta disponivel, so a primeira vez ("" depois)."""
+        if self._recurso_avisado:
+            return ""
+        self._recurso_avisado = True
+        return self._texto("cerebro_em_baixo")
+
+    def _avisar_do_recurso(self, texto: str) -> None:
+        """Uma frase que iria ao cerebro segue pelo interprete: diz uma vez que ele nao esta disponivel."""
+        if self.cerebro is None or self._pelo_caminho_rapido(texto) is not None:
+            return
+        falar = self._frase_do_recurso()
+        if falar:
+            self.log.linha("cerebro | indisponivel: a frase segue pelo interprete local (dito uma vez)")
+            self._dizer(falar, aviso=True, abre_seguimento=False)
+
+    def _pelo_caminho_rapido(self, texto: str) -> Interpretacao | None:
+        """Calar, dormir, acordar, horas/data ou a recusa financeira: so regras, sem cerebro nem interprete."""
+        literal = limpar_texto(texto or "")
+        frase = sem_palavra_de_ativacao(literal)
+        if not frase:
             return None
-        termo = self.perguntas.recusar(pergunta)
+        termo = pedido_financeiro(frase, self._nomes_de_projeto())
         if termo is not None:
-            self.log.linha(f"pergunta | recusada (pedido financeiro, '{termo}'): nada saiu do PC")
-            self._dizer(self._texto("pergunta_recusada"))
+            return Interpretacao(
+                literal,
+                INTENCAO_RECUSADA,
+                None,
+                "",
+                "regra",
+                f"pedido financeiro ('{termo}', regra financeira antes do cerebro): nunca e feito por voz",
+                termo_financeiro=termo,
+            )
+        try:
+            encaminhado = encaminhar(frase, self.config)
+        except Exception:  # noqa: BLE001 - na duvida, a frase vai ao cerebro
             return None
-        trocas = self.historico.trocas()
-        factos = self.caderno.factos_para_contexto() if self.caderno is not None else ()
-        consulta = self.perguntas.nova(pergunta, trocas=trocas, factos=factos)
+        intencao = RAPIDAS_COM_CEREBRO.get(encaminhado.nome_acao or "") if encaminhado.tipo == "local" else None
+        if intencao is None:
+            return None
+        detalhe = encaminhado.argumento if intencao == "horas" else None
+        return Interpretacao(
+            literal, intencao, None, "", "regra", f"caminho rapido: {encaminhado.motivo}", detalhe=detalhe
+        )
+
+    def _com_o_cerebro(
+        self, frase: Frase, registo: RegistoDaFrase, medida: MedidaDaFrase, rapida: str | None
+    ) -> Desfecho | None:
+        """Com o cerebro ativo: o caminho rapido so por regras, e tudo o resto vai ao cerebro."""
+        rapido = self._pelo_caminho_rapido(frase.texto)
+        if rapido is not None:
+            self._tomar_o_pedido(rapida)
+            medida.intencao = rapido.intencao
+            registo.marcar(3, self._detalhe_da_interpretacao(rapido))
+            return self._decidir(rapido)
+        # Ouvida so pela janela de seguimento: pode ser conversa a volta. A
+        # janela fica aberta e o cerebro diz se a fala era para ele.
+        sem_ativacao = rapida is None and self._so_pela_escuta_de_seguimento(frase)
+        if not sem_ativacao:
+            self._tomar_o_pedido(rapida)
+        medida.intencao = "cerebro"
+        registo.marcar(
+            3,
+            f"intencao=cerebro projeto=- origem=cerebro modelo={self.cerebro.config.modelo} llm=0 ms "
+            f"| prompt: {frase.texto!r} | motivo: fora do caminho rapido, a conversa segue pelo cerebro"
+            + (" (ouvida sem palavra de ativacao)" if sem_ativacao else ""),
+        )
+        self._marcar_decisao("conversa pelo cerebro: sem recap, nada executado")
+        self._falar_com_o_cerebro(frase.texto, sem_ativacao=sem_ativacao)
+        return Desfecho("executado", "conversa pelo cerebro")
+
+    def _falar_com_o_cerebro(self, texto: str, *, sem_ativacao: bool = False) -> _ConsultaDoCerebro:
+        """Manda a frase ao cerebro em segundo plano; a resposta e dita aos bocados por `_consultar`.
+
+        So quando a primeira frase nao fica pronta em `espera_do_aviso_s` o
+        jarvis diz antes um aviso curto (nunca numa fala ouvida sem palavra de
+        ativacao, que pode nao ser para ele).
+        """
+        assert self.cerebro is not None
+        consulta = _ConsultaDoCerebro(self.cerebro, texto, sem_ativacao=sem_ativacao)
         registo: RegistoDaFrase | None = getattr(self._local, "registo", None)
         referencia = None
         if registo is not None and registo.ultima_voz is not None:
             referencia = (registo.numero, registo.ultima_voz)
         pronta = threading.Event()
         fio = threading.Thread(
-            target=self._consultar, args=(consulta, referencia, pronta), name="jarvis-pergunta", daemon=True
+            target=self._consultar, args=(consulta, referencia, pronta), name="jarvis-cerebro", daemon=True
         )
         with self._tranca_da_pergunta:
             anterior, self._consulta = self._consulta, consulta
             self._fio_da_pergunta = fio
         if anterior is not None and anterior.cancelar():
-            self.log.linha("pergunta | a anterior foi substituida por uma nova; a resposta dela nao se diz")
+            self.log.linha("cerebro | o turno anterior foi substituido por uma frase nova; nada mais dele se diz")
         self.log.linha(
-            f"pergunta | ao Claude Code ({self.perguntas.config.modelo}, so pesquisa na web, "
-            f"limite {self.perguntas.config.limite_s:g} s, memoria: {len(trocas)} troca(s) e "
-            f"{len(factos)} facto(s)): {consulta.pergunta!r}"
+            f"cerebro | frase ao cerebro ({self.cerebro.config.modelo}"
+            + (", ouvida sem palavra de ativacao" if sem_ativacao else "")
+            + ")"
         )
         fio.start()
-        if not pronta.wait(self.espera_do_aviso_s) and not consulta.cancelada:
+        if not sem_ativacao and not pronta.wait(self.espera_do_aviso_s) and not consulta.cancelada:
             # O aviso nao abre a janela: a resposta, quando acabar, abre.
-            self.log.linha(f"pergunta | sem frase pronta em {self.espera_do_aviso_s:g} s: aviso curto")
+            self.log.linha(f"cerebro | sem frase pronta em {self.espera_do_aviso_s:g} s: aviso curto")
+            consulta.aviso_dito = True
             self._dizer(self._texto("a_verificar"), abre_seguimento=False)
         return consulta
 
+    # -- ferramentas com efeito do cerebro: so criam o recap, e so o "sim" falado executa
+
+    def propor_do_cerebro(self, proposta: PropostaDoCerebro) -> str:
+        """Uma ferramenta com efeito do cerebro (thread do IPC): reserva o recap e responde logo.
+
+        Nunca executa nada. Com outro recap pendente, do cerebro ou nao,
+        devolve `PROPOSTA_OCUPADA` e nada muda. Sem um turno do cerebro vivo
+        (cancelado por um silencio, por dormir ou por uma frase nova) devolve
+        `PROPOSTA_INDISPONIVEL`. Senao o resto desse turno deixa de ser dito e
+        o recap de sempre e dito noutra thread, na vez das frases; so um "sim"
+        falado ao jarvis o executa.
+        """
+        with self._tranca_da_acao:
+            if self._acao_do_cerebro is not None or self.confirmacao.a_espera:
+                return PROPOSTA_OCUPADA
+            with self._tranca_da_pergunta:
+                consulta = self._consulta
+            if (
+                self.cerebro is None
+                or self.estado.adormecido
+                or not isinstance(consulta, _ConsultaDoCerebro)
+                or consulta.cancelada
+            ):
+                return PROPOSTA_INDISPONIVEL
+            acao = _AcaoDoCerebro(proposta, self._projeto_assumido_pelo_cerebro(proposta.projeto, consulta))
+            self._acao_do_cerebro = acao
+        with self._condicao:
+            self._pendentes += 1
+        self._largar_o_turno_do_cerebro(consulta)
+        threading.Thread(
+            target=self._dizer_o_recap_do_cerebro, args=(acao,), name="jarvis-recap-do-cerebro", daemon=True
+        ).start()
+        return PROPOSTA_A_ESPERA
+
+    def _projeto_assumido_pelo_cerebro(self, projeto: str | None, consulta: _ConsultaDoCerebro) -> bool:
+        """O projeto do pedido nao foi dito na frase que o cerebro esta a responder."""
+        if projeto is None:
+            return False
+        frase = sem_palavra_de_ativacao(limpar_texto(consulta.pergunta))
+        return projeto not in projetos_mencionados(frase, self._nomes_de_projeto())
+
+    def _largar_o_turno_do_cerebro(self, consulta: _ConsultaDoCerebro) -> None:
+        """O turno que pediu a ferramenta com efeito acaba aqui: nada mais dele se diz."""
+        with self._tranca_da_pergunta:
+            if self._consulta is consulta:
+                self._consulta = None
+        if consulta.cancelar():
+            self.log.linha("cerebro | ferramenta com efeito: o resto deste turno nao se diz; o jarvis diz o recap")
+
+    def _dizer_o_recap_do_cerebro(self, acao: _AcaoDoCerebro) -> None:
+        """Diz o recap do pedido do cerebro pela `Confirmacao`, na vez das frases; nunca executa."""
+        try:
+            with self._tranca:
+                self._local.registo = None
+                self._local.medida = None
+                with self._tranca_da_acao:
+                    vigente = self._acao_do_cerebro is acao
+                if not vigente:
+                    return
+                if self.estado.adormecido:
+                    self._fechar_a_acao_do_cerebro(acao, "cancelled", "o jarvis foi dormir antes do recap")
+                    return
+                proposta = acao.proposta
+                interpretacao = Interpretacao(
+                    proposta.texto,
+                    proposta.intencao,
+                    proposta.projeto,
+                    proposta.texto,
+                    "regra",
+                    f"ferramenta {proposta.ferramenta} do cerebro: so o sim falado executa",
+                )
+                self.log.linha(
+                    f"cerebro | recap da ferramenta {proposta.ferramenta}"
+                    + (f" no projeto {proposta.projeto}" if proposta.projeto else "")
+                    + (" (projeto nao dito: o recap diz qual)" if acao.projeto_assumido else "")
+                    + "; nada executado antes do sim"
+                )
+                desfecho = self.confirmacao.propor_do_cerebro(
+                    interpretacao, dono=acao, projeto_assumido=acao.projeto_assumido
+                )
+                if desfecho.estado != "pendente":
+                    self._fechar_a_acao_do_cerebro(
+                        acao, DESFECHOS_DA_ACAO_DO_CEREBRO.get(desfecho.estado, "failed"), desfecho.motivo
+                    )
+                self._assentar_escuta()
+        except Exception as erro:  # noqa: BLE001 - um recap falhado nunca para o jarvis nem executa nada
+            self.log.linha(f"cerebro | ERRO no recap de uma ferramenta: {erro!r} | nada executado")
+            if self.confirmacao.pendente_de(acao):
+                self.confirmacao.cancelar("erro no recap do cerebro")
+            self._fechar_a_acao_do_cerebro(acao, "failed", "erro no recap")
+        finally:
+            self._mostrar_repouso()
+            with self._condicao:
+                self._pendentes -= 1
+                self._condicao.notify_all()
+
+    def _acao_do_cerebro_fechada(self, dono: object, desfecho: Desfecho) -> None:
+        """`Confirmacao.ao_fechar`: um recap pedido pelo cerebro deixou de estar pendente."""
+        if not isinstance(dono, _AcaoDoCerebro):
+            return
+        if desfecho.estado == "executado":
+            resultado = desfecho.resultado
+            if resultado is None or getattr(resultado, "feito", True) is False:
+                estado = "failed"
+            else:
+                estado = "sent" if dono.proposta.ferramenta == "enviar_ao_projeto" else "done"
+        else:
+            estado = DESFECHOS_DA_ACAO_DO_CEREBRO.get(desfecho.estado, "failed")
+        # Com "no, for orbita" o projeto do pedido mudou: o desfecho diz o que ficou.
+        pedido = self._pedido_do_desfecho(desfecho)
+        self._fechar_a_acao_do_cerebro(dono, estado, desfecho.motivo, pedido.projeto if pedido is not None else None)
+
+    def _fechar_a_acao_do_cerebro(
+        self, acao: _AcaoDoCerebro, estado: str, motivo: str, projeto: str | None = None
+    ) -> None:
+        """Liberta a vez de outro pedido e guarda o desfecho para a mensagem seguinte ao cerebro."""
+        with self._tranca_da_acao:
+            if acao.fechada:
+                return
+            acao.fechada = True
+            if self._acao_do_cerebro is acao:
+                self._acao_do_cerebro = None
+        proposta = acao.proposta
+        projeto = projeto or proposta.projeto
+        evento = {"tool": proposta.ferramenta, "outcome": estado}
+        if projeto:
+            evento["project"] = projeto
+        self.log.linha(
+            f"cerebro | pedido {proposta.ferramenta}"
+            + (f" no {projeto}" if projeto else "")
+            + f": {estado} ({motivo}); vai como EVENTS na mensagem seguinte ao cerebro"
+        )
+        if self.cerebro is not None:
+            self.cerebro.registar_evento(evento)
+
+    def _dizer_o_segundo_aviso(self, consulta: _ConsultaDoCerebro) -> None:
+        """A pesquisa na web demora: um segundo aviso curto, se o turno ainda for o vigente."""
+        self._esperar_a_vez(consulta)
+        with self._tranca:
+            if not self._vigente(consulta) or self.estado.adormecido:
+                return
+            self._local.registo = None
+            self._local.medida = None
+            self.log.linha(
+                f"cerebro | pesquisa na web sem frase pronta em {self.espera_do_segundo_aviso_s:g} s: segundo aviso curto"
+            )
+            self._dizer(self._texto("ainda_a_ver"), abre_seguimento=False)
+
+    def _recurso_do_interprete(self, texto: str) -> None:
+        """O cerebro caiu antes de dizer nada: a frase segue pelo caminho do interprete local."""
+        self._local.registo = None
+        self._local.medida = None
+        self.log.linha("cerebro | a frase segue pelo interprete local")
+        contexto = contexto_do_interprete(texto, self.frases_recentes, self.caderno)
+        interpretacao = self._interpretar(texto, contexto)
+        self.log.linha(f"cerebro | recurso: {self._detalhe_da_interpretacao(interpretacao)}")
+        desfecho = self._decidir(interpretacao)
+        self._lembrar_frase(interpretacao, desfecho)
+
     def _consultar(
         self,
-        consulta: Consulta,
+        consulta: _ConsultaDoCerebro,
         referencia: tuple[int, float] | None = None,
         pronta: threading.Event | None = None,
     ) -> None:
-        """Thread da pergunta: diz cada frase da resposta assim que passa o filtro.
+        """Thread do turno do cerebro: diz cada frase da resposta assim que passa o filtro.
 
-        O processo e lido noutra thread (`ler`); esta so fala, e so enquanto a
-        consulta for a mais recente. Entre duas partes da resposta, as frases
-        por tratar passam a frente: um pedido novo cancela-a e nada mais se
-        diz. A memoria so recebe a resposta dita, uma vez, depois de o stream
-        acabar bem. `referencia` e (numero da frase, ultima voz dela): com ela
-        o log diz quanto tempo passou da fala do Sponsor a primeira frase.
+        O cerebro e lido noutra thread (`ler`); esta so fala, e so enquanto o
+        turno for o mais recente. Entre duas partes da resposta, as frases por
+        tratar passam a frente: um pedido novo cancela-o e nada mais se diz.
+        `referencia` e (numero da frase, ultima voz dela): com ela o log diz
+        quanto tempo passou da fala do Sponsor a primeira frase. A marca de
+        fala que nao era para o jarvis nao diz nada; uma pesquisa na web sem
+        frase ao fim de `espera_do_segundo_aviso_s` leva um segundo aviso
+        curto; e o log leva a linha "cerebro |" com a pesquisa web e os tokens.
         """
         fluxo = ResumoEmFluxo(lingua=self.lingua)
         fila: queue.Queue = queue.Queue()
         houve_texto = threading.Event()
+        #: O cerebro disse que a fala nao era para o jarvis: nada do turno se diz.
+        nao_dirigida = threading.Event()
+        inicio = time.monotonic()
 
         def ao_texto(pedaco: str) -> None:
+            primeiro = not houve_texto.is_set()
             houve_texto.set()
+            if nao_dirigida.is_set():
+                return
+            if primeiro and e_marca_nao_dirigida(pedaco):
+                nao_dirigida.set()
+                if pronta is not None:
+                    pronta.set()
+                return
             novas = fluxo.acrescentar(pedaco)
             if not novas:
                 return
@@ -2561,7 +3027,7 @@ class Jarvis:
                 if referencia is not None:
                     numero, ultima_voz = referencia
                     self.log.linha(
-                        f"pergunta | primeira frase pronta: {(self.relogio() - ultima_voz) * 1000:.0f} ms "
+                        f"cerebro | primeira frase pronta: {(self.relogio() - ultima_voz) * 1000:.0f} ms "
                         f"desde a ultima voz da frase #{numero}"
                     )
                 pronta.set()
@@ -2570,30 +3036,38 @@ class Jarvis:
         def ler() -> None:
             try:
                 resultado = consulta.correr(ao_texto=ao_texto)
-            except Exception as erro:  # noqa: BLE001 - uma pergunta falhada nunca para o jarvis
-                self.log.linha(f"pergunta | ERRO: {erro!r}")
+            except Exception as erro:  # noqa: BLE001 - um turno falhado nunca para o jarvis
+                self.log.linha(f"cerebro | ERRO: {erro!r}")
                 resultado = None
             # A resposta inteira, com o rotulo de origem, fica so no ecra e no log
             # (pasta ignorada); a voz so diz o que passa o filtro da resposta falada.
-            self.log.linha(
-                f"pergunta | {resultado.estado if resultado is not None else 'falhou'} em "
-                f"{resultado.duracao_s if resultado is not None else 0.0:.1f} s "
-                f"({resultado.motivo if resultado is not None else 'erro'})"
-                + (
-                    f": {rotulo_da_origem(self.lingua)} {resultado.texto!r}"
-                    if resultado is not None and resultado.respondida
-                    else ""
-                )
-            )
+            self.log.linha(resumo_do_turno_do_cerebro(resultado, self.lingua))
             fila.put(("fim", resultado))
             if pronta is not None:
                 pronta.set()
 
-        threading.Thread(target=ler, name="jarvis-pergunta-leitura", daemon=True).start()
+        threading.Thread(target=ler, name="jarvis-cerebro-leitura", daemon=True).start()
         fala = _FalaDaResposta()
         resultado = None
         acabou = False
         frases: list[str] = []
+        #: So um turno dito ao jarvis tem o segundo aviso, e so uma vez.
+        segundo_aviso = not consulta.sem_ativacao
+
+        def proximo() -> tuple:
+            """O item seguinte da fila; enquanto espera, diz o segundo aviso quando for a hora dele."""
+            nonlocal segundo_aviso
+            while segundo_aviso:
+                try:
+                    return fila.get(timeout=PASSO_DO_SEGUNDO_AVISO_S)
+                except queue.Empty:
+                    pass
+                if fala.partes or fala.parada or consulta.cancelada or nao_dirigida.is_set():
+                    segundo_aviso = False
+                elif consulta.web.is_set() and time.monotonic() - inicio >= self.espera_do_segundo_aviso_s:
+                    segundo_aviso = False
+                    self._dizer_o_segundo_aviso(consulta)
+            return fila.get()
 
         def juntar(itens: list) -> bool:
             """Junta as frases prontas; True quando o stream ja acabou."""
@@ -2612,7 +3086,9 @@ class Jarvis:
 
         while not acabou:
             frases = []
-            acabou = juntar([fila.get()])
+            acabou = juntar([proximo()])
+            if frases:
+                segundo_aviso = False
             if acabou or not frases or fala.parada:
                 continue
             # A vez pode demorar (o aviso, uma frase por tratar): o que chegou entretanto vai junto.
@@ -2625,21 +3101,21 @@ class Jarvis:
         estado = resultado.estado if resultado is not None else "falhou"
         if estado == "cancelada":
             return
-        if estado == "respondida" and not fala.parada:
+        if estado == "respondida" and not fala.parada and not nao_dirigida.is_set():
             if not houve_texto.is_set():
                 # Sem pedacos de texto no stream: a resposta inteira da linha final.
                 frases.extend(fluxo.acrescentar(resultado.texto))
             frases.extend(fluxo.acabar())
-        self._acabar_a_resposta(consulta, estado, " ".join(frases), fluxo, fala, referencia)
+        self._acabar_o_turno_do_cerebro(consulta, resultado, " ".join(frases), fala, referencia, nao_dirigida.is_set())
 
-    def _esperar_a_vez(self, consulta: Consulta) -> None:
-        """Frases por tratar (a da propria pergunta, ou uma nova) passam a frente da resposta."""
+    def _esperar_a_vez(self, consulta: _ConsultaDoCerebro) -> None:
+        """Frases por tratar (a do proprio turno, ou uma nova) passam a frente da resposta."""
         with self._condicao:
             while self._pendentes > 0 and not consulta.cancelada:
                 self._condicao.wait(PASSO_DA_ESPERA_DA_VEZ_S)
 
-    def _vigente(self, consulta: Consulta, *, acabar: bool = False) -> bool:
-        """A consulta ainda e a mais recente e nao foi cancelada; com `acabar` deixa de ser a em curso."""
+    def _vigente(self, consulta: _ConsultaDoCerebro, *, acabar: bool = False) -> bool:
+        """O turno ainda e o mais recente e nao foi cancelado; com `acabar` deixa de ser o em curso."""
         with self._tranca_da_pergunta:
             vigente = self._consulta is consulta and not consulta.cancelada
             if vigente and acabar:
@@ -2647,14 +3123,18 @@ class Jarvis:
         return vigente
 
     def _dizer_parte_da_resposta(
-        self, consulta: Consulta, texto: str, fala: "_FalaDaResposta", referencia: tuple[int, float] | None
+        self,
+        consulta: _ConsultaDoCerebro,
+        texto: str,
+        fala: "_FalaDaResposta",
+        referencia: tuple[int, float] | None,
     ) -> bool:
         """Diz uma parte da resposta ainda a chegar; False quando nada mais e para dizer."""
         self._esperar_a_vez(consulta)
         with self._tranca:
             if not self._vigente(consulta):
                 fala.parar()
-                self.log.linha("pergunta | resto da resposta descartado: ja houve silencio ou um pedido novo")
+                self.log.linha("cerebro | resto da resposta descartado: ja houve silencio ou um pedido novo")
                 return False
             if self.estado.adormecido:
                 fala.parar()
@@ -2666,22 +3146,22 @@ class Jarvis:
         texto: str,
         fala: "_FalaDaResposta",
         referencia: tuple[int, float] | None,
-        consulta: Consulta | None = None,
+        consulta: _ConsultaDoCerebro | None = None,
     ) -> bool:
         """Diz `texto` como parte da resposta (com a tranca); False se foi mandado calar a meio."""
         self._local.registo = None
         self._local.medida = None
-        self._continuacao = None
         if fala.silencios is None:
             fala.silencios = self._silencios
         dito = self._dizer(texto, consulta=consulta)
         primeiro_audio = getattr(dito, "primeiro_audio", None)
         if referencia is not None and primeiro_audio is not None and not fala.soou:
             numero, ultima_voz = referencia
-            self.log.linha(
-                f"pergunta | resposta falada: {(primeiro_audio - ultima_voz) * 1000:.0f} ms "
-                f"desde a ultima voz da frase #{numero}"
-            )
+            ms = (primeiro_audio - ultima_voz) * 1000
+            self.log.linha(f"cerebro | resposta falada: {ms:.0f} ms desde a ultima voz da frase #{numero}")
+            if consulta is not None and not consulta.aviso_dito:
+                # A primeira coisa dita nesta frase foi a resposta do cerebro.
+                self.log.linha(f"frase #{numero} | resposta falada desde a ultima voz: {ms:.0f} ms")
         if primeiro_audio is not None:
             fala.soou = True
         fala.partes += 1
@@ -2691,61 +3171,77 @@ class Jarvis:
             return False
         return True
 
-    def _acabar_a_resposta(
+    def _acabar_o_turno_do_cerebro(
         self,
-        consulta: Consulta,
-        estado: str,
+        consulta: _ConsultaDoCerebro,
+        resultado: _RespostaDoCerebro | None,
         resto: str,
-        fluxo: ResumoEmFluxo,
         fala: "_FalaDaResposta",
         referencia: tuple[int, float] | None,
+        nao_dirigida: bool,
     ) -> None:
-        """O stream acabou: diz o que falta (ou uma frase curta de falha) e abre a escuta."""
+        """O turno do cerebro acabou: diz o que falta (ou uma frase curta de falha) e abre a escuta.
+
+        A conversa fica no proprio cerebro. Se o cerebro caiu antes de dizer alguma coisa, a frase segue pelo
+        interprete local, depois de dizer uma vez que o cerebro nao esta
+        disponivel.
+        """
         self._esperar_a_vez(consulta)
         with self._tranca:
+            self._local.registo = None
+            self._local.medida = None
+            em_baixo = self._registar_desfecho_do_cerebro(resultado)
             if not self._vigente(consulta, acabar=True):
+                self._devolver_os_avisos_da_resposta(resultado)
                 if not fala.parada:
-                    self.log.linha("pergunta | resposta descartada: ja houve silencio ou um pedido novo")
+                    self.log.linha("cerebro | resposta descartada: ja houve silencio ou uma frase nova")
                 return
             if self.estado.adormecido or fala.parada:
+                self._devolver_os_avisos_da_resposta(resultado)
                 return
+            if nao_dirigida:
+                self.log.linha(
+                    "cerebro | a fala nao era para o jarvis: nada dito; a escuta continua ate ao prazo que ja tinha"
+                )
+                self._assentar_escuta()
+                self._mostrar_repouso()
+                return
+            estado = resultado.estado if resultado is not None else "falhou"
             if estado == "respondida":
-                falar = resto
-            elif estado == "recusada":
-                falar = self._texto("pergunta_recusada")
-            elif fala.partes:
-                falar = self._texto("pergunta_falhou_a_meio")
+                if resto:
+                    self._dizer_da_resposta(resto, fala, referencia, consulta)
             else:
-                falar = self._texto("pergunta_falhou")
-            completa = True
-            if falar:
-                completa = self._dizer_da_resposta(falar, fala, referencia, consulta)
-            if estado == "respondida" and completa:
-                self._lembrar_troca(consulta.pergunta, fluxo.falado)
+                if em_baixo:
+                    falar = self._frase_do_recurso()
+                elif fala.partes:
+                    falar = self._texto("pergunta_falhou_a_meio")
+                else:
+                    falar = self._texto("pergunta_falhou")
+                if falar:
+                    self._dizer(falar, consulta=consulta)
+                if em_baixo and not fala.partes:
+                    self._recurso_do_interprete(consulta.pergunta)
             self._assentar_escuta()
-            # So uma resposta dita inteira, sem um silencio pelo meio, abre a continuacao.
-            if estado == "respondida" and completa and fala.inteira and fala.partes:
-                self._abrir_continuacao(fluxo.falado)
             self._mostrar_repouso()
 
-    def _lembrar_troca(self, pergunta: str, falado: str) -> None:
-        """Guarda no historico a pergunta respondida e a resposta exatamente como foi dita.
+    def _devolver_os_avisos_da_resposta(self, resultado: _RespostaDoCerebro | None) -> None:
+        """A resposta do cerebro nao foi dita ate ao fim: os avisos dela voltam a fila so para serem ditos.
 
-        Uma frase de recurso (resposta vazia ou so tecnica) nao e uma resposta: nao entra.
+        Depois de cala-te ou de dormir a fila ja foi deitada fora e nada volta.
         """
-        recursos = {frase for frases in FRASES_DE_RECURSO.values() for frase in frases.values()}
-        if not falado or falado in recursos:
+        turno = resultado.turno if resultado is not None else None
+        if turno is None or not turno.avisos or not resultado.respondida or e_marca_nao_dirigida(turno.texto):
             return
-        self.historico.acrescentar(pergunta, falado)
+        self.avisos.devolver(turno.avisos, vistos=True)
 
     def _cancelar_pergunta(self, motivo: str) -> None:
-        """A pergunta em curso deixa de ser dita e o processo dela e morto."""
+        """O turno do cerebro em curso deixa de ser dito e e cancelado."""
         with self._tranca_da_pergunta:
             consulta, self._consulta = self._consulta, None
         if consulta is not None and consulta.cancelar():
-            self.log.linha(f"pergunta | cancelada ({motivo}); a resposta nao se diz")
+            self.log.linha(f"cerebro | turno cancelado ({motivo}); a resposta nao se diz")
 
-    def _largar_pergunta(self, consulta: Consulta) -> None:
+    def _largar_pergunta(self, consulta: _ConsultaDoCerebro) -> None:
         """A resposta foi interrompida: deixa de se dizer, mas continua a chegar para o ecra."""
         with self._tranca_da_pergunta:
             if self._consulta is not consulta:
@@ -2753,17 +3249,17 @@ class Jarvis:
             self._consulta = None
             anterior, self._consulta_largada = self._consulta_largada, consulta
         if anterior is not None and anterior.cancelar():
-            self.log.linha("pergunta | uma resposta interrompida antes desta foi cancelada")
-        self.log.linha("pergunta | resposta interrompida: nao se diz mais; aparece inteira no ecra quando acabar")
+            self.log.linha("cerebro | uma resposta interrompida antes desta foi cancelada")
+        self.log.linha("cerebro | resposta interrompida: nao se diz mais; aparece inteira no ecra quando acabar")
 
     def _cancelar_a_largada(self, motivo: str) -> None:
         with self._tranca_da_pergunta:
             consulta, self._consulta_largada = self._consulta_largada, None
         if consulta is not None and consulta.cancelar():
-            self.log.linha(f"pergunta | a resposta interrompida foi cancelada ({motivo})")
+            self.log.linha(f"cerebro | a resposta interrompida foi cancelada ({motivo})")
 
     def esperar_pergunta(self, limite_s: float) -> bool:
-        """Espera que a thread da ultima pergunta acabe (para os testes e o modo ficheiro)."""
+        """Espera que a thread do ultimo turno do cerebro acabe (para os testes e o modo ficheiro)."""
         with self._tranca_da_pergunta:
             fio = self._fio_da_pergunta
         if fio is None:
@@ -3009,19 +3505,31 @@ def arrancar(
     inicio: float | None = None,
     medir: Callable[[], object] = medir_vram,
 ) -> Arranque:
-    """Aquece transcricao, voz e interprete em paralelo e diz quanto levou."""
+    """Aquece em paralelo a transcricao, a voz e o cerebro (ou, sem ele, o interprete) e diz quanto levou.
+
+    Com o cerebro, nem o interprete nem a persona fazem pedidos ao Ollama no
+    arranque: o modelo local so carrega se o recurso entrar, e a GPU fica
+    livre para os modelos de outros projetos.
+    """
     tarefas: dict[str, Callable[[], object]] = {
         "transcricao": lambda: f"{ouvido.motor.descrever()} pronto em {ouvido.preparar():.0f} ms",
-        "interprete": lambda: jarvis.interprete.aquecer(medir=medir),
     }
+    if jarvis.cerebro is None:
+        tarefas["interprete"] = lambda: jarvis.interprete.aquecer(medir=medir)
     if com_voz:
         tarefas["voz"] = voz.aquecer
+    if jarvis.cerebro is not None:
+        tarefas["cerebro"] = jarvis.aquecer_cerebro
+        jarvis.log.linha(
+            f"arranque | interprete: nao aquecido ({jarvis.interprete.modelo} so carrega se o cerebro "
+            "nao estiver disponivel)"
+        )
     arranque = aquecer_em_paralelo(tarefas, jarvis.log, medir=medir, inicio=inicio)
     if "voz" in arranque.erros:
         jarvis.log.linha("AVISO: voz por carregar; as respostas saem so no ecra")
         jarvis.com_voz = False
     escolha = arranque.resultados.get("interprete")
-    if "interprete" in arranque.erros or getattr(escolha, "modelo", None) is None:
+    if jarvis.cerebro is None and ("interprete" in arranque.erros or getattr(escolha, "modelo", None) is None):
         jarvis.log.linha("AVISO: interprete sem LLM; so os comandos da lista branca sao percebidos")
     return arranque
 
@@ -3054,6 +3562,11 @@ def _cabecalho(jarvis: Jarvis, ouvido: Ouvido, arranque: Arranque) -> None:
         log.bruto(f"   a resposta ao recap diz-se logo, sem palavra de ativacao, dentro de {prazo}")
     else:
         log.bruto(f"   a resposta ao recap diz-se com a tecla de falar, dentro de {prazo}")
+    if jarvis.cerebro is not None:
+        log.bruto(
+            f"   conversa: pelo cerebro ({jarvis.cerebro.config.modelo}); calar, dormir, acordar e as horas "
+            "ficam locais; sem cerebro, o interprete local"
+        )
     log.bruto('   pergunta do Claude: 8 s para responder sem palavra de ativacao; "sai da conversa" fecha')
     seguimento = f"{jarvis.config.escuta.seguimento_s:g} s"
     log.bruto(
@@ -3128,6 +3641,37 @@ def construir_canal(
     except Exception as erro:  # noqa: BLE001 - sem canal, o resto do jarvis funciona
         log.linha(f"AVISO: canal para o Claude Code por arrancar ({erro}); os ditados nao sao enviados")
         return None
+
+
+def construir_ferramentas_do_cerebro(
+    config: Config,
+    log,
+    *,
+    estado=None,
+    caderno: CadernoDeFactos | None = None,
+    caminho_endereco: Path = FICHEIRO_IPC_DO_CEREBRO,
+    propor: Callable[[PropostaDoCerebro], str] | None = None,
+    avisos: Callable[[], list] | None = None,
+) -> tuple[FerramentasDeLeitura, CentralDoCerebro]:
+    """As ferramentas do cerebro e o IPC delas, ainda por arrancar.
+
+    `propor` e o `Jarvis.propor_do_cerebro`: sem ele, as ferramentas com
+    efeito respondem que nao estao disponiveis. Nenhuma delas executa; so
+    pedem o recap. O IPC so abre no aquecimento do cerebro
+    (`Jarvis.aquecer_cerebro`).
+    """
+    ferramentas = FerramentasDeLeitura(
+        lambda: config.projetos,
+        estado=estado,
+        factos=caderno.factos_para_contexto if caderno is not None else None,
+        registar=log.linha,
+        avisos=avisos,
+    )
+    efeito = None
+    if propor is not None:
+        efeito = FerramentasComEfeito(lambda: config.projetos, propor, caderno=caderno, registar=log.linha)
+    executar = executor_das_ferramentas(ferramentas, efeito)
+    return ferramentas, CentralDoCerebro(executar, caminho_endereco, log=log.linha)
 
 
 #: Com esta variavel de ambiente preenchida, a bolinha nunca abre (os testes usam-na).
@@ -3251,27 +3795,48 @@ def _arrancar_e_correr(
         else None
     )
     forja = ForjaPorVoz(config)
-    perguntas = PerguntasGerais(
-        config.perguntas,
-        lingua,
-        pastas_proibidas=[RAIZ, *(projeto.caminho for projeto in config.projetos)],
-        nomes_de_projeto=[projeto.nome for projeto in config.projetos],
-    )
     caderno = CadernoDeFactos.da_config(
         config.memoria, nomes_de_projeto=[projeto.nome for projeto in config.projetos], registar=log.linha
+    )
+    cerebro = None
+    if config.cerebro.ativo:
+        cerebro = Cerebro(
+            config.cerebro,
+            lingua,
+            localizacao=config.perguntas.localizacao,
+            pastas_proibidas=[projeto.caminho for projeto in config.projetos],
+            nomes_de_projeto=[projeto.nome for projeto in config.projetos],
+            factos=caderno.factos_para_contexto if caderno is not None else None,
+            ferramentas_do_jarvis=NOMES_PARA_O_CEREBRO,
+            servidor_mcp=servidor_para_o_cerebro(),
+            registar=log.linha,
+        )
+    log.linha(
+        f"cerebro: {'ligado, ' + config.cerebro.modelo if cerebro is not None else 'desligado'}"
+        + (f" | recurso: interprete local durante {config.cerebro.reintentar_s:g} s" if cerebro is not None else "")
     )
     jarvis = Jarvis(
         config,
         log,
         interprete=interprete,
         forja=forja,
-        perguntas=perguntas,
         com_voz=com_voz,
         painel=Painel(log.linha, titulo=not modo_ficheiro),
         sons=construir_sons(config, modo_ficheiro=modo_ficheiro, com_som=args.com_som),
         caderno=caderno,
         persona=persona,
+        cerebro=cerebro,
     )
+    if cerebro is not None:
+        ferramentas_do_cerebro, jarvis.central_do_cerebro = construir_ferramentas_do_cerebro(
+            config,
+            log,
+            estado=forja.estado,
+            caderno=caderno,
+            propor=jarvis.propor_do_cerebro,
+            avisos=jarvis.avisos.para_a_ferramenta,
+        )
+        ferramentas_do_cerebro.ultimo_projeto = jarvis.confirmacao.ultimo_projeto
     jarvis.canal = construir_canal(config, log, ao_evento=jarvis.avisos.receber)
     sem_bolinha = modo_ficheiro or args.sem_bolinha or bool(os.environ.get(VARIAVEL_SEM_BOLINHA))
     ligacao = None if sem_bolinha else abrir_bolinha(jarvis)

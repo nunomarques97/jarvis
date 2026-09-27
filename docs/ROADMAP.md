@@ -1,10 +1,14 @@
 # Roadmap
 
-Planned work that is not implemented yet. Every option listed here is free and runs locally; each one still has to be measured on the Sponsor's own voice before it is adopted, and nothing is installed without the Sponsor's approval.
+Planned work that is not implemented yet. Every option listed here is free; everything except the conversation brain runs locally, and the brain uses only the Claude subscription quota the Sponsor already accepted. Each one still has to be measured on the Sponsor's own voice before it is adopted, and nothing is installed without the Sponsor's approval.
 
 ## Natural conversation
 
 Goal: make talking to jarvis feel natural: no robotic fixed phrases, no unnecessary questions, interrupting it by speaking, fewer listening rules and shorter pauses. The research on how the most natural voice assistants do it, what runs locally and for free on this PC, the numeric targets measured with the Sponsor's own voice and the ordered list of changes are in [NATURALNESS.md](NATURALNESS.md).
+
+## Conversation brain
+
+Goal: replace the local intent classifier with a real conversation brain. Claude talks with the Sponsor from start to finish, keeps the context of the conversation and uses jarvis's functions as tools (project status, reports, sending to a project, FORJA runs, memory, web search), while every action still needs the Sponsor's spoken "yes" and buy or sell orders stay refused. How it is connected, the default model, the tools, the safety rules, the latency budget, the token ceiling and the ordered changes are in [BRAIN.md](BRAIN.md).
 
 ## European Portuguese
 

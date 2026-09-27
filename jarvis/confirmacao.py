@@ -31,6 +31,13 @@ Recebe a `Interpretacao` de uma frase e decide:
   - a unica excecao e `enviar_sem_recap`: uma resposta curta a uma pergunta
     do Claude, dita na janela de conversa (`jarvis.conversa`), vai logo.
 
+O cerebro de conversa (`jarvis.cerebro_mcp`) nunca executa nada: uma
+ferramenta com efeito chega aqui por `propor_do_cerebro` e fica pendente como
+qualquer outro pedido, com o mesmo recap, o mesmo prazo, as mesmas respostas
+e correcoes. So um pedido pendente de cada vez: com outro a espera, devolve
+"ocupado" e nada muda. `ao_fechar(dono, desfecho)` diz a quem o propos como
+acabou (executado, cancelado, expirado, falhou, recusado).
+
 Com um pedido pendente, cada resposta do utilizador e uma de:
 
   - "sim" / "envia" / "manda" / "confirma" (ou "yes" / "yeah" / "send it" /
@@ -43,7 +50,8 @@ Com um pedido pendente, cada resposta do utilizador e uma de:
     por isso nunca chega a regra financeira; um "sim" tem de ser claro, e
     uma resposta que confirma e cancela ao mesmo tempo pergunta de novo;
   - "nao, muda X para Y" / "acrescenta ...": o interprete reescreve o pedido
-    mantendo o resto, e o jarvis volta a recapitular;
+    mantendo o resto, e o jarvis volta a recapitular (com `llm_na_correcao`
+    a dizer que nao, so a edicao mecanica, sem LLM);
   - com o projeto assumido, "no, for forja" / "nao, para o forja" (so o nome
     de outro projeto, com negacao ou preposicao) troca o projeto, sem LLM, e
     o jarvis volta a recapitular;
@@ -154,6 +162,7 @@ Estado = Literal[
     "falhou",  # confirmado, mas o executor falhou
     "ignorado",  # resposta que nao conta (recap a ser preparado ou dita antes dele)
     "sem_pedido",  # resposta sem nenhum pedido pendente
+    "ocupado",  # pedido do cerebro com outro ja pendente: nada mudou
 ]
 
 TipoDeResposta = Literal["confirmar", "cancelar", "corrigir", "acrescentar", "outro"]
@@ -859,6 +868,8 @@ class Confirmacao:
         self._relogio = relogio
         self._trinco = threading.Lock()
         self._pendente: Interpretacao | None = None
+        #: Quem propos o pedido pendente (`propor_do_cerebro`); None nos outros.
+        self._dono: object | None = None
         self._recap: Recap | None = None
         self._prazo = 0.0
         self._apresentado_em = 0.0
@@ -876,6 +887,12 @@ class Confirmacao:
         #: Nunca escreve um recap, a resposta a um recap nem uma recusa.
         self.persona = persona
         self._variantes = variantes or Variantes()
+        #: Chamado com (dono, desfecho) quando um pedido com dono deixa de estar
+        #: pendente, depois do que foi dito. Uma falha aqui nunca para o dialogo.
+        self.ao_fechar: Callable[[object, Desfecho], object] | None = None
+        #: Chamado antes de cada correcao: False faz so a correcao a letra, sem
+        #: nenhum pedido ao LLM local. None: a correcao usa sempre o LLM.
+        self.llm_na_correcao: Callable[[], bool] | None = None
 
     # -- estado
 
@@ -890,6 +907,11 @@ class Confirmacao:
         """O ultimo recap apresentado do pedido pendente."""
         with self._trinco:
             return self._recap if self._pendente is not None else None
+
+    def pendente_de(self, dono: object) -> bool:
+        """O pedido pendente foi proposto por `dono`."""
+        with self._trinco:
+            return self._pendente is not None and self._dono is dono
 
     def prazo_restante(self) -> float | None:
         with self._trinco:
@@ -964,11 +986,23 @@ class Confirmacao:
             return self._texto(f"{chave}_memoria")
         return self._texto(chave)
 
-    def _limpar(self) -> None:
+    def _limpar(self) -> object | None:
+        """Tira o pedido pendente (com o trinco); devolve o dono dele, ou None."""
+        dono, self._dono = self._dono, None
         self._pendente = None
         self._recap = None
         self._ocupado = False
         self._falhas = 0
+        return dono
+
+    def _fechado(self, dono: object | None, desfecho: Desfecho) -> Desfecho:
+        """Diz a quem propos o pedido (`ao_fechar`) como ele acabou; devolve o desfecho."""
+        if dono is not None and self.ao_fechar is not None:
+            try:
+                self.ao_fechar(dono, desfecho)
+            except Exception:  # noqa: BLE001 - um aviso falhado nunca para o dialogo
+                pass
+        return desfecho
 
     # -- entrada de uma frase nova
 
@@ -976,9 +1010,10 @@ class Confirmacao:
         """Trata uma frase interpretada: executa, recusa ou fica pendente."""
         with self._trinco:
             substituido = self._pendente is not None
-            self._limpar()
+            dono = self._limpar()
         if substituido:
             self._mostrar("confirmacao | pedido anterior cancelado por um pedido novo; nada foi enviado")
+            self._fechado(dono, Desfecho("cancelado", "substituido por um pedido novo"))
 
         if interpretacao.intencao == INTENCAO_RECUSADA:
             self._falar(self._texto("recusado"))
@@ -1017,31 +1052,77 @@ class Confirmacao:
         financeiro = self._financeiro(interpretacao.texto) or self._financeiro(texto)
         if financeiro or interpretacao.intencao == INTENCAO_RECUSADA:
             with self._trinco:
-                self._limpar()
+                dono = self._limpar()
             self._mostrar("confirmacao | resposta recusada (pedido financeiro); nada foi enviado")
             self._falar(self._texto("recusado"))
+            self._fechado(dono, Desfecho("cancelado", "substituido por um pedido novo"))
             return Desfecho("recusado", interpretacao.motivo if not financeiro else "pedido financeiro na conversa")
         if interpretacao.intencao != "conversa" or not interpretacao.projeto or not e_resposta_curta(texto):
             return self.iniciar(interpretacao)
         with self._trinco:
             substituido = self._pendente is not None
-            self._limpar()
+            dono = self._limpar()
         if substituido:
             self._mostrar("confirmacao | pedido anterior cancelado por um pedido novo; nada foi enviado")
+            self._fechado(dono, Desfecho("cancelado", "substituido por um pedido novo"))
         pedido = Pedido(interpretacao.intencao, interpretacao.projeto, texto, sem_recap=True)
         return self._correr(pedido, None, "resposta curta na janela de conversa: enviada sem recap")
 
-    def _propor(
-        self, interpretacao: Interpretacao, fala: str | None = None, *, projeto_assumido: bool = False
+    def propor_do_cerebro(
+        self, interpretacao: Interpretacao, *, dono: object, projeto_assumido: bool = False
     ) -> Desfecho:
+        """O recap de um pedido com efeito pedido pelo cerebro. Nunca executa nada.
+
+        Fica pendente como qualquer outro pedido: so um "sim" falado ao jarvis
+        o executa, e o mesmo recap, prazo, respostas e correcoes valem. Com
+        outro pedido pendente devolve "ocupado" e nada muda; um pedido de
+        dinheiro e recusado sem recap. `projeto_assumido`: o projeto nao foi
+        dito pelo utilizador, e o recap diz qual e ("still for atlas").
+        `dono` volta em `ao_fechar` quando o pedido deixa de estar pendente.
+        """
+        intencao = interpretacao.intencao
+        sem_projeto = intencao in INTENCOES_COM_PROJETO and not interpretacao.projeto
+        sem_texto = intencao in _INTENCOES_COM_TEXTO and not limpar_texto(interpretacao.prompt)
+        if intencao not in _INTENCOES_COM_RECAP or sem_projeto or sem_texto or interpretacao.so_confirmacao:
+            self._mostrar(f"confirmacao | pedido do cerebro invalido ({intencao}); nada foi enviado")
+            return Desfecho("nao_percebido", "pedido do cerebro sem intencao, projeto ou texto validos")
+        with self._trinco:
+            if self._pendente is not None:
+                return Desfecho("ocupado", "ja ha um pedido por confirmar", recap=self._recap)
+        return self._propor(
+            interpretacao, projeto_assumido=projeto_assumido and bool(interpretacao.projeto), dono=dono, so_se_livre=True
+        )
+
+    def _propor(
+        self,
+        interpretacao: Interpretacao,
+        fala: str | None = None,
+        *,
+        projeto_assumido: bool = False,
+        dono: object | None = None,
+        so_se_livre: bool = False,
+    ) -> Desfecho:
+        """Diz o recap e deixa o pedido pendente.
+
+        `dono` passa a ser o do pedido (senao fica o que ja era, numa
+        correcao); com `so_se_livre`, outro pedido pendente devolve "ocupado"
+        e nada muda.
+        """
         if self._financeiro(interpretacao.texto) or self._financeiro(interpretacao.prompt):
             # Um pedido de dinheiro nunca chega a um recap, venha de onde vier.
             with self._trinco:
-                self._limpar()
+                if so_se_livre and self._pendente is not None:
+                    return Desfecho("ocupado", "ja ha um pedido por confirmar", recap=self._recap)
+                anterior = self._limpar()
             self._mostrar("confirmacao | pedido financeiro: recusado antes do recap; nada foi enviado")
             self._falar(self._texto("recusado"))
-            return Desfecho("recusado", "pedido financeiro: nunca e recapitulado")
+            desfecho = Desfecho("recusado", "pedido financeiro: nunca e recapitulado")
+            return self._fechado(anterior, self._fechado(dono, desfecho))
         with self._trinco:
+            if so_se_livre and self._pendente is not None:
+                return Desfecho("ocupado", "ja ha um pedido por confirmar", recap=self._recap)
+            if dono is not None:
+                self._dono = dono
             self._numero += 1
             recap = compor_recap(
                 self._numero,
@@ -1096,6 +1177,7 @@ class Confirmacao:
                 recap = self._recap
                 assert recap is not None
                 pendente = self._pendente
+                dono = self._dono
                 horas = self._horas_pedidas(texto)
                 tipo, edicao, aproximado = _classificar(texto)
                 projeto_dito = recap.falta_projeto and self._projeto_dito(texto) is not None
@@ -1140,19 +1222,20 @@ class Confirmacao:
         if acao == "horas":
             return self._horas_com_pedido_pendente(pendente, horas)
         if acao == "executar":
-            return self._correr(recap.pedido, recap, "confirmado")
+            return self._fechado(dono, self._correr(recap.pedido, recap, "confirmado"))
         if acao == "cancelar":
             self._mostrar("confirmacao | cancelado; nada foi enviado")
             self._falar(self._texto_do(recap, "cancelado"))
-            return Desfecho("cancelado", "cancelado pelo utilizador", recap=recap)
+            return self._fechado(dono, Desfecho("cancelado", "cancelado pelo utilizador", recap=recap))
         if acao == "recusar":
             self._mostrar("confirmacao | resposta recusada (pedido financeiro); nada foi enviado")
             self._falar(self._texto("recusado"))
-            return Desfecho("recusado", "pedido financeiro na resposta ao projeto", recap=recap)
+            return self._fechado(dono, Desfecho("recusado", "pedido financeiro na resposta ao projeto", recap=recap))
         if acao == "desistir":
             self._mostrar("confirmacao | cancelado depois de respostas que nao percebi; nada foi enviado")
             self._falar(self._texto_do(recap, "cancelado"))
-            return Desfecho("cancelado", f"{TENTATIVAS} respostas sem confirmar nem corrigir", recap=recap)
+            desfecho = Desfecho("cancelado", f"{TENTATIVAS} respostas sem confirmar nem corrigir", recap=recap)
+            return self._fechado(dono, desfecho)
         if acao == "de_novo":
             try:
                 self._falar(recap.pergunta if recap.falta_projeto else self._texto_do(recap, "de_novo"))
@@ -1170,8 +1253,8 @@ class Confirmacao:
                 with self._trinco:
                     if self._pendente is not pendente:
                         return Desfecho("cancelado", "o pedido foi cancelado antes de correr")
-                    self._limpar()
-                return self._correr(_pedido_de_leitura(completa), None, "so leitura: projeto dito")
+                    dono = self._limpar()
+                return self._fechado(dono, self._correr(_pedido_de_leitura(completa), None, "so leitura: projeto dito"))
             return self._propor(completa)
         if acao == "trocar":
             self._mostrar(f"confirmacao | projeto trocado: {recap.pedido.projeto} -> {troca}; nada foi enviado")
@@ -1248,7 +1331,8 @@ class Confirmacao:
             self._mostrar("confirmacao | correcao nao aplicada: um facto diz-se outra vez, inteiro")
             return self._propor(pendente, fala=self._texto("correcao_falhou", pergunta=recap.pergunta))
         try:
-            nova = self.interprete.corrigir(pendente, edicao, tipo)
+            com_llm = self.llm_na_correcao() if self.llm_na_correcao is not None else True
+            nova = self.interprete.corrigir(pendente, edicao, tipo, com_llm=com_llm)
         except Exception as erro:  # noqa: BLE001 - uma falha nunca envia nada
             nova = replace(pendente, intencao="desconhecido", motivo=f"a correcao falhou: {erro!r}")
         with self._trinco:
@@ -1256,10 +1340,10 @@ class Confirmacao:
                 return Desfecho("cancelado", "o pedido foi cancelado durante a correcao")
         if nova.intencao == INTENCAO_RECUSADA:
             with self._trinco:
-                self._limpar()
+                dono = self._limpar()
             self._mostrar("confirmacao | correcao recusada (pedido financeiro); nada foi enviado")
             self._falar(self._texto("recusado"))
-            return Desfecho("recusado", nova.motivo, recap=recap)
+            return self._fechado(dono, Desfecho("recusado", nova.motivo, recap=recap))
         if nova.intencao not in INTENCOES_COM_EFEITO or nova.so_confirmacao:
             self._mostrar(f"confirmacao | correcao nao aplicada ({nova.motivo})")
             return self._propor(
@@ -1284,10 +1368,10 @@ class Confirmacao:
             if self._pendente is None:
                 return Desfecho("sem_pedido", "nao ha nenhum pedido por confirmar")
             recap = self._recap
-            self._limpar()
+            dono = self._limpar()
         self._mostrar(f"confirmacao | sem resposta em {self.limite_s:g} s: cancelado; nada foi enviado")
         self._falar(self._texto_do(recap, "expirado"))
-        return Desfecho("expirado", f"sem resposta em {self.limite_s:g} s", recap=recap)
+        return self._fechado(dono, Desfecho("expirado", f"sem resposta em {self.limite_s:g} s", recap=recap))
 
     def cancelar(self, motivo: str) -> Desfecho | None:
         """Cancela em silencio o pedido pendente (por exemplo ao adormecer)."""
@@ -1295,9 +1379,9 @@ class Confirmacao:
             if self._pendente is None:
                 return None
             recap = self._recap
-            self._limpar()
+            dono = self._limpar()
         self._mostrar(f"confirmacao | cancelado ({motivo}); nada foi enviado")
-        return Desfecho("cancelado", motivo, recap=recap)
+        return self._fechado(dono, Desfecho("cancelado", motivo, recap=recap))
 
     def _correr(self, pedido: Pedido, recap: Recap | None, motivo: str) -> Desfecho:
         try:

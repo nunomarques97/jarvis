@@ -44,7 +44,9 @@ fim_de_turno = "silencio"
 fim_de_turno_maximo_s = 1.5
 
 # Opcional: o interprete, o LLM local que percebe a intencao, o projeto e
-# reescreve o ditado num prompt claro antes da confirmacao. Sem esta tabela
+# reescreve o ditado num prompt claro antes da confirmacao. Com o cerebro
+# ligado so e usado como recurso (sem internet ou sem quota) e nao e aquecido
+# no arranque: carrega na primeira frase que precisar dele. Sem esta tabela
 # valem estes mesmos valores.
 # url: o Ollama deste computador (so http em 127.0.0.1, localhost ou ::1; o
 #   texto nunca sai do PC antes de o confirmares).
@@ -80,19 +82,44 @@ ultimo_projeto_min = 10.0
 # perfil = "D:/caminho/para/perfil-forja.json"
 # provider = "claude"
 
-# Opcional: perguntas gerais e de atualidade ("que tempo faz hoje", "quem
-# ganhou o jogo") respondidas pelo Claude Code com pesquisa na web. A pergunta
-# sai do PC sem "sim" (so le, nao faz nada) e gasta quota da tua subscricao
-# Claude. Sem esta tabela valem estes mesmos valores.
-# modelo: modelo do Claude Code (um rapido chega; "sonnet" tambem serve).
-# limite_s: espera maxima pela resposta (entre 10 e 300); acima disso o jarvis
-#   diz que nao conseguiu.
+# Opcional: onde estas, para as perguntas gerais e de atualidade ("que tempo
+# faz hoje", "quem ganhou o jogo") que o cerebro responde com pesquisa na web.
+# Sem esta tabela vale este mesmo valor.
 # localizacao: onde estas, para o tempo, os jogos e as noticias de hoje quando
 #   a pergunta nao diz (uma linha curta, por exemplo "Porto, Portugal").
+# As chaves antigas modelo e limite_s continuam aceites, mas ja nao fazem
+# nada: o modelo e a espera sao os de [cerebro].
 [perguntas]
-modelo = "claude-haiku-4-5"
-limite_s = 60
 localizacao = "Portugal"
+
+# Opcional: o cerebro de conversa, um processo claude persistente que conversa
+# contigo do principio ao fim (so pode pesquisar e ler paginas da web; nunca
+# le ficheiros dos projetos nem corre comandos). Gasta quota da tua
+# subscricao Claude em cada frase, sem chave de API. A conversa fica so em
+# memoria, nunca em disco. Sem esta tabela valem estes mesmos valores.
+# ativo: false desliga a conversa pelo cerebro.
+# modelo: modelo do Claude Code do cerebro (um rapido chega; "sonnet" tambem serve).
+# contexto_max_tokens: tamanho da conversa, em tokens, a partir do qual a
+#   seguinte recomeca numa sessao nova com um resumo curto e os teus factos
+#   (entre 4000 e 24000).
+# inativo_min: minutos sem conversa ate recomecar da mesma forma (1 a 240).
+# limite_s: espera maxima por uma resposta (entre 10 e 300); acima disso o
+#   jarvis diz que nao conseguiu.
+# reintentar_s: se o cerebro nao estiver disponivel (sem internet, sem quota,
+#   sessao por iniciar, ou duas falhas seguidas), o jarvis usa o interprete
+#   local durante estes segundos e depois tenta o cerebro outra vez (10 a 3600).
+# espera_dos_avisos_s: os avisos dos projetos (uma sessao acabou, um run
+#   terminou, uma resposta chegou) nunca sao ditos no meio da conversa; o
+#   cerebro fica a saber deles, e os que sobram sao ditos juntos numa frase
+#   curta depois de este tempo sem conversa (5 a 300).
+[cerebro]
+ativo = true
+modelo = "claude-haiku-4-5"
+contexto_max_tokens = 16000
+inativo_min = 30
+limite_s = 60
+reintentar_s = 120
+espera_dos_avisos_s = 20
 
 # Opcional: a voz das respostas em ingles (lingua = "en"). Sem esta tabela vale
 # "bm_fable", uma voz masculina britanica do Kokoro-82M. Uma de af_heart
@@ -159,21 +186,19 @@ interromper = true
 # [descoberta]
 # pastas = ["D:/caminho/para/repositorios"]
 
-# Opcional: a memoria das perguntas gerais. Sem esta tabela valem estes mesmos
-# valores, que tambem sao os tetos: aqui so se podem baixar, para cada pergunta
-# ter um tamanho maximo garantido (e um gasto de quota maximo).
-# trocas: quantas perguntas e respostas recentes vao com a pergunta seguinte,
-#   para "and who scored?" ter contexto (1 a 10). So em memoria, nunca em disco;
-#   "new conversation" / "nova conversa" esquece-as logo.
-# expira_min: minutos sem perguntas gerais ate a conversa ser esquecida (1 a 30).
+# Opcional: a memoria. Sem esta tabela valem estes mesmos valores, que tambem
+# sao os tetos: aqui so se podem baixar. A conversa em si fica no cerebro, so
+# em memoria (ver [cerebro]).
 # factos: quantos factos o caderno guarda (1 a 50). O caderno fica em
-#   memoria/factos.json, fora do Git, e vai com cada pergunta geral ao Claude.
+#   memoria/factos.json, fora do Git, e vai para o cerebro como dados.
 # caracteres: tamanho maximo de todos os factos juntos (200 a 4000).
 # frases_interprete: quantas frases recentes, e o que o jarvis fez com elas, o
-#   interprete local recebe para perceber "send that to jarvis too" ou "same
-#   for crypto-radar" (3 a 5). Nunca escolhem o projeto: esse tem de ser dito.
+#   interprete local recebe (so no recurso sem cerebro) para perceber "send
+#   that to jarvis too" ou "same for crypto-radar" (3 a 5). Nunca escolhem o
+#   projeto: esse tem de ser dito.
+# expira_min: minutos sem frases ate o interprete esquecer as recentes (1 a 30).
+# A chave antiga trocas continua aceite, mas ja nao faz nada.
 [memoria]
-trocas = 10
 expira_min = 30
 factos = 50
 caracteres = 4000

@@ -10,8 +10,8 @@ resposta ao recap). Os sons de abrir e fechar vao para uma lista: nenhum som
 toca. O que protegem:
 
   * a janela abre no fim da voz depois das horas, do estado FORJA, do
-    "Sent." e da resposta a uma pergunta geral, e nunca depois do "Let me
-    check.", do "um momento" nem de um aviso nao pedido;
+    "Sent." e da resposta do cerebro, e nunca depois do "Let me check.", do
+    "um momento" nem de um aviso nao pedido;
   * nunca ha duas janelas: recap pendente > pergunta do Claude > seguimento;
     a dormir, calado ou sem voz nao abre nenhuma;
   * a frase dita na janela passa pelo interprete e pelas mesmas regras
@@ -21,17 +21,17 @@ toca. O que protegem:
   * uma fala nova fecha a janela e reabre-a no fim; a tecla e "hey jarvis"
     funcionam dentro e fora dela;
   * um som "abrir" so quando a escuta abre pela primeira vez (nunca quando
-    reabre depois de uma resposta, de um recap ou com uma pergunta geral a
-    caminho) e um "fechar" quando acaba de vez; `[escuta] sons = false` e o
+    reabre depois de uma resposta, de um recap ou com uma resposta do
+    cerebro a caminho) e um "fechar" quando acaba de vez; `[escuta] sons = false` e o
     --wav sem --com-som desligam-nos;
-  * "that's all" / "thanks, that's it" fecham a escuta; a fala de fundo (sem
-    intencao, ou uma pergunta geral nao dita como pergunta) nao faz nada;
-  * a linha de estado mostra A OUVIR-TE e a bolinha mostra-o como a ouvir;
-  * depois de uma resposta geral que acaba numa pergunta, a frase seguinte
-    continua a pergunta geral com a memoria recente, sem o interprete nem
-    "Which project?"; calar/dormir, "new conversation", um pedido a um
-    projeto nomeado e a regra do dinheiro passam a frente; uma resposta nova
-    enquanto se fala, uma pergunta cancelada ou falhada nunca a abrem.
+  * "that's all" / "thanks, that's it" fecham a escuta; sem o cerebro, a
+    fala de fundo (sem intencao, ou uma pergunta geral nao dita como
+    pergunta) nao faz nada, e uma pergunta dirigida ao jarvis ouve que as
+    perguntas gerais nao estao disponiveis;
+  * a linha de estado mostra A OUVIR-TE e a bolinha mostra-o como a ouvir.
+
+A conversa pelo cerebro na janela (continuar com contexto, fala que nao era
+para o jarvis) esta em tests/test_cerebro_na_conversa.py.
 
 Corre com:
 
@@ -40,7 +40,7 @@ Corre com:
 
 from __future__ import annotations
 
-import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -50,7 +50,7 @@ from jarvis import app, sinais
 from jarvis.app import A_CONVERSA, A_OUVIR, A_OUVIR_TE, ESCUTA_FECHADA, construir_sons
 from jarvis.avisos import FALADO, OCUPADO, Aviso
 from jarvis.bolinha import ESTADO_DO_PAINEL
-from jarvis.config import SEGUIMENTO_S, ConfigEscuta, ConfigPerguntas
+from jarvis.config import SEGUIMENTO_S, ConfigEscuta
 from jarvis.ouvido import (
     ESCUTA_CONVERSA,
     ESCUTA_RECAP,
@@ -63,7 +63,8 @@ from jarvis.ouvido import (
 from jarvis.sessoes import Entrega
 from tests.test_app import ForjaFalsa, LogFalso, RelogioFalso, config_de_teste, resposta_llm
 from tests.test_ouvido import SILENCIO, MotorFalso, TeclaFixa, VadFalso, chunk, chunks_em
-from tests.test_pergunta_geral import ArranqueFalso, perguntas_de_teste, saida_json
+from tests.test_app import SEM_PERGUNTAS_EN, proibir_processos
+from tests.test_cerebro import bloqueada, cerebro_de_teste, esperar_ate, resposta
 from tests.test_resposta_ao_recap import DITADO_EN, DITADO_PT, VOZ, Cena
 
 HORAS = "hey jarvis, what time is it"
@@ -129,17 +130,12 @@ class TestAbreDepoisDeQualquerResposta(unittest.TestCase):
         # sem "fechar" nem outro "abrir".
         self.assertEqual(sons, ["abrir"])
 
-    def test_depois_da_resposta_a_uma_pergunta_geral(self) -> None:
-        temporaria = tempfile.TemporaryDirectory()
-        self.addCleanup(temporaria.cleanup)
-        arranque = ArranqueFalso(saida_json("It is 22 degrees and sunny in Porto today."))
-        perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-        cena, sons = cena_com_sons(
-            [resposta_llm("pergunta_geral", "", "What is the temperature in Porto?")], perguntas=perguntas
-        )
+    def test_depois_da_resposta_do_cerebro(self) -> None:
+        cerebro, _cli = cerebro_de_teste(self, resposta("It is 22 degrees and sunny in Porto today."))
+        cena, sons = cena_com_sons(cerebro=cerebro)
         self.addCleanup(cena.jarvis.fechar)
         cena.pedir("hey jarvis, what is the temperature in Porto today")
-        self.assertTrue(cena.jarvis.esperar_pergunta(5.0), "a thread da pergunta nao acabou")
+        self.assertTrue(cena.jarvis.esperar_pergunta(5.0), "a thread do cerebro nao acabou")
         # A resposta chegou logo: sem aviso curto, e so ela abre a janela, no fim.
         self.assertEqual(cena.falados, ["It is 22 degrees and sunny in Porto today."])
         self.assertEqual(len(seguimentos(cena)), 1)
@@ -232,13 +228,22 @@ class TestPrioridade(unittest.TestCase):
         cena.com_recap()
         cena.dizer("Yeah.")
         self.assertTrue(cena.jarvis.seguimento.aberta())
+        falados = list(cena.falados)
+        # Dentro da janela de seguimento a resposta nao e dita: fica no ecra e o aviso na fila.
         cena.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto=PERGUNTA_DO_CLAUDE))
-        self.assertIsNone(cena.escuta_ao_falar[-1], "a janela de seguimento fechou antes de a voz falar")
+        self.assertEqual(cena.falados, falados)
+        self.assertEqual(cena.jarvis.avisos.em_fila, 1)
+        self.assertTrue(cena.jarvis.seguimento.aberta())
+        # Sem conversa, a resposta e dita e a pergunta dela abre a janela de conversa.
+        cena.passar(SILENCIO, SEGUIMENTO_S + 0.5, verificar=True)
+        self.assertFalse(cena.jarvis.seguimento.aberta())
+        cena.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto=PERGUNTA_DO_CLAUDE))
+        self.assertIsNone(cena.escuta_ao_falar[-1], "nenhuma escuta aberta enquanto a voz fala")
         self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_CONVERSA)
         self.assertTrue(cena.jarvis.janela.aberta())
         self.assertFalse(cena.jarvis.seguimento.aberta())
         self.assertEqual(cena.jarvis.painel.atual, A_CONVERSA)
-        self.assertEqual(sons, ["abrir"], "recap, seguimento e conversa seguidos: um so som")
+        self.assertEqual(sons, ["abrir", "fechar", "abrir"])
         # A conversa acaba sem resposta: fecha com som e nao abre o seguimento.
         cena.passar(SILENCIO, 8.5, verificar=True)
         self.assertFalse(cena.jarvis.janela.aberta())
@@ -403,16 +408,19 @@ class TestRuidoNaJanela(unittest.TestCase):
 
 
 class TestFalaTeclaEPalavra(unittest.TestCase):
-    def test_uma_resposta_do_claude_fecha_e_reabre_a_janela(self) -> None:
+    def test_uma_resposta_do_claude_na_janela_nao_e_dita_nem_mexe_na_janela(self) -> None:
         cena, sons = cena_com_sons()
         cena.pedir(HORAS)
         cena.passar(SILENCIO, 3.0, verificar=True)
+        prazo = cena.jarvis.seguimento.atual.prazo
+        falados = list(cena.falados)
         cena.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Done, all tests pass."))
-        self.assertIsNone(cena.escuta_ao_falar[-1], "fechada enquanto a voz fala")
-        self.assertEqual(len(seguimentos(cena)), 2)
-        self.assertEqual(seguimentos(cena)[-1][0], cena.fins_da_fala[-1], "reabre no fim da fala nova")
-        self.assertEqual(cena.jarvis.seguimento.atual.prazo, cena.fins_da_fala[-1] + SEGUIMENTO_S)
-        self.assertEqual(sons, ["abrir"], "sem 'fechar' quando so fecha para falar, nem outro 'abrir'")
+        self.assertEqual(cena.falados, falados)
+        self.assertEqual(len(seguimentos(cena)), 1)
+        self.assertEqual(cena.jarvis.seguimento.atual.prazo, prazo)
+        self.assertIn("Done, all tests pass.", cena.log(), "o texto fica no ecra e no log")
+        self.assertEqual(cena.jarvis.avisos.em_fila, 1)
+        self.assertEqual(sons, ["abrir"])
 
     def test_a_tecla_funciona_dentro_da_janela(self) -> None:
         cena, _sons = cena_com_sons()
@@ -446,345 +454,6 @@ class TestFalaTeclaEPalavra(unittest.TestCase):
         self.assertFalse(cena.jarvis._ruido_no_seguimento(replace(dentro, gatilho=GATILHO_TECLA)))
 
 
-# --- Continuacao de uma pergunta geral que acabou numa pergunta ------------------------
-
-#: Sem abertura clara de pergunta: vai ao interprete (LLM falso), como as
-#: perguntas que o caminho rapido nao resolve.
-PERGUNTA_GERAL = "hey jarvis, I'd like to know if it will rain in Porto tomorrow"
-#: A mesma pergunta como o caminho rapido a resolve, sem o LLM.
-PERGUNTA_GERAL_CLARA = "hey jarvis, will it rain in Porto tomorrow"
-INTERPRETADA = resposta_llm("pergunta_geral", "", "Will it rain in Porto tomorrow?")
-RESPOSTA_COM_PERGUNTA = "Yes, light rain after 3 pm. Do you want the forecast for the weekend too?"
-RESPOSTA_SEM_PERGUNTA = "Yes, light rain after 3 pm, and dry by the evening."
-FIM_DA_RESPOSTA = "The weekend stays dry and sunny."
-#: O que o interprete diria de "Yes, the weekend." sem contexto: uma conversa
-#: sem projeto, que acabava em "Which project?". Na continuacao nunca e pedido.
-CONVERSA_SEM_PROJETO = resposta_llm("conversa", "", "Yes, the weekend.")
-
-
-class TestContinuacaoDaPerguntaGeral(unittest.TestCase):
-    def cena_depois_da_resposta(
-        self, *saidas: str, respostas_llm=(), lingua: str = "en", limite_s: float | None = None, **kw
-    ) -> tuple[Cena, list[str], ArranqueFalso]:
-        """Uma pergunta geral ja respondida; `saidas` sao as saidas do claude -p, pela ordem."""
-        temporaria = tempfile.TemporaryDirectory()
-        self.addCleanup(temporaria.cleanup)
-        arranque = ArranqueFalso(*(saidas or (saida_json(RESPOSTA_COM_PERGUNTA),)))
-        perguntas = perguntas_de_teste(
-            arranque,
-            Path(temporaria.name) / "perguntas",
-            lingua=lingua,
-            config=ConfigPerguntas(limite_s=limite_s) if limite_s is not None else None,
-        )
-        cena, sons = cena_com_sons([INTERPRETADA, *respostas_llm], perguntas=perguntas, lingua=lingua, **kw)
-        self.addCleanup(cena.jarvis.fechar)
-        cena.pedir(PERGUNTA_GERAL)
-        self.assertTrue(cena.jarvis.esperar_pergunta(5.0), "a thread da pergunta nao acabou")
-        return cena, sons, arranque
-
-    def esperar(self, cena: Cena) -> None:
-        self.assertTrue(cena.jarvis.esperar_pergunta(5.0), "a thread da pergunta nao acabou")
-
-    def verificar_continuada(self, cena: Cena, arranque: ArranqueFalso, enviado: str) -> None:
-        self.esperar(cena)
-        self.assertEqual(len(arranque.processos), 2, "a frase foi ao Claude como pergunta geral")
-        entrada = arranque.ultimo.entrada
-        self.assertIn(enviado, entrada)
-        # A memoria da conversa recente vai com ela: a pergunta e a resposta com a pergunta final.
-        self.assertIn("Will it rain in Porto tomorrow?", entrada)
-        self.assertIn("Do you want the forecast for the weekend too?", entrada)
-        self.assertEqual(len(cena.m.llm.pedidos), 1, "nunca passa pelo interprete nem pelas intencoes de projeto")
-        self.assertFalse(any("Which project" in falado for falado in cena.falados), cena.falados)
-        self.assertFalse(cena.jarvis.confirmacao.a_espera, "sem recap")
-        self.assertEqual(cena.canal.recebidos, [])
-        self.assertIn("continuacao da pergunta geral (a resposta anterior acabou numa pergunta", cena.log())
-
-    def test_a_frase_seguinte_continua_a_pergunta_geral_com_a_memoria(self) -> None:
-        cena, sons, arranque = self.cena_depois_da_resposta(
-            saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA), respostas_llm=[CONVERSA_SEM_PROJETO]
-        )
-        self.assertEqual(" ".join(cena.falados), RESPOSTA_COM_PERGUNTA)
-        self.assertIn(
-            "seguimento | a resposta acabou numa pergunta: a frase seguinte continua a pergunta geral", cena.log()
-        )
-        self.assertEqual(cena.ouvido.escuta_aberta, ESCUTA_SEGUIMENTO)
-        self.assertEqual(sons, ["abrir"])
-        self.assertEqual(cena.dizer("Uh, yes, the weekend."), 1)
-        self.verificar_continuada(cena, arranque, "Yes, the weekend.")
-        self.assertIn("escuta de seguimento depois de uma pergunta geral (sem palavra de ativacao)", cena.log())
-        self.assertEqual(cena.falados[-1], FIM_DA_RESPOSTA)
-        self.assertFalse(set(cena.falados) & set(app._TEXTOS["en"]["a_verificar"]), "sem aviso curto")
-        self.assertEqual(len(cena.jarvis.historico.trocas()), 2, "a continuacao tambem fica na memoria")
-
-    def test_continua_tambem_depois_de_uma_pergunta_do_caminho_rapido(self) -> None:
-        temporaria = tempfile.TemporaryDirectory()
-        self.addCleanup(temporaria.cleanup)
-        arranque = ArranqueFalso(saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA))
-        perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-        cena, _sons = cena_com_sons([CONVERSA_SEM_PROJETO], perguntas=perguntas, lingua="en")
-        self.addCleanup(cena.jarvis.fechar)
-        cena.pedir(PERGUNTA_GERAL_CLARA)
-        self.esperar(cena)
-        self.assertEqual(cena.m.llm.pedidos, [], "a pergunta clara nao passou pelo LLM")
-        self.assertIn("Will it rain in Porto tomorrow?", arranque.processos[0].entrada)
-        self.assertEqual(cena.dizer("Uh, yes, the weekend."), 1)
-        self.esperar(cena)
-        self.assertEqual(len(arranque.processos), 2, "a resposta seguinte continua a pergunta geral")
-        self.assertIn("Yes, the weekend.", arranque.ultimo.entrada)
-        self.assertEqual(cena.m.llm.pedidos, [], "a continuacao tambem nao passa pelo interprete")
-        self.assertFalse(any("Which project" in falado for falado in cena.falados), cena.falados)
-
-    def test_um_sim_sozinho_e_a_resposta_e_nao_cortesia(self) -> None:
-        for texto in ("Yes.", "Yeah, please.", "Yep."):
-            with self.subTest(texto=texto):
-                cena, _sons, arranque = self.cena_depois_da_resposta(
-                    saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA)
-                )
-                self.assertEqual(cena.dizer(texto), 1)
-                self.verificar_continuada(cena, arranque, texto)
-
-    def test_com_a_tecla_tambem_continua(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(
-            saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA)
-        )
-        cena.motor.textos.append("the weekend please")
-        cena.passar(VOZ, 1.0, premida=True)
-        cena.passar(SILENCIO, 0.1)
-        self.assertEqual(cena.ouvido.transcrever_pendentes(), 1)
-        self.verificar_continuada(cena, arranque, "the weekend please")
-
-    def test_encadeia_quando_a_nova_resposta_tambem_acaba_numa_pergunta(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(
-            saida_json(RESPOSTA_COM_PERGUNTA), saida_json("Dry and sunny. Want Sunday too?"), saida_json("Also dry.")
-        )
-        cena.dizer("Yes.")
-        self.esperar(cena)
-        cena.dizer("Sure.")
-        self.esperar(cena)
-        self.assertEqual(len(arranque.processos), 3)
-        self.assertIn("Want Sunday too?", arranque.ultimo.entrada)
-        self.assertEqual(len(cena.m.llm.pedidos), 1)
-
-    def test_um_nome_de_projeto_sem_pedido_ao_projeto_continua(self) -> None:
-        # Nomeia "atlas", mas o interprete nao le um pedido ao projeto (aqui
-        # esta indisponivel): continua, com o texto ouvido.
-        cena, _sons, arranque = self.cena_depois_da_resposta(
-            saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA)
-        )
-        cena.dizer("Yes, and the atlas mountains too.")
-        self.esperar(cena)
-        self.assertEqual(len(cena.m.llm.pedidos), 2, "o nome do projeto foi ao interprete")
-        self.assertEqual(len(arranque.processos), 2)
-        self.assertIn("Yes, and the atlas mountains too.", arranque.ultimo.entrada)
-        self.assertIn("continuacao da pergunta geral (", cena.log())
-        self.assertFalse(cena.jarvis.confirmacao.a_espera)
-        self.assertFalse(any("Which project" in falado for falado in cena.falados), cena.falados)
-
-    # -- excecoes que passam a frente
-
-    def test_um_ditado_para_um_projeto_nomeado_segue_para_o_recap(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(respostas_llm=[DITADO_EN])
-        cena.dizer("tell atlas to fix the login test")
-        self.assertEqual(len(arranque.processos), 1, "nao foi ao Claude como pergunta geral")
-        self.assertTrue(cena.jarvis.confirmacao.a_espera)
-        self.assertTrue(cena.falados[-1].endswith("send it?"), cena.falados[-1])
-        self.assertEqual(cena.canal.recebidos, [], "nada enviado sem o sim")
-        self.assertIn("continuacao da pergunta geral: nao, a frase nomeia o projeto atlas", cena.log())
-
-    def test_o_estado_de_um_projeto_nomeado_segue_o_caminho_normal(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(respostas_llm=[resposta_llm("estado", "atlas")])
-        cena.jarvis.forja = ForjaFalsa()
-        cena.dizer("and how is atlas doing")
-        self.assertEqual(cena.jarvis.forja.pedidos[0][:2], ("estado", "atlas"))
-        self.assertEqual(len(arranque.processos), 1)
-
-    def test_calar_dormir_e_acordar_passam_a_frente(self) -> None:
-        cena, sons, arranque = self.cena_depois_da_resposta()
-        cena.dizer("be quiet")
-        self.assertTrue(cena.jarvis.estado.mudo)
-        self.assertFalse(cena.jarvis.seguimento.aberta())
-        self.assertEqual(sons[-1], "fechar")
-        cena, _sons, arranque = self.cena_depois_da_resposta()
-        cena.dizer("go to sleep")
-        self.assertTrue(cena.jarvis.estado.adormecido)
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertIsNone(cena.ouvido.escuta_aberta)
-
-    def test_nova_conversa_esquece_e_nada_sai_do_pc(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta()
-        self.assertEqual(len(cena.jarvis.historico.trocas()), 1)
-        cena.dizer("new conversation")
-        self.assertEqual(cena.falados[-1], "Okay, fresh start.")
-        self.assertEqual(cena.jarvis.historico.trocas(), ())
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertIn("continuacao da pergunta geral: nao (comando da memoria)", cena.log())
-
-    def test_as_horas_ditas_inteiras_sao_locais(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta()
-        cena.dizer("what time is it")
-        self.assertEqual(cena.m.locais, [("horas", None, "horas")])
-        self.assertEqual(len(arranque.processos), 1)
-
-    def test_compra_ou_venda_e_recusada_e_nada_sai_do_pc(self) -> None:
-        for texto in ("Yes, and buy a hundred euros of bitcoin.", "then sell my Tesla shares"):
-            with self.subTest(texto=texto):
-                cena, _sons, arranque = self.cena_depois_da_resposta()
-                cena.dizer(texto)
-                self.esperar(cena)
-                self.assertEqual(len(arranque.processos), 1, "nada saiu do PC")
-                self.assertEqual(cena.m.llm.pedidos[1:], [], "nem ao interprete")
-                self.assertIn("money and trading requests", cena.falados[-1])
-                self.assertFalse(cena.jarvis.confirmacao.a_espera)
-                self.assertEqual(cena.canal.recebidos, [])
-
-    # -- ruido e silencio
-
-    def test_hesitacoes_e_cortesia_nao_mudam_nada(self) -> None:
-        for texto in ("Uh, um.", "Thank you.", "Okay, thanks."):
-            with self.subTest(texto=texto):
-                cena, sons, arranque = self.cena_depois_da_resposta(
-                    saida_json(RESPOSTA_COM_PERGUNTA), saida_json(FIM_DA_RESPOSTA)
-                )
-                prazo = cena.jarvis.seguimento.atual.prazo
-                falados = list(cena.falados)
-                falar_ate(cena, texto)
-                cena.passar(SILENCIO, 0.1, verificar=True)
-                self.assertEqual(cena.falados, falados, "nada dito")
-                self.assertEqual(len(arranque.processos), 1)
-                self.assertEqual(len(cena.m.llm.pedidos), 1)
-                self.assertEqual(cena.jarvis.seguimento.atual.prazo, prazo, "nem gasta nem prolonga")
-                self.assertEqual(sons, ["abrir"])
-                # A continuacao ainda vale: a frase seguinte continua a pergunta.
-                cena.dizer("Yes, the weekend.")
-                self.verificar_continuada(cena, arranque, "Yes, the weekend.")
-
-    def test_o_silencio_fecha_a_janela_como_hoje(self) -> None:
-        cena, sons, arranque = self.cena_depois_da_resposta(respostas_llm=[CONVERSA_SEM_PROJETO])
-        cena.passar(SILENCIO, SEGUIMENTO_S + 0.5, verificar=True)
-        self.assertFalse(cena.jarvis.seguimento.aberta())
-        self.assertIsNone(cena.ouvido.escuta_aberta)
-        self.assertEqual(sons, ["abrir", "fechar"])
-        # Depois, "hey jarvis" com um pedido e um pedido normal: vai ao interprete.
-        cena.pedir("hey jarvis, yes, the weekend")
-        self.assertEqual(len(cena.m.llm.pedidos), 2)
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertNotIn("continuacao da pergunta geral (", cena.log())
-
-    # -- sem pergunta no fim, hoje
-
-    def test_uma_resposta_sem_pergunta_no_fim_fica_como_hoje(self) -> None:
-        cena, sons, arranque = self.cena_depois_da_resposta(
-            saida_json(RESPOSTA_SEM_PERGUNTA), respostas_llm=[CONVERSA_SEM_PROJETO]
-        )
-        self.assertTrue(cena.jarvis.seguimento.aberta())
-        self.assertEqual(sons, ["abrir"])
-        self.assertNotIn("continua a pergunta geral", cena.log())
-        cena.dizer("Yes, the weekend.")
-        self.assertEqual(len(cena.m.llm.pedidos), 2, "foi ao interprete, como hoje")
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertNotIn("continuacao da pergunta geral (", cena.log())
-        # E "Yes." sozinho continua a ser so cortesia na janela de seguimento.
-        cena2, _sons2, _arranque2 = self.cena_depois_da_resposta(saida_json(RESPOSTA_SEM_PERGUNTA))
-        falados = list(cena2.falados)
-        falar_ate(cena2, "Yes.")
-        self.assertEqual(cena2.falados, falados)
-
-    def test_uma_pergunta_no_meio_que_nao_fecha_a_resposta_nao_continua(self) -> None:
-        cena, _sons, _arranque = self.cena_depois_da_resposta(
-            saida_json("Will it rain? Yes, light rain after 3 pm.")
-        )
-        self.assertTrue(cena.jarvis.seguimento.aberta())
-        self.assertIsNone(cena.jarvis._continuacao)
-
-    # -- sobreposicoes
-
-    def test_uma_resposta_nova_enquanto_o_utilizador_fala_nunca_continua(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(respostas_llm=[CONVERSA_SEM_PROJETO])
-        inicio = cena.relogio() + 0.5
-        # A meio da frase chega uma resposta de um projeto: fala, fecha e abre outra janela.
-        cena.jarvis._ao_responder("atlas", Entrega(projeto="atlas", caminho="canal", texto="Done, all tests pass."))
-        self.assertTrue(cena.jarvis.seguimento.aberta())
-        self.assertIsNone(cena.jarvis._continuacao)
-        fim = cena.relogio()
-        cena.jarvis.ao_ouvir(
-            Frase("Yes, the weekend.", GATILHO_JANELA, "en", "falso", fim - inicio, inicio, fim, fim, 1.0)
-        )
-        self.assertEqual(len(arranque.processos), 1, "nao foi ao Claude como continuacao")
-        self.assertEqual(len(cena.m.llm.pedidos), 2, "caminho de hoje: o interprete")
-        self.assertNotIn("continuacao da pergunta geral (", cena.log())
-
-    def test_um_aviso_ou_outra_fala_depois_da_resposta_desfaz_a_continuacao(self) -> None:
-        cena, _sons, arranque = self.cena_depois_da_resposta(respostas_llm=[CONVERSA_SEM_PROJETO])
-        cena.pedir(HORAS)  # uma fala nova (as horas) abre a sua propria janela
-        self.assertTrue(cena.jarvis.seguimento.aberta())
-        cena.dizer("Yes, the weekend.")
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertEqual(len(cena.m.llm.pedidos), 2)
-
-    def test_calado_a_meio_da_resposta_nao_abre_a_continuacao(self) -> None:
-        temporaria = tempfile.TemporaryDirectory()
-        self.addCleanup(temporaria.cleanup)
-        arranque = ArranqueFalso(saida_json(RESPOSTA_COM_PERGUNTA))
-        perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-        cena, _sons = cena_com_sons([INTERPRETADA, CONVERSA_SEM_PROJETO], perguntas=perguntas)
-        self.addCleanup(cena.jarvis.fechar)
-        falar = cena.jarvis._falar
-
-        def falar_e_ser_calado(texto: str):
-            resultado = falar(texto)
-            if texto.startswith("Yes, light rain"):
-                cena.jarvis.calar_pela_bolinha()  # clique na bolinha (ou "be quiet") a meio da resposta
-            return resultado
-
-        cena.jarvis._falar = falar_e_ser_calado
-        cena.pedir(PERGUNTA_GERAL)
-        self.esperar(cena)
-        # Calado a meio: nada mais da resposta se diz.
-        self.assertTrue(cena.falados[-1].startswith("Yes, light rain"), cena.falados)
-        self.assertEqual(sum(texto.startswith("Yes, light rain") for texto in cena.falados), 1)
-        self.assertIsNone(cena.jarvis._continuacao)
-        self.assertFalse(cena.jarvis.seguimento.aberta())
-        cena.m.ouvir("Yes, the weekend.")  # tecla de falar
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertEqual(len(cena.m.llm.pedidos), 2)
-
-    def test_uma_pergunta_cancelada_nunca_abre_a_continuacao(self) -> None:
-        for como in ("be quiet", "what time is it"):
-            with self.subTest(como=como):
-                temporaria = tempfile.TemporaryDirectory()
-                self.addCleanup(temporaria.cleanup)
-                arranque = ArranqueFalso("bloqueia")
-                perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-                cena, _sons = cena_com_sons([INTERPRETADA, CONVERSA_SEM_PROJETO], perguntas=perguntas)
-                self.addCleanup(cena.jarvis.fechar)
-                cena.pedir(PERGUNTA_GERAL)
-                self.assertTrue(arranque.a_correr.wait(5.0))
-                cena.pedir(f"hey jarvis, {como}")
-                self.esperar(cena)
-                self.assertTrue(arranque.ultimo.morto.is_set(), "o processo foi morto")
-                self.assertNotIn(RESPOSTA_COM_PERGUNTA, cena.falados)
-                self.assertIsNone(cena.jarvis._continuacao)
-                self.assertIn("pergunta | cancelada", cena.log())
-
-    def test_uma_falha_ou_tempo_esgotado_nunca_abre_a_continuacao(self) -> None:
-        falhas = (
-            "demora",
-            "isto nao e json?",
-            saida_json("Do you want the forecast too?", is_error=True),
-        )
-        for saida in falhas:
-            with self.subTest(saida=saida):
-                cena, _sons, arranque = self.cena_depois_da_resposta(
-                    saida, respostas_llm=[CONVERSA_SEM_PROJETO], limite_s=0.2 if saida == "demora" else None
-                )
-                self.assertEqual(cena.falados[-1], "Sorry, I couldn't find an answer to that.")
-                self.assertIsNone(cena.jarvis._continuacao)
-                self.assertNotIn("continua a pergunta geral", cena.log())
-                cena.dizer("Yes, the weekend.")
-                self.assertEqual(len(arranque.processos), 1)
-                self.assertEqual(len(cena.m.llm.pedidos), 2, "caminho de hoje: o interprete")
-
-
 # --- Modo de conversa ------------------------------------------------------------------
 
 #: Conversa a volta que o interprete le como pergunta geral, sem ser dita como pergunta.
@@ -793,14 +462,18 @@ LIDA_COMO_PERGUNTA = resposta_llm("pergunta_geral", "", "Should we leave at six?
 
 
 class TestModoDeConversa(unittest.TestCase):
-    def cena_com_perguntas(self, *saidas: str, respostas_llm=()) -> tuple[Cena, list[str], ArranqueFalso]:
-        temporaria = tempfile.TemporaryDirectory()
-        self.addCleanup(temporaria.cleanup)
-        arranque = ArranqueFalso(*saidas)
-        perguntas = perguntas_de_teste(arranque, Path(temporaria.name) / "perguntas", lingua="en")
-        cena, sons = cena_com_sons(list(respostas_llm), perguntas=perguntas)
+    def cena_sem_cerebro(self, respostas_llm=()) -> tuple[Cena, list[str], list]:
+        """Sem o cerebro (o recurso): nenhum processo pode arrancar."""
+        processos = proibir_processos(self)
+        cena, sons = cena_com_sons(list(respostas_llm))
         self.addCleanup(cena.jarvis.fechar)
-        return cena, sons, arranque
+        return cena, sons, processos
+
+    def cena_com_cerebro(self, *guioes) -> tuple[Cena, list[str], object]:
+        cerebro, cli = cerebro_de_teste(self, *guioes)
+        cena, sons = cena_com_sons(cerebro=cerebro)
+        self.addCleanup(cena.jarvis.fechar)
+        return cena, sons, cli
 
     def test_continua_em_trocas_seguidas_e_recomeca_depois_de_cada_resposta(self) -> None:
         cena, sons = cena_com_sons()
@@ -910,30 +583,26 @@ class TestModoDeConversa(unittest.TestCase):
                 self.assertEqual(falar_ate(cena, "what time is it"), 1)
                 self.assertEqual(len(cena.m.locais), 2)
 
-    def test_uma_pergunta_geral_nao_dita_como_pergunta_nunca_vai_ao_claude(self) -> None:
-        cena, sons, arranque = self.cena_com_perguntas(
-            saida_json("Six is fine."), respostas_llm=[LIDA_COMO_PERGUNTA, LIDA_COMO_PERGUNTA]
-        )
+    def test_uma_pergunta_geral_nao_dita_como_pergunta_nao_diz_nada(self) -> None:
+        cena, sons, processos = self.cena_sem_cerebro([LIDA_COMO_PERGUNTA, LIDA_COMO_PERGUNTA])
         cena.pedir(HORAS)
         prazo = cena.jarvis.seguimento.atual.prazo
         falados = list(cena.falados)
         falar_ate(cena, CONVERSA_A_VOLTA)
         cena.passar(SILENCIO, 0.1, verificar=True)
-        self.assertEqual(arranque.processos, [], "nada saiu do PC")
         self.assertEqual(cena.falados, falados)
         self.assertEqual(cena.jarvis.seguimento.atual.prazo, prazo)
         self.assertEqual(sons, ["abrir"])
         self.assertIn("modo de conversa: pergunta geral que nao e dita como pergunta ao jarvis", cena.log())
-        # A mesma frase com a tecla e dirigida ao jarvis: vai.
+        # A mesma frase com a tecla e dirigida ao jarvis: ouve que sem o cerebro nao ha perguntas gerais.
         cena.motor.textos.append(CONVERSA_A_VOLTA)
         cena.passar(VOZ, 1.0, premida=True)
         cena.passar(SILENCIO, 0.1)
         self.assertEqual(cena.ouvido.transcrever_pendentes(), 1)
-        self.assertTrue(cena.jarvis.esperar_pergunta(5.0))
-        self.assertEqual(len(arranque.processos), 1)
-        self.assertEqual(cena.falados[-1], "Six is fine.")
+        self.assertIn(cena.falados[-1], SEM_PERGUNTAS_EN)
+        self.assertEqual(processos, [], "nada saiu do PC")
 
-    def test_uma_pergunta_dita_como_pergunta_na_janela_vai(self) -> None:
+    def test_uma_pergunta_dita_como_pergunta_na_janela_tem_resposta(self) -> None:
         casos = (
             ("should we leave at six?", LIDA_COMO_PERGUNTA),
             ("how long does it take to get to Porto", resposta_llm("pergunta_geral", "", "How long to Porto?")),
@@ -941,17 +610,15 @@ class TestModoDeConversa(unittest.TestCase):
         )
         for texto, lida in casos:
             with self.subTest(texto=texto):
-                cena, _sons, arranque = self.cena_com_perguntas(saida_json("About three hours."), respostas_llm=[lida])
+                cena, _sons, processos = self.cena_sem_cerebro([lida])
                 cena.pedir(HORAS)
                 self.assertEqual(cena.dizer(texto), 1)
-                self.assertTrue(cena.jarvis.esperar_pergunta(5.0))
-                self.assertEqual(len(arranque.processos), 1)
-                self.assertEqual(cena.falados[-1], "About three hours.")
+                self.assertIn(cena.falados[-1], SEM_PERGUNTAS_EN)
+                self.assertEqual(processos, [])
 
     def test_a_palavra_de_ativacao_dita_na_janela_sai_do_texto_e_conta_como_dirigida(self) -> None:
-        cena, sons, arranque = self.cena_com_perguntas(
-            saida_json("Light rain after 3 pm."),
-            respostas_llm=[resposta_llm("pergunta_geral", "", "What about the rain in Porto tomorrow?")],
+        cena, sons, _processos = self.cena_sem_cerebro(
+            [resposta_llm("pergunta_geral", "", "What about the rain in Porto tomorrow?")]
         )
         cena.pedir(HORAS)
         self.assertEqual(cena.dizer("Hey Jarvis, what time is it"), 1)
@@ -959,43 +626,45 @@ class TestModoDeConversa(unittest.TestCase):
         self.assertIn("palavra de ativacao retirada: 'Hey Jarvis'", cena.log())
         self.assertIn("texto: 'what time is it'", cena.log())
         self.assertEqual(cena.dizer("Hey Jarvis, rain in Porto tomorrow"), 1)
-        self.assertTrue(cena.jarvis.esperar_pergunta(5.0))
-        self.assertEqual(len(arranque.processos), 1, "com a palavra de ativacao e dirigida ao jarvis")
+        self.assertIn(cena.falados[-1], SEM_PERGUNTAS_EN, "com a palavra de ativacao e dirigida ao jarvis")
         self.assertEqual(sons, ["abrir"])
 
     def test_dinheiro_na_janela_e_recusado_mesmo_sem_ser_pergunta(self) -> None:
-        cena, _sons, arranque = self.cena_com_perguntas(saida_json("nunca"))
-        cena.pedir(HORAS)
-        cena.dizer("sell my Tesla shares")
-        self.assertIn("money and trading requests", cena.falados[-1])
-        self.assertEqual(arranque.processos, [])
-        self.assertEqual(cena.canal.recebidos, [])
-        self.assertFalse(cena.jarvis.confirmacao.a_espera)
+        for com_cerebro in (False, True):
+            with self.subTest(com_cerebro=com_cerebro):
+                cena, _sons, _ = self.cena_com_cerebro() if com_cerebro else self.cena_sem_cerebro()
+                cena.pedir(HORAS)
+                cena.dizer("sell my Tesla shares")
+                self.assertIn("money and trading requests", cena.falados[-1])
+                self.assertEqual(cena.canal.recebidos, [])
+                self.assertFalse(cena.jarvis.confirmacao.a_espera)
 
-    # -- pergunta geral a caminho, avisos e sono
+    # -- resposta do cerebro a caminho, avisos e sono
 
-    def test_uma_pergunta_geral_na_janela_nao_fecha_nem_reabre_com_som(self) -> None:
-        cena, sons, arranque = self.cena_com_perguntas(
-            saida_json("It is 22 degrees and sunny in Porto today."),
-            respostas_llm=[resposta_llm("pergunta_geral", "", "What is the temperature in Porto?")],
-        )
+    def test_uma_resposta_do_cerebro_na_janela_nao_fecha_nem_reabre_com_som(self) -> None:
+        porta = threading.Event()
+        self.addCleanup(porta.set)
+        cena, sons, cli = self.cena_com_cerebro(bloqueada(porta=porta, depois=("It is 22 degrees and sunny in Porto today.",)))
         cena.pedir(HORAS)
-        self.assertEqual(cena.dizer("what is the temperature in Porto today"), 1)
+        cena.jarvis.espera_do_aviso_s = 0.05
+        cena.pedir("hey jarvis, what is the temperature in Porto today")
+        self.assertIn("escuta | em pausa ate a resposta do cerebro ser dita", cena.log())
+        porta.set()
         self.assertTrue(cena.jarvis.esperar_pergunta(5.0))
-        self.assertEqual(len(arranque.processos), 1)
+        self.assertEqual(len(cli.processos), 1)
         self.assertEqual(cena.falados[-1], "It is 22 degrees and sunny in Porto today.")
-        self.assertIn("escuta | em pausa ate a resposta da pergunta geral ser dita", cena.log())
         self.assertTrue(cena.jarvis.seguimento.aberta(), "a resposta reabre a conversa")
         self.assertEqual(seguimentos(cena)[-1][0], cena.fins_da_fala[-1])
         self.assertEqual(sons, ["abrir"], "sem 'fechar' e 'abrir' enquanto a resposta vinha")
 
-    def test_uma_pergunta_cancelada_a_caminho_fecha_com_som(self) -> None:
-        cena, sons, arranque = self.cena_com_perguntas(
-            "bloqueia", respostas_llm=[resposta_llm("pergunta_geral", "", "What is the temperature in Porto?")]
-        )
+    def test_uma_resposta_do_cerebro_cancelada_a_caminho_fecha_com_som(self) -> None:
+        porta = threading.Event()
+        self.addCleanup(porta.set)
+        cena, sons, cli = self.cena_com_cerebro(bloqueada(porta=porta))
         cena.pedir(HORAS)
-        cena.dizer("what is the temperature in Porto today")
-        self.assertTrue(arranque.a_correr.wait(5.0))
+        cena.jarvis.espera_do_aviso_s = 0.05
+        cena.pedir("hey jarvis, what is the temperature in Porto today")
+        self.assertTrue(esperar_ate(lambda: len(cli.processos) == 1 and cli.processos[0].mensagens))
         self.assertEqual(sons, ["abrir"])
         cena.jarvis.calar_pela_bolinha()
         self.assertTrue(cena.jarvis.esperar_pergunta(5.0))
@@ -1013,6 +682,9 @@ class TestModoDeConversa(unittest.TestCase):
         self.assertEqual(cena.jarvis._entregar_aviso(aviso), OCUPADO, "nunca fala para dentro da janela")
         self.assertEqual(len(cena.falados), falados)
         cena.passar(SILENCIO, SEGUIMENTO_S + 0.5, verificar=True)
+        self.assertFalse(cena.jarvis.seguimento.aberta())
+        self.assertEqual(cena.jarvis._entregar_aviso(aviso), OCUPADO, "ainda dentro da espera sem conversa")
+        cena.passar(SILENCIO, cena.jarvis.espera_dos_avisos_s + 0.5, verificar=True)
         self.assertEqual(cena.jarvis._entregar_aviso(aviso), FALADO)
         self.assertEqual(cena.falados[-1], "Claude in atlas finished.")
         self.assertFalse(cena.jarvis.seguimento.aberta(), "o aviso nao abre a janela")
@@ -1093,7 +765,6 @@ class TestSons(unittest.TestCase):
                     mock.patch.object(app, "carregar_config_tolerante", lambda _caminho, _log: config),
                     mock.patch.object(app, "Interprete"),
                     mock.patch.object(app, "ForjaPorVoz"),
-                    mock.patch.object(app, "PerguntasGerais"),
                     mock.patch.object(app.voz, "definir_lingua_da_voz"),
                     mock.patch.object(app.voz, "definir_voz_inglesa"),
                     mock.patch.object(app, "Jarvis", jarvis_que_para),

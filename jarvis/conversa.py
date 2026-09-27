@@ -25,18 +25,12 @@ curto ou longo.
 Uma pergunta so abre a janela se o utilizador a ouviu: se o filtro da resposta
 falada a cortou, a janela nao abre (o texto inteiro fica no ecra).
 
-Uma resposta a uma PERGUNTA GERAL que acaba numa pergunta ouvida ("... Do you
-want the forecast for tomorrow too?") faz o mesmo na janela de seguimento: a
-frase seguinte continua a pergunta geral, com a memoria da conversa recente,
-sem passar pelas intencoes de projeto (`pergunta_de_seguimento`). "Yes." e
-uma resposta nessa janela, nao cortesia solta.
-
 Depois de qualquer resposta falada, o jarvis continua a ouvir sem palavra de
 ativacao (o modo de conversa, em `jarvis.app`). Daqui vem o que ele precisa:
 "that's all" / "thanks, that's it" fecham essa escuta
-(`e_para_fechar_a_escuta`), e uma pergunta geral ouvida nela so segue se for
-dita como pergunta ao jarvis (`pergunta_dirigida`), para a conversa a volta
-nunca ir ao Claude.
+(`e_para_fechar_a_escuta`), e no recurso sem cerebro uma pergunta geral
+ouvida nela so conta se for dita como pergunta ao jarvis
+(`pergunta_dirigida`), para a conversa a volta nunca ter resposta.
 
 Este modulo so tem as regras (sem threads nem audio); `jarvis.app` liga-as ao
 ouvido, a confirmacao e ao canal.
@@ -51,7 +45,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 from jarvis.interprete import (
-    INTENCAO_PERGUNTA_GERAL,
     INTENCAO_RECUSADA,
     Interpretacao,
     limpar_texto,
@@ -63,9 +56,6 @@ from jarvis.router import _normalizar
 
 #: Quanto tempo a janela espera que o utilizador comece a responder.
 JANELA_S = 8.0
-
-#: Fim de uma pergunta: "?" seguido so de aspas, parenteses ou enfase.
-_FIM_EM_PERGUNTA = re.compile(r"[?¿]\s*[\"'”’»)\]*_]*\s*\Z")
 
 #: Uma resposta com ate este numero de palavras (sem hesitacoes nem o endereco
 #: ao jarvis) vai logo, sem recap. So dentro da janela de conversa.
@@ -210,10 +200,6 @@ def pergunta_dirigida(texto: str | None, lingua: str = "pt") -> bool:
     return bool(palavras) and _ABERTURA_DIRIGIDA.match(" ".join(palavras)) is not None
 
 
-def acaba_em_pergunta(texto: str | None) -> bool:
-    return bool(texto) and bool(_FIM_EM_PERGUNTA.search(texto.strip()))
-
-
 def pede_resposta(texto: str | None, falado: str | None) -> bool:
     """A resposta do Claude faz uma pergunta e o utilizador ouviu-a.
 
@@ -326,52 +312,6 @@ def resposta_literal(
         prompt=literal,
         origem="regra",
         motivo="resposta na janela de conversa (texto ouvido sem hesitacoes, sem reescrita)",
-    )
-
-
-#: Palavras que respondem a uma pergunta de sim ou nao. Sao cortesia fora de
-#: uma conversa ("Yeah." solto nao pede nada), mas depois de uma pergunta sao
-#: a resposta.
-_PALAVRAS_DE_RESPOSTA = frozenset({"yes", "yeah", "yep", "yup", "sim"})
-
-
-def responde_a_pergunta(texto: str | None) -> bool:
-    """A frase tem um "yes"/"sim": depois de uma pergunta nunca e so cortesia."""
-    return any(palavra in _PALAVRAS_DE_RESPOSTA for palavra in _normalizar(texto or "").split())
-
-
-def pergunta_de_seguimento(
-    texto: str, nomes_de_projeto: tuple[str, ...] = (), *, lingua: str = "pt"
-) -> Interpretacao:
-    """A frase dita depois de uma resposta geral que acabou numa pergunta.
-
-    Continua a pergunta geral: nunca passa pelo LLM nem pelas intencoes de
-    projeto, e o texto enviado e o ouvido sem hesitacoes nem o endereco ao
-    jarvis (`limpar_resposta`). A memoria da conversa recente vai com ela
-    (quem a faz e `jarvis.app`). A regra financeira vem antes, ao texto
-    ouvido inteiro e ao que se envia: um pedido de compra ou venda e recusado
-    e nada sai do PC.
-    """
-    ouvido = limpar_texto(texto or "")
-    literal = limpar_resposta(texto, lingua)
-    termo = pedido_financeiro(ouvido, nomes_de_projeto) or pedido_financeiro(literal, nomes_de_projeto)
-    if termo is not None:
-        return Interpretacao(
-            texto=ouvido,
-            intencao=INTENCAO_RECUSADA,
-            projeto=None,
-            prompt="",
-            origem="regra",
-            motivo=f"pedido financeiro na continuacao da pergunta geral ('{termo}')",
-            termo_financeiro=termo,
-        )
-    return Interpretacao(
-        texto=ouvido,
-        intencao=INTENCAO_PERGUNTA_GERAL,
-        projeto=None,
-        prompt=literal,
-        origem="regra",
-        motivo="continuacao da pergunta geral (texto ouvido sem hesitacoes, sem reescrita)",
     )
 
 

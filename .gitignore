@@ -15,6 +15,7 @@ forja/
 # Source files of the conversation feature are code, not conversations.
 !/jarvis/conversa.py
 !/tests/test_conversa.py
+!/tests/test_cerebro_na_conversa.py
 
 # Audio and transcripts (private by nature)
 *.wav

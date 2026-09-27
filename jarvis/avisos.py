@@ -24,13 +24,21 @@ pelo IPC local autenticado de `jarvis.canal_mcp` (porta e segredo em
 `.jarvis/ipc.json`) e sai sempre com 0 e sem nada no stdout: um hook nunca
 bloqueia nem muda o que a sessao faz.
 
-Do lado do jarvis, `Avisos` poe cada aviso numa fila e fala-o quando pode:
+Do lado do jarvis, `Avisos` poe cada aviso numa fila (com limite, sem
+duplicados e com validade) e nunca o diz no meio da conversa:
 
   - a frase e fixa ("<projeto> acabou.", "<projeto> está à espera de ti."): so
     o nome do projeto, que vem da configuracao, nunca conteudo da sessao;
-  - nunca fala por cima do utilizador nem de outra resposta: se o jarvis esta a
-    ouvir, a tratar uma frase, a falar, a espera de confirmacao ou numa janela
-    de conversa, o aviso espera a vez;
+  - uma resposta de um projeto que chega a meio da conversa tambem vira um
+    aviso ("<projeto> respondeu"): o texto dela fica so no ecra e no log;
+  - com a conversa ativa, o cerebro leva os avisos em fila uma unica vez, como
+    dados, na mensagem seguinte (`para_o_cerebro`); so quando esse turno
+    responde mesmo a pessoa (`confirmar`) o aviso sai de vez e nunca e dito;
+    num turno que nao respondeu, voltam a fila (`devolver`) so para serem
+    ditos, nunca outra vez ao cerebro;
+  - os que ficam sao ditos juntos, numa frase curta (`frase_agrupada`), so
+    quando o jarvis ja esta sem conversa ha algum tempo: quem decide e o
+    `entregar` do jarvis;
   - "cala-te" deita fora os avisos em fila e, calado, um aviso so vai para o
     ecra; a dormir, fica so no ecra e no log;
   - no maximo um aviso por sessao (ou por run) por minuto.
@@ -79,6 +87,12 @@ EVENTO_ESPERA = "espera"
 #: Os unicos eventos que um hook pode mandar ao jarvis.
 EVENTOS_DA_SESSAO = frozenset({EVENTO_ACABOU, EVENTO_ESPERA})
 
+#: Uma resposta (ou a falta dela) de um projeto que chegou a meio da conversa.
+EVENTO_RESPOSTA = "resposta"
+EVENTO_SEM_RESPOSTA = "sem_resposta"
+#: Os eventos do canal do proprio jarvis (nunca vem de um hook).
+EVENTOS_DO_CANAL = frozenset({EVENTO_RESPOSTA, EVENTO_SEM_RESPOSTA})
+
 RUN_TERMINADO = "run_terminado"
 RUN_FALHOU = "run_falhou"
 RUN_BLOQUEADO = "run_bloqueado"
@@ -117,6 +131,8 @@ _FRASES = {
     "pt": {
         EVENTO_ACABOU: "{p} acabou.",
         EVENTO_ESPERA: "{p} está à espera de ti.",
+        EVENTO_RESPOSTA: "O {p} respondeu; a resposta está no ecrã.",
+        EVENTO_SEM_RESPOSTA: "O {p} não respondeu; o motivo está no ecrã.",
         RUN_TERMINADO: "O run do {p} terminou.",
         RUN_FALHOU: "O run do {p} falhou.",
         RUN_BLOQUEADO: "O run do {p} está bloqueado.",
@@ -124,10 +140,53 @@ _FRASES = {
     "en": {
         EVENTO_ACABOU: ("{p} is done.", "{p} has finished.", "{p} is all done."),
         EVENTO_ESPERA: ("{p} is waiting for you.", "{p} needs you.", "{p} is waiting on you."),
+        EVENTO_RESPOSTA: ("{p} replied; it's on screen.", "{p} answered, the reply is on screen."),
+        EVENTO_SEM_RESPOSTA: ("{p} didn't answer; the reason is on screen.", "No answer from {p}; details are on screen."),
         RUN_TERMINADO: ("The {p} run finished.", "The {p} run is done."),
         RUN_FALHOU: ("The {p} run failed.", "Bad news, the {p} run failed."),
         RUN_BLOQUEADO: ("The {p} run is blocked.", "The {p} run is stuck."),
     },
+}
+
+#: Os pedacos da frase que junta varios avisos: uma forma so, curta.
+_PARTES = {
+    "pt": {
+        EVENTO_ACABOU: "{p} acabou",
+        EVENTO_ESPERA: "{p} está à espera de ti",
+        EVENTO_RESPOSTA: "há uma resposta do {p} no ecrã",
+        EVENTO_SEM_RESPOSTA: "o {p} não respondeu",
+        RUN_TERMINADO: "o run do {p} terminou",
+        RUN_FALHOU: "o run do {p} falhou",
+        RUN_BLOQUEADO: "o run do {p} está bloqueado",
+        "inicio": "Entretanto, ",
+        "e": " e ",
+        "mais": "{n} avisos mais",
+    },
+    "en": {
+        EVENTO_ACABOU: "{p} is done",
+        EVENTO_ESPERA: "{p} is waiting for you",
+        EVENTO_RESPOSTA: "there's a reply from {p} on screen",
+        EVENTO_SEM_RESPOSTA: "{p} didn't answer",
+        RUN_TERMINADO: "the {p} run finished",
+        RUN_FALHOU: "the {p} run failed",
+        RUN_BLOQUEADO: "the {p} run is blocked",
+        "inicio": "Meanwhile, ",
+        "e": " and ",
+        "mais": "{n} more",
+    },
+}
+#: Avisos nomeados na frase agrupada; os outros so se contam.
+AVISOS_NA_FRASE = 3
+
+#: O aviso como dado para o cerebro (NOTICES e a ferramenta avisos_pendentes).
+AVISO_PARA_O_CEREBRO = {
+    EVENTO_ACABOU: "session_finished",
+    EVENTO_ESPERA: "session_waiting_for_you",
+    EVENTO_RESPOSTA: "replied_full_text_on_screen",
+    EVENTO_SEM_RESPOSTA: "no_reply_details_on_screen",
+    RUN_TERMINADO: "run_finished",
+    RUN_FALHOU: "run_failed",
+    RUN_BLOQUEADO: "run_blocked",
 }
 
 
@@ -135,6 +194,24 @@ def frase_do_aviso(evento: str, projeto: str, lingua: str = "pt", variantes: Var
     """A frase fixa de um aviso, numa das suas formas: so o nome do projeto muda."""
     frases = _FRASES["en" if lingua == "en" else "pt"]
     return (variantes or VARIANTES).escolher(f"avisos.{evento}", frases[evento]).format(p=projeto)
+
+
+def frase_agrupada(grupo: Iterable["Aviso"], lingua: str = "pt") -> str:
+    """Uma frase curta com varios avisos; com um so, a frase dele.
+
+    Nomeia os primeiros `AVISOS_NA_FRASE` e conta o resto.
+    """
+    grupo = list(grupo)
+    if not grupo:
+        return ""
+    if len(grupo) == 1:
+        return grupo[0].texto
+    partes = _PARTES["en" if lingua == "en" else "pt"]
+    ditas = [partes[aviso.evento].format(p=aviso.projeto) for aviso in grupo[:AVISOS_NA_FRASE]]
+    if len(grupo) > AVISOS_NA_FRASE:
+        ditas.append(partes["mais"].format(n=len(grupo) - AVISOS_NA_FRASE))
+    lista = ", ".join(ditas[:-1]) + partes["e"] + ditas[-1]
+    return partes["inicio"] + lista + "."
 
 
 # --- Lado do hook (corre dentro do Claude Code) -------------------------------
@@ -251,11 +328,16 @@ def escrever_settings(projeto: str, pasta: Path, python: str | None = None, ipc:
 
 # --- Lado do jarvis: a fila de avisos -----------------------------------------
 
-#: O que `entregar(aviso)` devolve.
+#: O que `entregar(grupo)` devolve.
 FALADO = "falado"
 OCUPADO = "ocupado"  # fica na fila e tenta-se outra vez
 SO_ECRA = "so_ecra"  # calado ou sem voz: o aviso fica so no ecra
 DESCARTADO = "descartado"  # a dormir
+#: O que `processar` devolve quando os avisos em fila passaram da validade.
+EXPIRADO = "expirado"
+
+#: Avisos ja passados ao cerebro que a ferramenta ainda devolve (os mais recentes).
+MAXIMO_NO_CEREBRO = 20
 
 
 @dataclass(frozen=True)
@@ -263,22 +345,26 @@ class Aviso:
     projeto: str
     evento: str
     texto: str
-    #: Chave do limite: (projeto, sessao) ou (projeto, "run:<id>").
+    #: Chave do limite: (projeto, sessao), (projeto, "run:<id>") ou (projeto, "canal").
     chave: tuple[str, str]
     recebido_em: float
 
 
 class Avisos:
-    """Fila de avisos falados, um de cada vez, quando o jarvis esta livre.
+    """Fila de avisos, nunca ditos no meio da conversa.
 
-    `entregar(aviso)` e do jarvis: fala o aviso se puder e devolve FALADO,
-    OCUPADO, SO_ECRA ou DESCARTADO. `processar()` e o passo que a thread
+    `entregar(grupo)` e do jarvis: recebe todos os avisos validos em fila, diz
+    uma frase so (`frase_agrupada`) se puder e devolve FALADO, OCUPADO,
+    SO_ECRA ou DESCARTADO. `para_o_cerebro()` tira os avisos em fila para a
+    mensagem seguinte ao cerebro e deixa-os a caminho ate o turno acabar:
+    `confirmar()` quando o turno respondeu, `devolver()` quando nao. Um aviso
+    a ser dito nunca vai ao cerebro. `processar()` e o passo que a thread
     corre, exposto para testes deterministas.
     """
 
     def __init__(
         self,
-        entregar: Callable[[Aviso], str],
+        entregar: Callable[[tuple[Aviso, ...]], str],
         *,
         lingua: str = "pt",
         escrever: Callable[[str], object] = print,
@@ -298,8 +384,18 @@ class Avisos:
         self.silencio_depois_da_resposta_s = silencio_depois_da_resposta_s
         self.passo_s = passo_s
         self._fila: collections.deque[Aviso] = collections.deque(maxlen=maximo)
+        #: Os passados ao cerebro, para a ferramenta avisos_pendentes (nunca voltam a fila falada).
+        self._no_cerebro: collections.deque[Aviso] = collections.deque(maxlen=MAXIMO_NO_CEREBRO)
+        #: Os que foram numa mensagem ao cerebro cujo turno ainda nao acabou.
+        self._a_caminho: list[Aviso] = []
+        #: Os que o cerebro ja viu num turno que nao respondeu: so falta dize-los.
+        self._vistos: set[Aviso] = set()
+        #: O grupo que o `processar` esta a tentar dizer agora: nunca vai ao cerebro.
+        self._a_dizer: set[Aviso] = set()
         self._ultimo: dict[tuple[str, str], float] = {}
         self._resposta_em: dict[str, float] = {}
+        #: A ultima vez que a fila foi deitada fora: o que chegou antes nunca volta.
+        self._descartada_em: float | None = None
         self._condicao = threading.Condition()
         self._parar = threading.Event()
         self._fio: threading.Thread | None = None
@@ -333,22 +429,32 @@ class Avisos:
             return False
         return self._por_na_fila(projeto, evento, (projeto.casefold(), f"run:{run}"), self._relogio())
 
+    def receber_resposta(self, projeto: str, *, falhou: bool = False) -> bool:
+        """Uma resposta de um projeto (ou a falha dela) chegou a meio da conversa: so o aviso."""
+        evento = EVENTO_SEM_RESPOSTA if falhou else EVENTO_RESPOSTA
+        return self._por_na_fila(projeto, evento, (projeto.casefold(), "canal"), self._relogio())
+
     def houve_resposta(self, projeto: str) -> None:
-        """Uma resposta do projeto acabou de chegar pelo canal (ja foi dita)."""
+        """Uma resposta do projeto acabou de chegar pelo canal (dita ou posta na fila)."""
         with self._condicao:
             self._resposta_em[projeto.casefold()] = self._relogio()
 
     def _por_na_fila(self, projeto: str, evento: str, chave: tuple[str, str], agora: float) -> bool:
         texto = frase_do_aviso(evento, projeto, self.lingua)
         with self._condicao:
+            repetido = any(
+                aviso.chave == chave and aviso.evento == evento
+                for aviso in (*self._fila, *self._a_caminho)
+            )
             ultimo = self._ultimo.get(chave)
-            if ultimo is not None and agora - ultimo < self.intervalo_s:
-                limitado = True
-            else:
-                limitado = False
+            limitado = not repetido and ultimo is not None and agora - ultimo < self.intervalo_s
+            if not repetido and not limitado:
                 self._ultimo[chave] = agora
                 self._fila.append(Aviso(projeto, evento, texto, chave, agora))
                 self._condicao.notify_all()
+        if repetido:
+            self._registar(f"ja esta na fila: '{texto}' so no log")
+            return False
         if limitado:
             self._registar(f"limite de 1 por minuto: '{texto}' so no log")
             return False
@@ -356,10 +462,14 @@ class Avisos:
         return True
 
     def descartar(self, motivo: str) -> int:
-        """Esvazia a fila (cala-te, dormir). Devolve quantos sairam."""
+        """Esvazia a fila e esquece os passados ao cerebro (cala-te, dormir). Devolve quantos sairam."""
         with self._condicao:
             fora = len(self._fila)
             self._fila.clear()
+            self._no_cerebro.clear()
+            self._a_caminho.clear()
+            self._vistos.clear()
+            self._descartada_em = self._relogio()
         if fora:
             self._registar(f"{fora} aviso(s) em fila deitados fora ({motivo})")
         return fora
@@ -369,34 +479,147 @@ class Avisos:
         with self._condicao:
             return len(self._fila)
 
+    def _tirar_expirados(self, agora: float) -> list[Aviso]:
+        """Tira da fila os avisos fora da validade (com a tranca)."""
+        expirados = [aviso for aviso in self._fila if agora - aviso.recebido_em > self.validade_s]
+        for aviso in expirados:
+            self._fila.remove(aviso)
+            self._vistos.discard(aviso)
+        return expirados
+
+    def _registar_expirados(self, expirados: list[Aviso]) -> None:
+        for aviso in expirados:
+            self.entregues.append((aviso, EXPIRADO))
+            self._registar(f"sem vez em {self.validade_s:.0f} s, fica so no log: {aviso.texto}")
+
+    # -- para o cerebro
+
+    def para_o_cerebro(self, maximo: int | None = None) -> list[Aviso]:
+        """Tira ate `maximo` avisos em fila (os mais antigos) para a mensagem seguinte ao cerebro.
+
+        Ficam a caminho, sem ser ditos, ate o turno acabar: `confirmar` ou
+        `devolver`. Os que o cerebro ja viu e os que estao a ser ditos ficam.
+        """
+        agora = self._relogio()
+        with self._condicao:
+            expirados = self._tirar_expirados(agora)
+            tirados = [aviso for aviso in self._fila if aviso not in self._vistos and aviso not in self._a_dizer]
+            if maximo is not None:
+                tirados = tirados[: max(0, maximo)]
+            for aviso in tirados:
+                self._fila.remove(aviso)
+            self._a_caminho.extend(tirados)
+        self._registar_expirados(expirados)
+        if tirados:
+            self._registar(f"{len(tirados)} aviso(s) na mensagem ao cerebro; so saem da fila se ele responder")
+        return tirados
+
+    def _depois_do_descarte(self, avisos: Iterable[Aviso]) -> list[Aviso]:
+        """Os avisos que chegaram depois de a fila ter sido deitada fora (com a tranca)."""
+        descartada = self._descartada_em
+        return [aviso for aviso in avisos if descartada is None or aviso.recebido_em > descartada]
+
+    def confirmar(self, avisos: Iterable[Aviso]) -> None:
+        """O turno que levou estes avisos respondeu a pessoa: saem de vez e nunca sao ditos."""
+        with self._condicao:
+            avisos = list(avisos)
+            for aviso in avisos:
+                if aviso in self._a_caminho:
+                    self._a_caminho.remove(aviso)
+            confirmados = [aviso for aviso in self._depois_do_descarte(avisos) if aviso not in self._no_cerebro]
+            self._no_cerebro.extend(confirmados)
+        if confirmados:
+            self._registar(f"{len(confirmados)} aviso(s) passados ao cerebro; nao vao ser ditos")
+
+    def devolver(self, avisos: Iterable[Aviso], *, vistos: bool = False) -> None:
+        """Avisos de um turno que nao os passou a pessoa voltam a frente da fila.
+
+        `vistos`: a mensagem chegou ao cerebro, por isso so falta dize-los;
+        nunca voltam a ir ao cerebro. Os que chegaram antes de a fila ser
+        deitada fora (cala-te, dormir) nao voltam.
+        """
+        with self._condicao:
+            avisos = list(avisos)
+            for aviso in avisos:
+                if aviso in self._a_caminho:
+                    self._a_caminho.remove(aviso)
+            devolvidos = self._depois_do_descarte(avisos)
+            for aviso in reversed(devolvidos):
+                if aviso in self._no_cerebro:
+                    self._no_cerebro.remove(aviso)
+                if aviso not in self._fila:
+                    self._fila.appendleft(aviso)
+                if vistos:
+                    self._vistos.add(aviso)
+            if devolvidos:
+                self._condicao.notify_all()
+        if devolvidos:
+            self._registar(
+                f"{len(devolvidos)} aviso(s) que o cerebro nao passou: de volta a fila"
+                + (", so para serem ditos" if vistos else "")
+            )
+
+    def como_dados(self, aviso: Aviso) -> dict[str, object]:
+        """Um aviso como dado para o cerebro: projeto, o que aconteceu e a idade em segundos."""
+        idade = max(0, int(self._relogio() - aviso.recebido_em))
+        return {"project": aviso.projeto, "notice": AVISO_PARA_O_CEREBRO[aviso.evento], "age_s": idade}
+
+    def para_a_ferramenta(self) -> list[dict[str, object]]:
+        """Os avisos recentes para a ferramenta avisos_pendentes.
+
+        O cerebro pediu-os para os dizer: os em fila passam a ele de vez.
+        """
+        agora = self._relogio()
+        with self._condicao:
+            expirados = self._tirar_expirados(agora)
+            tirados = [aviso for aviso in self._fila if aviso not in self._a_dizer]
+            for aviso in tirados:
+                self._fila.remove(aviso)
+                self._vistos.discard(aviso)
+            self._no_cerebro.extend(tirados)
+            recentes = [
+                aviso
+                for aviso in (*self._no_cerebro, *self._a_caminho)
+                if agora - aviso.recebido_em <= self.validade_s
+            ]
+        self._registar_expirados(expirados)
+        if tirados:
+            self._registar(f"{len(tirados)} aviso(s) pedidos pelo cerebro; nao vao ser ditos")
+        recentes.sort(key=lambda aviso: aviso.recebido_em)
+        return [self.como_dados(aviso) for aviso in recentes]
+
     # -- saida
 
     def processar(self) -> str | None:
-        """Tenta o aviso mais antigo. Devolve o desfecho, ou None sem nada na fila."""
+        """Tenta dizer os avisos validos em fila, juntos. Devolve o desfecho, ou None sem nada na fila."""
+        agora = self._relogio()
         with self._condicao:
-            if not self._fila:
-                return None
-            aviso = self._fila[0]
-        if self._relogio() - aviso.recebido_em > self.validade_s:
-            desfecho = "expirado"
-        else:
-            try:
-                desfecho = self._entregar(aviso)
-            except Exception as erro:  # noqa: BLE001 - um aviso falhado nunca para a fila
-                self._registar(f"falhou ao dizer '{aviso.texto}': {erro!r}")
-                desfecho = SO_ECRA
-        if desfecho == OCUPADO:
-            return OCUPADO
+            expirados = self._tirar_expirados(agora)
+            grupo = tuple(self._fila)
+            # Enquanto se tenta dize-los, nenhum turno do cerebro os leva.
+            self._a_dizer = set(grupo)
+        self._registar_expirados(expirados)
+        if not grupo:
+            return EXPIRADO if expirados else None
+        try:
+            desfecho = self._entregar(grupo)
+        except Exception as erro:  # noqa: BLE001 - um aviso falhado nunca para a fila
+            self._registar(f"falhou ao dizer '{frase_agrupada(grupo, self.lingua)}': {erro!r}")
+            desfecho = SO_ECRA
         with self._condicao:
-            if self._fila and self._fila[0] is aviso:
-                self._fila.popleft()
-        self.entregues.append((aviso, desfecho))
-        if desfecho == SO_ECRA:
-            self._registar(f"so no ecra (calado): {aviso.texto}")
-        elif desfecho == DESCARTADO:
-            self._registar(f"so no log (a dormir): {aviso.texto}")
-        elif desfecho == "expirado":
-            self._registar(f"sem vez em {self.validade_s:.0f} s, fica so no log: {aviso.texto}")
+            self._a_dizer = set()
+            if desfecho == OCUPADO:
+                return OCUPADO
+            for aviso in grupo:
+                if aviso in self._fila:
+                    self._fila.remove(aviso)
+                self._vistos.discard(aviso)
+        for aviso in grupo:
+            self.entregues.append((aviso, desfecho))
+            if desfecho == SO_ECRA:
+                self._registar(f"so no ecra (calado): {aviso.texto}")
+            elif desfecho == DESCARTADO:
+                self._registar(f"so no log (a dormir): {aviso.texto}")
         return desfecho
 
     # -- thread

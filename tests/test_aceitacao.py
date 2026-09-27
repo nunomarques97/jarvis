@@ -206,9 +206,14 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
         self.parede.agora += datetime.timedelta(seconds=segundos)
         self.m.avancar(segundos)
 
-    def _tarefa(self, id_: str, frases: list[str]) -> None:
+    def _tarefa(self, id_: str, frases: list[str], *, resposta_antes_da: int | None = None) -> None:
         registo = ac.RegistoDaTarefa(id_, ac.FEITA, inicio=agora_iso(self.parede()), fez_o_pedido=True)
-        for texto in frases:
+        for indice, texto in enumerate(frases):
+            if indice == resposta_antes_da:
+                # A resposta do Claude chega mais tarde, com a janela de seguimento ja fechada.
+                self._passar(self.m.config.escuta.seguimento_s + 0.5)
+                self.m.jarvis.verificar_tempo()
+                self.m.canal.entregar()
             self._passar(2)
             self.m.ouvir(texto)
         self._passar(2)
@@ -232,8 +237,11 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
         self._tarefa("a-06", ["tell orbita to delete the old logs", "cancel"])
         # So aqui o Claude responde com uma pergunta: abre a janela de conversa.
         self.m.canal.resposta = self.pergunta
+        self.m.canal.depois = True
         # "the second one" e uma resposta curta: vai logo, sem recap nem segundo "yes".
-        self._tarefa("d-01", ["ask atlas to ask me which test file to keep", "yes", "the second one"])
+        self._tarefa(
+            "d-01", ["ask atlas to ask me which test file to keep", "yes", "the second one"], resposta_antes_da=2
+        )
         resultados, frases = self._resultados()
 
         self.assertTrue(all(r.acertou for r in resultados.values()), {k: r.intencao_obtida for k, r in resultados.items()})

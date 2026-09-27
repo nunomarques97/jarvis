@@ -3,7 +3,7 @@ r"""Com lingua=en, nenhum texto fixo que o jarvis diz esta em portugues.
 Na aceitacao o jarvis dizia sempre uma frase em portugues que a voz inglesa lia e
 ninguem percebia ("Resposta do Claude Code, nao verificada: ..."). Este teste
 percorre as tabelas inglesas de todos os modulos que falam (app, confirmacao,
-estado, avisos, forja_voz, acoes_locais, pergunta_geral e os textos da conversa,
+estado, avisos, forja_voz, acoes_locais, cerebro e os textos da conversa,
 que vivem na app e na confirmacao), mais as frases de recurso da
 resposta falada, e falha se algum tiver letras acentuadas ou palavras
 portuguesas comuns. Uma tabela nova ou uma chave nova entram sozinhas: o teste
@@ -26,7 +26,7 @@ import re
 import string
 import unittest
 
-from jarvis import acoes_locais, app, avisos, confirmacao, estado, forja_voz, instancia, pergunta_geral
+from jarvis import acoes_locais, app, avisos, cerebro, confirmacao, estado, forja_voz, instancia
 from jarvis import resposta_falada
 from jarvis.persona import VARIANTES
 
@@ -86,7 +86,7 @@ def textos_falados_em_ingles() -> dict[str, list[str]]:
             acoes_locais._texto_horas(agora, "en") for agora in (domingo, segunda)
         ]
         + [acoes_locais._texto_data(agora, "en") for agora in (domingo, segunda)],
-        "pergunta_geral": [pergunta_geral._LINGUAS["en"]],
+        "cerebro": [cerebro.RECUSAS["en"], cerebro._LINGUAS_DA_PERSONA["en"]],
         "instancia": [instancia._MENSAGENS["en"]],
         "resposta_falada": [resposta_falada.frase_de_recurso(caso, "en") for caso in ("sem_texto", "so_tecnico", "sem_corte_seguro")]
         + [

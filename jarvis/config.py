@@ -40,9 +40,17 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     provider = "claude"                       # claude ou codex
 
     [perguntas]                   # opcional; sem ela valem os valores por omissao
-    modelo = "claude-haiku-4-5"   # modelo do Claude Code para as perguntas gerais
-    limite_s = 60                 # espera maxima pela resposta (10 a 300)
-    localizacao = "Portugal"      # onde o utilizador esta, para o tempo e as noticias
+    localizacao = "Portugal"      # onde o utilizador esta, para o tempo e as noticias (vai ao cerebro)
+    # modelo e limite_s continuam aceites, mas ja nao fazem nada: as perguntas vao ao cerebro
+
+    [cerebro]                     # opcional; sem ela valem os valores por omissao
+    ativo = true                  # conversa pelo cerebro (um processo claude persistente)
+    modelo = "claude-haiku-4-5"   # modelo do Claude Code do cerebro
+    contexto_max_tokens = 16000   # acima disto a conversa recomeca com um resumo (4000 a 24000)
+    inativo_min = 30              # minutos sem trocas ate a conversa recomecar com um resumo (1 a 240)
+    limite_s = 60                 # espera maxima por uma resposta do cerebro (10 a 300)
+    reintentar_s = 120            # depois de uma falha, interprete local ate tentar outra vez (10 a 3600)
+    espera_dos_avisos_s = 20      # sem conversa ha este tempo, os avisos em fila sao ditos (5 a 300)
 
     [voz]                         # opcional; sem ela vale a voz por omissao
     nome = "bm_fable"             # voz inglesa do Kokoro (lista fechada VOZES_INGLESAS)
@@ -64,8 +72,8 @@ Formato esperado (ver config.exemplo.toml para o exemplo completo):
     pastas = ["D:/caminho/para/repositorios"]  # raizes; [] desliga a descoberta
 
     [memoria]                     # opcional; sem ela valem os valores por omissao
-    trocas = 10                   # perguntas e respostas lembradas nas perguntas gerais (1 a 10)
-    expira_min = 30               # minutos sem perguntas gerais ate esquecer a conversa (1 a 30)
+    expira_min = 30               # minutos sem frases ate o interprete esquecer as recentes (1 a 30)
+    # trocas continua aceite, mas ja nao faz nada: a conversa fica no cerebro
     factos = 50                   # factos no caderno (1 a 50)
     caracteres = 4000             # caracteres de todos os factos juntos (200 a 4000)
     frases_interprete = 5         # frases recentes que o interprete local recebe (3 a 5)
@@ -194,6 +202,27 @@ LIMITE_DAS_PERGUNTAS_MAXIMO_S = 300.0
 LOCALIZACAO_PADRAO = "Portugal"
 LOCALIZACAO_MAXIMA = 80
 
+#: O cerebro de conversa: modelo rapido, contexto limitado e limites da espera.
+#: `contexto_max_tokens` fica sempre abaixo do contexto duro por chamada que o
+#: jarvis impoe (ver `jarvis.cerebro.CONTEXTO_DURO_TOKENS`).
+MODELO_DO_CEREBRO = "claude-haiku-4-5"
+CONTEXTO_DO_CEREBRO_TOKENS = 16000
+CONTEXTO_DO_CEREBRO_MINIMO_TOKENS = 4000
+CONTEXTO_DO_CEREBRO_MAXIMO_TOKENS = 24000
+INATIVO_DO_CEREBRO_MIN = 30.0
+INATIVO_DO_CEREBRO_MINIMO_MIN = 1.0
+INATIVO_DO_CEREBRO_MAXIMO_MIN = 240.0
+LIMITE_DO_CEREBRO_S = 60.0
+LIMITE_DO_CEREBRO_MINIMO_S = 10.0
+LIMITE_DO_CEREBRO_MAXIMO_S = 300.0
+REINTENTAR_O_CEREBRO_S = 120.0
+REINTENTAR_O_CEREBRO_MINIMO_S = 10.0
+REINTENTAR_O_CEREBRO_MAXIMO_S = 3600.0
+#: Sem conversa ha este tempo, os avisos dos projetos em fila sao ditos juntos.
+ESPERA_DOS_AVISOS_S = 20.0
+ESPERA_DOS_AVISOS_MINIMO_S = 5.0
+ESPERA_DOS_AVISOS_MAXIMO_S = 300.0
+
 #: Uma localizacao e so uma linha curta de texto ("Porto, Portugal"): letras,
 #: digitos, espacos e pontuacao simples. Vai no pedido ao modelo.
 _PADRAO_LOCALIZACAO = re.compile(r"[^\W_](?:[\w .,'()-]*[^\W_])?")
@@ -306,16 +335,40 @@ class ConfigForja:
 
 @dataclass(frozen=True)
 class ConfigPerguntas:
-    """Como o jarvis responde a perguntas gerais pelo Claude Code com pesquisa na web.
+    """Onde o utilizador esta, para as perguntas gerais que o cerebro responde.
 
-    `modelo` vai para `--model`; `limite_s` e a espera maxima pela resposta;
-    `localizacao` diz ao modelo onde o utilizador esta quando a pergunta nao
-    diz (o tempo, os jogos e as noticias de hoje).
+    `localizacao` diz ao cerebro onde o utilizador esta quando a pergunta nao
+    diz (o tempo, os jogos e as noticias de hoje). `modelo` e `limite_s` sao
+    da antiga pergunta por processo: continuam validados, para um
+    config.toml antigo carregar, mas ja nao fazem nada (o cerebro usa
+    `[cerebro] modelo` e `[cerebro] limite_s`).
     """
 
     modelo: str = MODELO_DAS_PERGUNTAS
     limite_s: float = LIMITE_DAS_PERGUNTAS_S
     localizacao: str = LOCALIZACAO_PADRAO
+
+
+@dataclass(frozen=True)
+class ConfigCerebro:
+    """O cerebro de conversa: um processo `claude` persistente (ver `jarvis.cerebro`).
+
+    `ativo` liga a conversa pelo cerebro; `modelo` vai para `--model`;
+    `contexto_max_tokens` e o contexto reportado a partir do qual a conversa
+    seguinte recomeca numa sessao nova, com um resumo; `inativo_min` e o tempo
+    sem trocas que faz o mesmo; `limite_s` e a espera maxima por uma resposta;
+    `reintentar_s` e quanto tempo o jarvis usa o interprete local depois de o
+    cerebro falhar, antes de o tentar outra vez; `espera_dos_avisos_s` e o
+    tempo sem conversa ao fim do qual os avisos dos projetos em fila sao ditos.
+    """
+
+    ativo: bool = True
+    modelo: str = MODELO_DO_CEREBRO
+    contexto_max_tokens: int = CONTEXTO_DO_CEREBRO_TOKENS
+    inativo_min: float = INATIVO_DO_CEREBRO_MIN
+    limite_s: float = LIMITE_DO_CEREBRO_S
+    reintentar_s: float = REINTENTAR_O_CEREBRO_S
+    espera_dos_avisos_s: float = ESPERA_DOS_AVISOS_S
 
 
 @dataclass(frozen=True)
@@ -364,14 +417,15 @@ class ConfigEscuta:
 
 @dataclass(frozen=True)
 class ConfigMemoria:
-    """Limites da memoria das perguntas gerais (ver `jarvis.memoria`).
+    """Limites da memoria (ver `jarvis.memoria`).
 
-    `trocas` e quantas perguntas e respostas recentes vao como contexto;
-    `expira_min` e quanto tempo sem perguntas gerais ate as esquecer;
-    `factos` e `caracteres` limitam o caderno de factos. Todos tem um teto
-    fixo que a configuracao so pode baixar. `frases_interprete` e quantas
-    frases recentes (e o que o jarvis fez com elas) o interprete local
-    recebe, para perceber "send that to jarvis too" (3 a 5).
+    `factos` e `caracteres` limitam o caderno de factos. `frases_interprete`
+    e quantas frases recentes (e o que o jarvis fez com elas) o interprete
+    local recebe, para perceber "send that to jarvis too" (3 a 5), e
+    `expira_min` e quanto tempo sem frases ate as esquecer. Todos tem um teto
+    fixo que a configuracao so pode baixar. `trocas` era o historico da
+    antiga pergunta por processo: continua validado, para um config.toml
+    antigo carregar, mas ja nao faz nada (a conversa fica no cerebro).
     """
 
     trocas: int = TROCAS_MAXIMAS
@@ -412,6 +466,7 @@ class Config:
     #: None quando o config.toml nao tem a tabela [forja].
     forja: ConfigForja | None = None
     perguntas: ConfigPerguntas = ConfigPerguntas()
+    cerebro: ConfigCerebro = ConfigCerebro()
     voz: ConfigVoz = ConfigVoz()
     adaptacao: ConfigAdaptacao = ConfigAdaptacao()
     escuta: ConfigEscuta = ConfigEscuta()
@@ -685,7 +740,7 @@ def _validar_forja(bruto: dict, caminho: Path, validar_caminhos: bool) -> Config
 
 
 def _validar_perguntas(bruto: dict, caminho: Path) -> ConfigPerguntas:
-    """A tabela [perguntas], opcional: modelo do Claude Code, limite e localizacao."""
+    """A tabela [perguntas], opcional: a localizacao (e modelo e limite_s antigos, sem efeito)."""
     if "perguntas" not in bruto:
         return ConfigPerguntas()
     tabela = bruto["perguntas"]
@@ -735,6 +790,66 @@ def _validar_perguntas(bruto: dict, caminho: Path) -> ConfigPerguntas:
             )
         valores["localizacao"] = texto
     return ConfigPerguntas(**valores)
+
+
+def _validar_cerebro(bruto: dict, caminho: Path) -> ConfigCerebro:
+    """A tabela [cerebro], opcional: ativo, modelo, contexto, inatividade e limite."""
+    if "cerebro" not in bruto:
+        return ConfigCerebro()
+    tabela = bruto["cerebro"]
+    if not isinstance(tabela, dict):
+        raise ConfigError(f"'{caminho}': [cerebro] tem de ser uma tabela, nao {type(tabela).__name__}.")
+    permitidas = (
+        "ativo", "modelo", "contexto_max_tokens", "inativo_min", "limite_s", "reintentar_s", "espera_dos_avisos_s"
+    )
+    desconhecidas = sorted(set(tabela) - set(permitidas))
+    if desconhecidas:
+        raise ConfigError(
+            f"'{caminho}': [cerebro] tem chaves desconhecidas: {', '.join(desconhecidas)} "
+            f"(so {', '.join(permitidas)})."
+        )
+    valores: dict[str, object] = {}
+    if "ativo" in tabela:
+        if not isinstance(tabela["ativo"], bool):
+            raise ConfigError(f"'{caminho}': [cerebro].ativo = {tabela['ativo']!r} tem de ser true ou false.")
+        valores["ativo"] = tabela["ativo"]
+    if "modelo" in tabela:
+        modelo = tabela["modelo"]
+        if not isinstance(modelo, str) or not _PADRAO_MODELO_DO_CLAUDE.fullmatch(modelo.strip()):
+            raise ConfigError(
+                f"'{caminho}': [cerebro].modelo = {modelo!r} nao e um nome de modelo do Claude Code "
+                f"(por exemplo \"{MODELO_DO_CEREBRO}\" ou \"sonnet\")."
+            )
+        valores["modelo"] = modelo.strip()
+    if "contexto_max_tokens" in tabela:
+        tokens = tabela["contexto_max_tokens"]
+        if (
+            isinstance(tokens, bool)
+            or not isinstance(tokens, int)
+            or not CONTEXTO_DO_CEREBRO_MINIMO_TOKENS <= tokens <= CONTEXTO_DO_CEREBRO_MAXIMO_TOKENS
+        ):
+            raise ConfigError(
+                f"'{caminho}': [cerebro].contexto_max_tokens = {tokens!r} nao e valido; tem de ser um "
+                f"numero inteiro entre {CONTEXTO_DO_CEREBRO_MINIMO_TOKENS} e {CONTEXTO_DO_CEREBRO_MAXIMO_TOKENS} "
+                f"(por omissao {CONTEXTO_DO_CEREBRO_TOKENS})."
+            )
+        valores["contexto_max_tokens"] = tokens
+    for chave, minimo, maximo, omissao in (
+        ("inativo_min", INATIVO_DO_CEREBRO_MINIMO_MIN, INATIVO_DO_CEREBRO_MAXIMO_MIN, INATIVO_DO_CEREBRO_MIN),
+        ("limite_s", LIMITE_DO_CEREBRO_MINIMO_S, LIMITE_DO_CEREBRO_MAXIMO_S, LIMITE_DO_CEREBRO_S),
+        ("reintentar_s", REINTENTAR_O_CEREBRO_MINIMO_S, REINTENTAR_O_CEREBRO_MAXIMO_S, REINTENTAR_O_CEREBRO_S),
+        ("espera_dos_avisos_s", ESPERA_DOS_AVISOS_MINIMO_S, ESPERA_DOS_AVISOS_MAXIMO_S, ESPERA_DOS_AVISOS_S),
+    ):
+        if chave not in tabela:
+            continue
+        valor = tabela[chave]
+        if isinstance(valor, bool) or not isinstance(valor, (int, float)) or not minimo <= valor <= maximo:
+            raise ConfigError(
+                f"'{caminho}': [cerebro].{chave} = {valor!r} nao e valido; tem de ser um numero "
+                f"entre {minimo:g} e {maximo:g} (por omissao {omissao:g})."
+            )
+        valores[chave] = float(valor)
+    return ConfigCerebro(**valores)
 
 
 def _validar_voz(bruto: dict, caminho: Path) -> ConfigVoz:
@@ -1031,6 +1146,7 @@ def carregar_config(
         interprete=_validar_interprete(bruto, caminho),
         forja=_validar_forja(bruto, caminho, validar_caminhos),
         perguntas=_validar_perguntas(bruto, caminho),
+        cerebro=_validar_cerebro(bruto, caminho),
         voz=_validar_voz(bruto, caminho),
         adaptacao=_validar_adaptacao(bruto, caminho),
         escuta=_validar_escuta(bruto, caminho),

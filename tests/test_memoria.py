@@ -1,10 +1,8 @@
-r"""Testes da memoria das perguntas gerais (jarvis/memoria.py).
+r"""Testes da memoria do jarvis (jarvis/memoria.py).
 
-Sem microfone, sem som, sem LLM e sem Claude. O relogio do historico e
+Sem microfone, sem som, sem LLM e sem Claude. O relogio das frases recentes e
 injetado e o caderno escreve so em pastas temporarias. O que protegem:
 
-  * o historico guarda no maximo 10 trocas (e o teto nao se sobe), corta cada
-    texto, expira ao fim de 30 minutos sem perguntas e limpa-se logo;
   * o caderno grava de forma atomica, respeita os limites de factos e de
     caracteres (e o teto nao se sobe), sobrevive a um ficheiro estragado ou
     grande demais sem o apagar, e o contexto nunca passa dos limites;
@@ -27,15 +25,12 @@ from jarvis.config import ConfigMemoria
 from jarvis.interprete import INTENCAO_RECUSADA
 from jarvis.memoria import (
     CAMINHO_DO_CADERNO,
-    MAXIMO_DA_PERGUNTA,
-    MAXIMO_DA_RESPOSTA,
     MAXIMO_DO_FICHEIRO_BYTES,
     MAXIMO_POR_FACTO,
     CadernoCheio,
     CadernoDeFactos,
     FactoRecusado,
     FrasesRecentes,
-    HistoricoDePerguntas,
     contexto_do_interprete,
     facto_mais_parecido,
     factos_relacionados,
@@ -52,83 +47,6 @@ class Relogio:
 
     def __call__(self) -> float:
         return self.agora
-
-
-# --- Historico ------------------------------------------------------------------
-
-
-class TestHistorico(unittest.TestCase):
-    def setUp(self) -> None:
-        self.relogio = Relogio()
-        self.historico = HistoricoDePerguntas(relogio=self.relogio)
-
-    def test_guarda_no_maximo_10_trocas_e_esquece_as_mais_antigas(self) -> None:
-        for numero in range(1, 14):
-            self.assertTrue(self.historico.acrescentar(f"pergunta {numero}", f"resposta {numero}"))
-        trocas = self.historico.trocas()
-        self.assertEqual(len(trocas), 10)
-        self.assertEqual(trocas[0].pergunta, "pergunta 4")
-        self.assertEqual(trocas[-1].resposta, "resposta 13")
-
-    def test_o_teto_de_10_nao_se_sobe(self) -> None:
-        for invalido in (0, 11, 100, True, 5.0):
-            with self.subTest(invalido=invalido):
-                with self.assertRaises(ValueError):
-                    HistoricoDePerguntas(invalido)
-        with self.assertRaises(ValueError):
-            HistoricoDePerguntas(10, 31 * 60)
-
-    def test_um_limite_mais_baixo_da_config(self) -> None:
-        historico = HistoricoDePerguntas.da_config(ConfigMemoria(trocas=3, expira_min=5), relogio=self.relogio)
-        for numero in range(5):
-            historico.acrescentar(f"p{numero}", f"r{numero}")
-        self.assertEqual([t.pergunta for t in historico.trocas()], ["p2", "p3", "p4"])
-        self.relogio.agora += 5 * 60
-        self.assertEqual(historico.trocas(), ())
-
-    def test_expira_ao_fim_de_30_minutos_sem_perguntas(self) -> None:
-        self.historico.acrescentar("who won the game", "Benfica won.")
-        self.relogio.agora += 29 * 60 + 59
-        self.assertEqual(len(self.historico.trocas()), 1)
-        self.historico.acrescentar("who scored", "Pavlidis scored twice.")
-        # O prazo conta desde a ultima pergunta respondida.
-        self.relogio.agora += 29 * 60
-        self.assertEqual(len(self.historico.trocas()), 2)
-        self.relogio.agora += 60
-        self.assertEqual(self.historico.trocas(), ())
-
-    def test_uma_troca_depois_do_prazo_comeca_uma_conversa_nova(self) -> None:
-        self.historico.acrescentar("old question", "Old answer.")
-        self.relogio.agora += 30 * 60
-        self.historico.acrescentar("new question", "New answer.")
-        self.assertEqual([t.pergunta for t in self.historico.trocas()], ["new question"])
-
-    def test_limpar_esquece_logo(self) -> None:
-        self.historico.acrescentar("a", "b")
-        self.historico.acrescentar("c", "d")
-        self.assertEqual(self.historico.limpar(), 2)
-        self.assertEqual(self.historico.trocas(), ())
-        self.assertEqual(self.historico.limpar(), 0)
-
-    def test_cada_texto_e_cortado_e_fica_numa_linha(self) -> None:
-        self.historico.acrescentar("q " * 400 + "\nsecond line", "a\n\x07" + "word " * 400)
-        troca = self.historico.trocas()[0]
-        self.assertLessEqual(len(troca.pergunta), MAXIMO_DA_PERGUNTA + 1)
-        self.assertLessEqual(len(troca.resposta), MAXIMO_DA_RESPOSTA + 1)
-        self.assertNotIn("\n", troca.pergunta + troca.resposta)
-        self.assertNotIn("\x07", troca.resposta)
-
-    def test_textos_vazios_nao_entram(self) -> None:
-        self.assertFalse(self.historico.acrescentar("", "answer"))
-        self.assertFalse(self.historico.acrescentar("question", "  \n "))
-        self.assertEqual(self.historico.trocas(), ())
-
-    def test_as_trocas_devolvidas_nao_mudam_o_historico(self) -> None:
-        self.historico.acrescentar("a", "b")
-        trocas = self.historico.trocas()
-        self.assertIsInstance(trocas, tuple)
-        self.historico.acrescentar("c", "d")
-        self.assertEqual(len(trocas), 1)
 
 
 # --- Recusa de segredos e dados financeiros ----------------------------------------

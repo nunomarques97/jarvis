@@ -1,15 +1,8 @@
-"""Memoria das perguntas gerais: a conversa recente e o caderno de factos.
+"""Memoria do jarvis: o caderno de factos e as frases recentes do interprete.
 
-Duas memorias, as duas com tetos fixos, para que cada pergunta geral enviada
-ao Claude tenha um tamanho maximo garantido (e um gasto de quota maximo):
+A conversa em si fica no cerebro (`jarvis.cerebro`), so em RAM. Aqui ficam,
+com tetos fixos:
 
-  - HISTORICO (curto prazo), so em RAM e nunca escrito em disco: as ultimas
-    perguntas gerais respondidas e as respostas tal como foram ditas ou
-    mostradas, para "and who scored?" ter
-    contexto. No maximo `[memoria] trocas` trocas (teto 10), cada texto
-    cortado em caracteres; esquece tudo ao fim de `[memoria] expira_min`
-    minutos sem perguntas gerais (teto 30), e "new conversation" / "nova
-    conversa" esquece logo.
   - CADERNO DE FACTOS (longo prazo), num ficheiro JSON local ignorado pelo
     Git (`memoria/factos.json` por omissao): o que o utilizador pediu para
     lembrar ("remember that ..."). No maximo `[memoria] factos` factos (teto
@@ -24,16 +17,14 @@ Nunca se guardam segredos (palavras-passe, PINs, tokens, chaves, codigos) nem
 dados financeiros (contas, IBAN, cartoes, saldos, salarios, carteiras,
 valores em dinheiro, e tudo o que a regra financeira do interprete apanha):
 `recusa_do_facto` diz porque, antes de qualquer recap, e o caderno volta a
-verificar antes de escrever.
+verificar antes de escrever. O caderno vai para o cerebro como dados, em
+seccoes delimitadas (`jarvis.cerebro`); este modulo nunca envia nada.
 
-O historico e o caderno vao para o Claude como dados, em seccoes delimitadas
-(`jarvis.pergunta_geral`); este modulo nunca envia nada.
-
-Para o interprete local ha uma terceira memoria, tambem so em RAM: as
-ultimas `[memoria] frases_interprete` frases (3 a 5) e o que o jarvis fez com
-cada uma (`FrasesRecentes`), mais ate 3 factos do caderno que partilham uma
-palavra de conteudo com a frase (`factos_relacionados`). O interprete corta
-tudo num bloco de tamanho fixo e nunca tira dali um projeto.
+Para o interprete local (o recurso sem cerebro) ha outra memoria, so em RAM:
+as ultimas `[memoria] frases_interprete` frases (3 a 5) e o que o jarvis fez
+com cada uma (`FrasesRecentes`), mais ate 3 factos do caderno que partilham
+uma palavra de conteudo com a frase (`factos_relacionados`). O interprete
+corta tudo num bloco de tamanho fixo e nunca tira dali um projeto.
 """
 
 from __future__ import annotations
@@ -56,7 +47,6 @@ from jarvis.config import (
     FACTOS_MAXIMOS,
     FRASES_DO_INTERPRETE_MAXIMAS,
     FRASES_DO_INTERPRETE_MINIMAS,
-    TROCAS_MAXIMAS,
     ConfigMemoria,
 )
 from jarvis.interprete import (
@@ -72,10 +62,6 @@ from jarvis.router import _normalizar
 
 #: Onde fica o caderno por omissao (pasta ignorada pelo Git).
 CAMINHO_DO_CADERNO = RAIZ / "memoria" / "factos.json"
-
-#: Cada pergunta e cada resposta do historico sao cortadas nisto.
-MAXIMO_DA_PERGUNTA = 300
-MAXIMO_DA_RESPOSTA = 600
 
 #: Cada facto e cortado nisto (antes do recap: o que se ouve e o que se grava).
 MAXIMO_POR_FACTO = 300
@@ -183,79 +169,6 @@ def recusa_do_facto(texto: str, nomes_de_projeto: tuple[str, ...] | list[str] = 
     if _NUMERO_LONGO.search(limpo):
         return "segredo"
     return None
-
-
-# --- Historico de perguntas (curto prazo, so em RAM) ---------------------------
-
-
-@dataclass(frozen=True)
-class Troca:
-    """Uma pergunta geral respondida e a resposta como foi dita ou mostrada."""
-
-    pergunta: str
-    resposta: str
-
-
-class HistoricoDePerguntas:
-    """As ultimas trocas das perguntas gerais. So em RAM; seguro entre threads.
-
-    `relogio` e injetado nos testes; a expiracao conta desde a ultima troca
-    guardada (a ultima pergunta geral respondida).
-    """
-
-    def __init__(
-        self,
-        maximo: int = TROCAS_MAXIMAS,
-        expira_s: float = EXPIRA_MAXIMO_MIN * 60,
-        *,
-        relogio: Callable[[], float] = time.monotonic,
-    ) -> None:
-        if isinstance(maximo, bool) or not isinstance(maximo, int) or not 1 <= maximo <= TROCAS_MAXIMAS:
-            raise ValueError(f"maximo de trocas invalido: {maximo!r} (1 a {TROCAS_MAXIMAS})")
-        if isinstance(expira_s, bool) or not isinstance(expira_s, (int, float)) or not (
-            0 < expira_s <= EXPIRA_MAXIMO_MIN * 60
-        ):
-            raise ValueError(f"expiracao invalida: {expira_s!r} s")
-        self.maximo = maximo
-        self.expira_s = float(expira_s)
-        self._relogio = relogio
-        self._trinco = threading.Lock()
-        self._trocas: list[Troca] = []
-        self._ultima = 0.0
-
-    @classmethod
-    def da_config(cls, config: ConfigMemoria, *, relogio: Callable[[], float] = time.monotonic) -> "HistoricoDePerguntas":
-        return cls(config.trocas, config.expira_min * 60, relogio=relogio)
-
-    def _expirar(self) -> None:
-        if self._trocas and self._relogio() - self._ultima >= self.expira_s:
-            self._trocas.clear()
-
-    def acrescentar(self, pergunta: str, resposta: str) -> bool:
-        """Guarda uma troca respondida. False (nada guardado) se algum texto vem vazio."""
-        pergunta = _uma_linha(pergunta, MAXIMO_DA_PERGUNTA)
-        resposta = _uma_linha(resposta, MAXIMO_DA_RESPOSTA)
-        if not pergunta or not resposta:
-            return False
-        with self._trinco:
-            self._expirar()
-            self._trocas.append(Troca(pergunta, resposta))
-            del self._trocas[: -self.maximo]
-            self._ultima = self._relogio()
-        return True
-
-    def trocas(self) -> tuple[Troca, ...]:
-        """As trocas ainda vigentes, da mais antiga para a mais recente."""
-        with self._trinco:
-            self._expirar()
-            return tuple(self._trocas)
-
-    def limpar(self) -> int:
-        """Esquece a conversa ja. Devolve quantas trocas havia."""
-        with self._trinco:
-            quantas = len(self._trocas)
-            self._trocas.clear()
-            return quantas
 
 
 # --- Frases recentes para o interprete local (so em RAM) ------------------------

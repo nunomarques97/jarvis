@@ -10,8 +10,10 @@ protegem:
     permission_prompt) e fica no repositorio jarvis, nunca no projeto;
   * o IPC recusa um evento sem segredo, com segredo errado, de outro projeto
     ou fora da lista fechada;
-  * a fila: um aviso de cada vez, nunca por cima do utilizador nem de outra
-    resposta, calado com "cala-te", so no log a dormir, 1 por sessao por minuto;
+  * a fila: os avisos em fila ditos juntos numa frase, nunca por cima do
+    utilizador nem de outra resposta, so depois de um tempo sem conversa,
+    calado com "cala-te", so no log a dormir, 1 por sessao por minuto, sem
+    duplicados;
   * a vigia dos runs FORJA avisa quando um run termina, falha ou bloqueia;
   * do hook a voz em menos de 2 s, e nenhum conteudo tecnico falado.
 
@@ -49,6 +51,7 @@ from jarvis.avisos import (
     comando_do_hook,
     correr_hook,
     evento_do_hook,
+    frase_agrupada,
     frase_do_aviso,
 )
 from jarvis.persona import Variantes
@@ -319,10 +322,14 @@ class _Voz:
         self.desfecho = FALADO
         self.ditos: list[str] = []
 
-    def __call__(self, aviso) -> str:
+    def __call__(self, grupo) -> str:
         if self.desfecho == FALADO:
-            self.ditos.append(aviso.texto)
+            self.ditos.append(frase_agrupada(grupo))
         return self.desfecho
+
+
+def formas_inglesas(evento: str, projeto: str) -> set[str]:
+    return {forma.format(p=projeto) for forma in avisos._FRASES["en"][evento]}
 
 
 class TestFilaDeAvisos(unittest.TestCase):
@@ -334,11 +341,16 @@ class TestFilaDeAvisos(unittest.TestCase):
 
     def test_aviso_dito_com_a_frase_fixa(self) -> None:
         self.assertTrue(self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO))
-        self.assertTrue(self.avisos.receber("orbita", EVENTO_ESPERA, OUTRA_SESSAO))
-        self.assertEqual(self.avisos.processar(), FALADO)
         self.assertEqual(self.avisos.processar(), FALADO)
         self.assertIsNone(self.avisos.processar())
-        self.assertEqual(self.voz.ditos, ["atlas acabou.", "orbita está à espera de ti."])
+        self.assertEqual(self.voz.ditos, ["atlas acabou."])
+
+    def test_varios_avisos_ditos_juntos_numa_frase(self) -> None:
+        self.assertTrue(self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO))
+        self.assertTrue(self.avisos.receber("orbita", EVENTO_ESPERA, OUTRA_SESSAO))
+        self.assertEqual(self.avisos.processar(), FALADO)
+        self.assertIsNone(self.avisos.processar())
+        self.assertEqual(self.voz.ditos, ["Entretanto, atlas acabou e orbita está à espera de ti."])
 
     def test_em_ingles(self) -> None:
         variantes = Variantes()
@@ -362,9 +374,8 @@ class TestFilaDeAvisos(unittest.TestCase):
             self.assertEqual(self.avisos.processar(), OCUPADO)
         self.assertEqual((self.voz.ditos, self.avisos.em_fila), ([], 2))
         self.voz.desfecho = FALADO
-        self.avisos.processar()
-        self.avisos.processar()
-        self.assertEqual(self.voz.ditos, ["atlas acabou.", "orbita acabou."])
+        self.assertEqual(self.avisos.processar(), FALADO)
+        self.assertEqual(self.voz.ditos, ["Entretanto, atlas acabou e orbita acabou."])
 
     def test_limite_de_um_por_sessao_por_minuto(self) -> None:
         self.assertTrue(self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO))
@@ -409,6 +420,143 @@ class TestFilaDeAvisos(unittest.TestCase):
         self.assertEqual(self.avisos.descartar("cala-te"), 2)
         self.assertIsNone(self.avisos.processar())
 
+    def test_sem_duplicados_na_fila(self) -> None:
+        self.avisos.intervalo_s = 0.0
+        self.assertTrue(self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO))
+        self.relogio.avancar(90)
+        self.assertFalse(self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO), "o mesmo aviso ainda em fila")
+        self.assertTrue(self.avisos.receber("atlas", EVENTO_ESPERA, SESSAO))
+        self.assertTrue(self.avisos.receber_resposta("atlas"))
+        self.assertFalse(self.avisos.receber_resposta("atlas"))
+        self.assertEqual(self.avisos.em_fila, 3)
+        self.assertTrue(any("ja esta na fila" in linha for linha in self.linhas))
+
+    def test_fila_com_limite_sai_o_mais_antigo(self) -> None:
+        fila = Avisos(self.voz, escrever=self.linhas.append, relogio=self.relogio, maximo=2)
+        fila.receber("atlas", EVENTO_ACABOU, SESSAO)
+        fila.receber("orbita", EVENTO_ACABOU, SESSAO)
+        fila.receber_run("jarvis", "F-1-a", "done")
+        self.assertEqual(fila.processar(), FALADO)
+        self.assertEqual(self.voz.ditos, ["Entretanto, orbita acabou e o run do jarvis terminou."])
+
+    def test_frase_agrupada_nomeia_tres_e_conta_o_resto(self) -> None:
+        for projeto in ("a1", "a2", "a3", "a4", "a5"):
+            self.avisos.receber(projeto, EVENTO_ACABOU, SESSAO)
+        self.avisos.lingua = "en"
+        grupo = [aviso for aviso in self.avisos._fila]
+        self.assertEqual(frase_agrupada(grupo, "en"), "Meanwhile, a1 is done, a2 is done, a3 is done and 2 more.")
+        self.assertEqual(frase_agrupada(grupo[:2], "pt"), "Entretanto, a1 acabou e a2 acabou.")
+        self.assertEqual(frase_agrupada([], "en"), "")
+
+    def test_resposta_a_meio_da_conversa_so_o_aviso(self) -> None:
+        fila = Avisos(self.voz, lingua="en", escrever=self.linhas.append, relogio=self.relogio)
+        self.assertTrue(fila.receber_resposta("atlas"))
+        self.assertTrue(fila.receber_resposta("orbita", falhou=True))
+        grupo = list(fila._fila)
+        self.assertEqual(
+            frase_agrupada(grupo, "en"), "Meanwhile, there's a reply from atlas on screen and orbita didn't answer."
+        )
+        self.assertIn(frase_agrupada(grupo[:1], "en"), formas_inglesas(avisos.EVENTO_RESPOSTA, "atlas"))
+        self.assertEqual(fila.processar(), FALADO)
+        self.assertEqual(self.voz.ditos, ["Entretanto, há uma resposta do atlas no ecrã e o orbita não respondeu."])
+
+    def test_passados_ao_cerebro_saem_da_fila_e_nunca_sao_ditos(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        self.relogio.avancar(3)
+        self.avisos.receber_run("orbita", "F-1-a", "failed")
+        tirados = self.avisos.para_o_cerebro()
+        self.assertEqual([aviso.projeto for aviso in tirados], ["atlas", "orbita"])
+        self.assertEqual(
+            [self.avisos.como_dados(aviso) for aviso in tirados],
+            [
+                {"project": "atlas", "notice": "session_finished", "age_s": 3},
+                {"project": "orbita", "notice": "run_failed", "age_s": 0},
+            ],
+        )
+        self.assertEqual(self.avisos.para_o_cerebro(), [], "uma unica vez")
+        self.assertIsNone(self.avisos.processar(), "a caminho do cerebro nunca sao ditos")
+        self.avisos.confirmar(tirados)
+        self.assertIsNone(self.avisos.processar())
+        self.assertEqual(self.voz.ditos, [])
+        self.assertEqual(len(self.avisos.para_a_ferramenta()), 2, "a ferramenta ainda os devolve")
+
+    def test_turno_sem_resposta_devolve_os_avisos_so_para_serem_ditos(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        tirados = self.avisos.para_o_cerebro()
+        self.avisos.receber("orbita", EVENTO_ACABOU, OUTRA_SESSAO)
+        self.avisos.devolver(tirados, vistos=True)
+        self.assertEqual(self.avisos.em_fila, 2)
+        self.assertEqual([aviso.projeto for aviso in self.avisos.para_o_cerebro()], ["orbita"], "atlas ja foi visto")
+        self.assertEqual(self.avisos.processar(), FALADO)
+        self.assertEqual(self.voz.ditos, ["atlas acabou."])
+        self.assertIn("so para serem ditos", " ".join(self.linhas))
+
+    def test_so_ate_ao_maximo_de_cada_vez(self) -> None:
+        for numero in range(5):
+            self.avisos.receber_run(f"p{numero}", f"F-{numero}", "done")
+        self.assertEqual([aviso.projeto for aviso in self.avisos.para_o_cerebro(3)], ["p0", "p1", "p2"])
+        self.assertEqual(self.avisos.em_fila, 2)
+
+    def test_repetido_enquanto_a_caminho_do_cerebro(self) -> None:
+        self.avisos.receber_run("orbita", "F-1", "blocked")
+        self.avisos.para_o_cerebro()
+        self.relogio.avancar(avisos.INTERVALO_POR_SESSAO_S + 1)
+        self.assertFalse(self.avisos.receber_run("orbita", "F-1", "blocked"))
+
+    def test_confirmados_depois_de_cala_te_nao_ficam(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        tirados = self.avisos.para_o_cerebro()
+        self.relogio.avancar(1)
+        self.avisos.descartar("cala-te")
+        self.avisos.confirmar(tirados)
+        self.assertEqual(self.avisos.para_a_ferramenta(), [])
+
+    def test_o_grupo_a_ser_dito_nunca_vai_ao_cerebro(self) -> None:
+        levados: list = []
+
+        def entregar(grupo) -> str:
+            # A meio da fala, um turno do cerebro comeca: nao pode levar o que se esta a dizer.
+            levados.extend(fila.para_o_cerebro())
+            levados.extend(fila.para_a_ferramenta())
+            return FALADO
+
+        fila = Avisos(entregar, escrever=lambda _l: None, relogio=self.relogio)
+        fila.receber("atlas", EVENTO_ACABOU, SESSAO)
+        self.assertEqual(fila.processar(), FALADO)
+        self.assertEqual(levados, [])
+        self.assertEqual(fila.em_fila, 0)
+
+    def test_ocupado_o_grupo_volta_a_poder_ir_ao_cerebro(self) -> None:
+        self.voz.desfecho = OCUPADO
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        self.assertEqual(self.avisos.processar(), OCUPADO)
+        self.assertEqual([aviso.projeto for aviso in self.avisos.para_o_cerebro()], ["atlas"])
+
+    def test_devolvidos_quando_a_mensagem_nao_chegou_ao_cerebro(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        tirados = self.avisos.para_o_cerebro()
+        self.avisos.receber("orbita", EVENTO_ACABOU, OUTRA_SESSAO)
+        self.avisos.devolver(tirados)
+        self.assertEqual(self.avisos.para_a_ferramenta(), [
+            {"project": "atlas", "notice": "session_finished", "age_s": 0},
+            {"project": "orbita", "notice": "session_finished", "age_s": 0},
+        ])
+
+    def test_depois_de_cala_te_os_devolvidos_nao_voltam(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        tirados = self.avisos.para_o_cerebro()
+        self.relogio.avancar(1)
+        self.avisos.descartar("cala-te")
+        self.avisos.devolver(tirados)
+        self.assertEqual(self.avisos.em_fila, 0)
+        self.assertEqual(self.avisos.para_a_ferramenta(), [])
+
+    def test_expirados_nao_vao_ao_cerebro(self) -> None:
+        self.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
+        self.relogio.avancar(avisos.VALIDADE_DO_AVISO_S + 1)
+        self.assertEqual(self.avisos.para_o_cerebro(), [])
+        self.assertEqual(self.avisos.entregues[-1][1], avisos.EXPIRADO)
+
     def test_a_thread_fala_logo_que_o_jarvis_fica_livre(self) -> None:
         voz = _Voz()
         voz.desfecho = OCUPADO
@@ -442,6 +590,8 @@ class TestAvisosNoJarvis(unittest.TestCase):
         m.jarvis.avisos.receber("atlas", EVENTO_ACABOU, SESSAO)
         self.assertEqual(m.jarvis.avisos.processar(), OCUPADO)
         m.jarvis.ouvido.ocupado = False
+        self.assertEqual(m.jarvis.avisos.processar(), OCUPADO, "ainda dentro da espera sem conversa")
+        m.avancar(m.jarvis.espera_dos_avisos_s)
         self.assertEqual(m.jarvis.avisos.processar(), FALADO)
         self.assertEqual(m.falados, ["atlas acabou."])
 
@@ -473,6 +623,8 @@ class TestAvisosNoJarvis(unittest.TestCase):
         self.assertEqual(len(m.falados), falados, "nada dito entre o recap e a resposta")
         m.avancar(1)
         m.ouvir("cancela")
+        self.assertEqual(m.jarvis.avisos.processar(), OCUPADO, "ainda dentro da espera sem conversa")
+        m.avancar(m.jarvis.espera_dos_avisos_s)
         self.assertEqual(m.jarvis.avisos.processar(), FALADO)
         self.assertEqual(m.falados[-1], "orbita acabou.")
 

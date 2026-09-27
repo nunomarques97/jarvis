@@ -31,19 +31,16 @@ from jarvis.app import A_CONVERSA, A_OUVIR
 from jarvis.conversa import (
     JANELA_S,
     JanelaDeConversa,
-    acaba_em_pergunta,
     dirigida_ao_jarvis,
     e_para_fechar_a_escuta,
     e_para_sair,
     e_resposta_curta,
     limpar_resposta,
     pede_resposta,
-    pergunta_de_seguimento,
     pergunta_dirigida,
-    responde_a_pergunta,
     resposta_literal,
 )
-from jarvis.interprete import INTENCAO_PERGUNTA_GERAL, INTENCAO_RECUSADA, Interpretacao
+from jarvis.interprete import INTENCAO_RECUSADA, Interpretacao
 from jarvis.ouvido import ESCUTA_CONVERSA, GATILHO_ATIVACAO, GATILHO_JANELA, GATILHO_TECLA, Ouvido
 from jarvis.resposta_falada import resumo_falado
 from jarvis.sessoes import Entrega
@@ -79,15 +76,26 @@ class OuvidoFalso:
         self.fechadas += 1
 
 
+def responder_sem_conversa(m: Montagem) -> None:
+    """A resposta do Claude chega mais tarde, com a janela de seguimento ja fechada (sem conversa).
+
+    A meio da conversa uma resposta nunca e dita: fica no ecra e vira um aviso.
+    """
+    m.avancar(m.config.escuta.seguimento_s + 0.5)
+    m.jarvis.verificar_tempo()
+    m.canal.entregar()
+    # a frase falsa comeca 1 s antes do fim: assim a proxima comeca dentro da janela
+    m.avancar(1.5)
+
+
 def montagem_em_conversa(resposta: str = PERGUNTA, respostas_llm=None) -> Montagem:
     """Ditado confirmado ao atlas; o Claude responde com `resposta`."""
-    m = Montagem([DITADO] + list(respostas_llm or []), canal=CanalFalso(resposta=resposta))
+    m = Montagem([DITADO] + list(respostas_llm or []), canal=CanalFalso(resposta=resposta, depois=True))
     m.jarvis.ouvido = OuvidoFalso()
     m.ouvir("diz ao atlas para corrigir o teste do login")
     m.avancar(1)
     m.ouvir("sim")
-    # a frase falsa comeca 1 s antes do fim: assim a proxima comeca dentro da janela
-    m.avancar(1.5)
+    responder_sem_conversa(m)
     return m
 
 
@@ -95,14 +103,6 @@ def montagem_em_conversa(resposta: str = PERGUNTA, respostas_llm=None) -> Montag
 
 
 class TestPergunta(unittest.TestCase):
-    def test_acaba_em_pergunta(self) -> None:
-        for texto in ("Queres que avance?", "Avanço? ", "Do you want me to run it?\n", "**Faço commit?**", '"Sigo?"'):
-            with self.subTest(texto=texto):
-                self.assertTrue(acaba_em_pergunta(texto))
-        for texto in ("Feito.", "Porquê? Porque sim.", "", None, "Corri os testes!"):
-            with self.subTest(texto=texto):
-                self.assertFalse(acaba_em_pergunta(texto))
-
     def test_so_abre_se_a_pergunta_foi_ouvida(self) -> None:
         self.assertTrue(pede_resposta(PERGUNTA, resumo_falado(PERGUNTA)))
         # uma pergunta cortada pelo filtro da voz nao foi ouvida
@@ -226,38 +226,6 @@ class TestRespostaLiteral(unittest.TestCase):
                 self.assertEqual(interpretacao.prompt, "")
 
 
-class TestPerguntaDeSeguimento(unittest.TestCase):
-    def test_continua_a_pergunta_geral_com_o_texto_ouvido(self) -> None:
-        interpretacao = pergunta_de_seguimento("Uh, Jarvis, yes, the weekend please.", ("atlas",), lingua="en")
-        self.assertEqual(
-            (interpretacao.intencao, interpretacao.projeto, interpretacao.prompt, interpretacao.origem),
-            (INTENCAO_PERGUNTA_GERAL, None, "Yes, the weekend please.", "regra"),
-        )
-        self.assertIn("continuacao da pergunta geral", interpretacao.motivo)
-        self.assertFalse(interpretacao.so_confirmacao)
-
-    def test_pedido_financeiro_recusado(self) -> None:
-        casos = (
-            ("Yes, and buy a hundred euros of bitcoin.", "en"),
-            ("then sell my Tesla shares", "en"),
-            ("sim, e compra ações da Tesla", "pt"),
-        )
-        for texto, lingua in casos:
-            with self.subTest(texto=texto):
-                interpretacao = pergunta_de_seguimento(texto, ("atlas",), lingua=lingua)
-                self.assertEqual(interpretacao.intencao, INTENCAO_RECUSADA)
-                self.assertEqual(interpretacao.prompt, "")
-                self.assertIsNone(interpretacao.projeto)
-
-    def test_sim_responde_e_cortesia_nao(self) -> None:
-        for texto in ("Yes.", "Yeah, please.", "yep", "Sim, por favor."):
-            with self.subTest(texto=texto):
-                self.assertTrue(responde_a_pergunta(texto))
-        for texto in ("Thank you.", "Okay, thanks.", "Uh, um.", "", None, "yesterday"):
-            with self.subTest(texto=texto):
-                self.assertFalse(responde_a_pergunta(texto))
-
-
 class TestLimparResposta(unittest.TestCase):
     def test_frase_do_sponsor_sem_hesitacoes_nem_endereco(self) -> None:
         self.assertEqual(
@@ -332,10 +300,7 @@ class TestJanelaAbreComPergunta(unittest.TestCase):
         self.assertEqual(m.canal.recebidos, [("atlas", "Corrige o teste do login.")])
         self.assertTrue(m.jarvis.janela.aberta())
         self.assertEqual(m.jarvis.janela.projeto, "atlas")
-        # O canal falso responde antes de o jarvis dizer "Enviado.": a escuta
-        # aberta para a pergunta fecha enquanto essa fala soa (o jarvis nunca
-        # se ouve) e reabre quando ela acaba, com o que falta da janela.
-        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0])
+        self.assertEqual(m.jarvis.ouvido.abertas, [8.0])
         self.assertEqual(m.jarvis.painel.atual, A_CONVERSA)
         self.assertIn("janela de 8 s a ouvir sem palavra de ativacao", m.log.texto())
 
@@ -414,10 +379,12 @@ class TestRespostaNaJanela(unittest.TestCase):
         m = montagem_em_conversa()
         m.ouvir("sim", gatilho=GATILHO_JANELA)
         self.assertEqual(m.canal.recebidos[-1], ("atlas", "sim"))
+        falados = list(m.falados)
+        responder_sem_conversa(m)
+        self.assertEqual(len(m.falados), len(falados) + 1, "a pergunta seguinte e dita")
         self.assertTrue(m.jarvis.janela.aberta(), "a resposta seguinte tambem acabou em pergunta")
-        # Cada pergunta abre a escuta, e cada "Enviado." do canal falso (que
-        # responde antes dele) fecha-a enquanto soa e reabre-a no fim.
-        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0, 8.0, 8.0])
+        # Cada pergunta do Claude abre a escuta da conversa.
+        self.assertEqual(m.jarvis.ouvido.abertas, [8.0, 8.0])
 
     def test_so_hesitacoes_nao_envia_e_a_janela_continua(self) -> None:
         m = montagem_em_conversa()
@@ -624,20 +591,16 @@ DITADO_EN = resposta_llm(
 class CanalHeadlessFalso(CanalFalso):
     """O canal falso a responder pelo caminho headless (`claude -p`), como na aceitacao."""
 
-    def enviar(self, projeto: str, texto: str, ao_responder) -> bool:
-        self.recebidos.append((projeto, texto))
-        if self.resposta is not None:
-            ao_responder(projeto, Entrega(projeto=projeto, caminho="headless", texto=self.resposta))
-        return self.aberta
+    CAMINHO = "headless"
 
 
 def montagem_headless_em_ingles() -> Montagem:
-    m = Montagem([DITADO_EN], lingua="en", canal=CanalHeadlessFalso(resposta=RESPOSTA_HEADLESS))
+    m = Montagem([DITADO_EN], lingua="en", canal=CanalHeadlessFalso(resposta=RESPOSTA_HEADLESS, depois=True))
     m.jarvis.ouvido = OuvidoFalso()
     m.ouvir("tell atlas to ask me which of the two test files I want to keep and wait for my answer")
     m.avancar(1)
     m.ouvir("yes")
-    m.avancar(1.5)
+    responder_sem_conversa(m)
     return m
 
 
@@ -652,8 +615,7 @@ class TestPerguntaDoClaudeNoCaminhoHeadless(unittest.TestCase):
             self.assertNotIn(proibido, falada)
         self.assertTrue(m.jarvis.janela.aberta())
         self.assertEqual(m.jarvis.janela.projeto, "atlas")
-        # Aberta para a pergunta e reaberta depois do "Sent." (ver acima).
-        self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S, JANELA_S])
+        self.assertEqual(m.jarvis.ouvido.abertas, [JANELA_S])
         self.assertIn("caminho=headless", m.log.texto())
 
     def test_respostas_curtas_vao_logo_e_diz_sent(self) -> None:

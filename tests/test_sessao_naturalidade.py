@@ -4,12 +4,14 @@ Sem microfone, sem Ollama, sem Claude Code e sem som. O que protegem:
 
   * o guiao tem as 20 trocas, todos os casos que a sessao mede e o passo do
     Sponsor (linha de base agora, sessao final no fim);
-  * o log que o jarvis a serio escreve (montado com pecas falsas) e lido como
-    o script espera: ultima voz, resposta local, resposta a pergunta geral,
-    pergunta "Which project?";
-  * as metas: naturais, latencias desde a ultima voz, repeticoes, "hey jarvis"
-    a mais, perguntas desnecessarias e a interrupcao ("not measured" sem as
-    linhas dela);
+  * o log que o jarvis a serio escreve (montado com pecas falsas, com o
+    cerebro verdadeiro sobre um CLI falso) e lido como o script espera:
+    ultima voz, resposta local, resposta do cerebro com e sem pesquisa na
+    web, tokens, resposta a pergunta geral, pergunta "Which project?";
+  * as metas: naturais, cerebro sem pesquisa (p50 <= 1,5 s), cerebro com
+    pesquisa (p50 <= 3,5 s, p95 <= 6 s), latencias locais desde a ultima voz,
+    repeticoes, "hey jarvis" a mais, perguntas desnecessarias e a interrupcao
+    ("not measured" sem as linhas dela);
   * sem sessao do Sponsor, ou so com ficheiros WAV, o relatorio diz
     "PENDING - Sponsor step"; nunca leva nomes de projetos nem transcricoes;
   * a sessao guiada guarda as janelas e as teclas.
@@ -25,16 +27,20 @@ import contextlib
 import datetime
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from jarvis.app import LogDaSessao, agora_iso
-from jarvis.ouvido import GATILHO_TECLA, Frase
+from jarvis.cerebro import Cerebro
+from jarvis.config import ConfigCerebro
+from jarvis.ouvido import GATILHO_JANELA, GATILHO_TECLA, Frase
 from tests.test_app import Montagem, resposta_llm
-from tests.test_pergunta_geral import ArranqueFalso, perguntas_de_teste, saida_json
+from tests.test_cerebro import CLI_FALSO, HOJE, CliFalso, delta, init, inicio, resultado, uso_da_web
 
 RAIZ = Path(__file__).resolve().parent.parent
 
@@ -53,12 +59,29 @@ def _carregar_script(nome: str):
 sn = _carregar_script("sessao_naturalidade")
 
 INICIO = datetime.datetime(2026, 9, 27, 10, 0, 0)
+Troca = sn.Troca
 TROCAS = sn.ler_guiao()
 POR_ID = {t.id: t for t in TROCAS}
 
 
 def _avaliar(sessao, linhas):
     return sn.avaliar_sessao(sessao, TROCAS, sn.ler_log(linhas))
+
+
+def _sessao_com(trocas, tempos_por_id: dict):
+    """Como `sn.sessao_falsa`, com tempos proprios em algumas trocas."""
+    log = sn.EscritorDeLogFalso(INICIO)
+    log.arranque()
+    sessao = sn.Sessao(fase=sn.FASE_BASE, projetos=dict(sn.PROJETOS_FICTICIOS))
+    for troca in trocas:
+        log.avancar(10)
+        registo = sn.RegistoDaTroca(troca.id, sn.FEITA, inicio=agora_iso(log.agora), marca=sn.NATURAL)
+        log.avancar(3)
+        sn.escrever_troca_falsa(log, troca, **tempos_por_id.get(troca.id, {}))
+        log.avancar(2)
+        registo.fim = agora_iso(log.agora)
+        sessao.trocas.append(registo)
+    return sessao, log.linhas
 
 
 class TestGuiao(unittest.TestCase):
@@ -71,12 +94,45 @@ class TestGuiao(unittest.TestCase):
     def test_so_o_pedido_sem_projeto_espera_uma_pergunta(self) -> None:
         self.assertEqual([t.tipo for t in TROCAS if t.pergunta_esperada], ["sem-projeto"])
 
-    def test_uma_resposta_que_acaba_em_pergunta_e_depois_a_continuacao(self) -> None:
+    def test_cozinhar_e_depois_um_seguimento_que_depende_do_contexto(self) -> None:
         ids = [t.id for t in TROCAS]
-        pergunta = next(t for t in TROCAS if t.tipo == "pergunta-que-pergunta")
-        seguinte = TROCAS[ids.index(pergunta.id) + 1]
+        cozinhar = next(t for t in TROCAS if "cook" in t.dizer)
+        self.assertEqual(cozinhar.tipo, "conversa")
+        seguinte = TROCAS[ids.index(cozinhar.id) + 1]
         self.assertEqual(seguinte.tipo, "seguimento")
         self.assertIn('sem "hey jarvis"', seguinte.dizer)
+        self.assertIn("The first dish?", seguinte.dizer)
+
+    def test_o_guiao_cobre_a_conversa_pelo_cerebro(self) -> None:
+        def uma(tipo: str, *palavras: str) -> Troca:
+            achadas = [t for t in TROCAS if t.tipo == tipo and all(p in t.dizer for p in palavras)]
+            self.assertTrue(achadas, f"falta uma troca '{tipo}' com {palavras}")
+            return achadas[0]
+
+        uma("conversa", "how are you doing")
+        uma("pesquisa", "weather")
+        estado = uma("estado", "<projeto-1>")
+        self.assertNotIn("status", estado.dizer, "o estado e pedido de forma natural")
+        ditado = uma("ditado", "<projeto-1>")
+        self.assertIn('"yes"', ditado.acontecer)
+        avisos = [t for t in TROCAS if t.tipo == "aviso"]
+        self.assertTrue(avisos)
+        self.assertTrue(any("nunca corta" in t.acontecer for t in avisos))
+        self.assertLess([t.id for t in TROCAS].index(ditado.id), [t.id for t in TROCAS].index(avisos[0].id))
+        uma("interromper", "that's enough")
+        ids = [t.id for t in TROCAS]
+        dormir = uma("local", "go to sleep")
+        acordar = TROCAS[ids.index(dormir.id) + 1]
+        self.assertIn("hey jarvis", acordar.dizer)
+        self.assertIn("(a dormir)", acordar.dizer)
+
+    def test_as_teclas_e_as_metas_estao_no_guiao(self) -> None:
+        texto = sn.GUIAO.read_text(encoding="utf-8")
+        for tecla in sn.MARCAS:
+            self.assertIn(f"| `{tecla}` |", texto)
+        self.assertIn("| trocas marcadas naturais | pelo menos 16 de 20 |", texto)
+        self.assertIn("primeira frase falada | p50 <= 1,5 s |", texto)
+        self.assertIn("primeira frase falada | p50 <= 3,5 s, p95 <= 6 s |", texto)
 
     def test_marcadores_trocados_pelos_nomes(self) -> None:
         projetos = sn.nomes_dos_marcadores(["alfa", "beta", "gama"])
@@ -169,6 +225,61 @@ class TestLerLog(unittest.TestCase):
         frases = sorted(sn.ler_log(log.linhas).frases, key=lambda f: f.numero)
         self.assertEqual([f.perguntas for f in frases], [1, 0, 1, 1, 0, 0])
 
+    def _frases(self, log) -> list:
+        return sorted(sn.ler_log(log.linhas).frases, key=lambda f: (f.segmento, f.numero))
+
+    def test_turnos_do_cerebro_com_e_sem_pesquisa_e_os_tokens(self) -> None:
+        log = sn.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        log.frase_do_cerebro(resposta_ms=1100.0)
+        log.frase_do_cerebro(resposta_ms=2900.0, web=True, aviso_ms=950.0)
+        log.frase("horas", fala_ms=600.0)
+        frases = self._frases(log)
+        self.assertEqual([f.caminho for f in frases], ["brain", "brain + web search", "local"])
+        self.assertEqual([f.resposta_cerebro_ms for f in frases], [1100.0, 2900.0, None])
+        self.assertEqual(frases[1].fala_ms, 950.0, "o primeiro som foi o aviso curto")
+        self.assertEqual(frases[0].tokens, {"input": 12, "cache_read": 4688, "cache_creation": 300, "output": 40})
+        self.assertEqual((frases[0].entrada_do_cerebro, frases[1].entrada_do_cerebro), (5000, 9000))
+        self.assertEqual([f.geral for f in frases], [False, False, False])
+        self.assertEqual([f.perguntas for f in frases], [0, 0, 0])
+
+    def test_o_resumo_fecha_o_turno_mais_antigo_ainda_aberto(self) -> None:
+        # Uma frase nova chega antes do resumo do turno que ela substituiu.
+        log = sn.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        log.frase_do_cerebro(resposta_ms=None, com_resumo=False)
+        log.frase_do_cerebro(resposta_ms=1000.0, com_resumo=False)
+        log.resumo_do_cerebro(estado="cancelado", web=True)
+        log.resumo_do_cerebro()
+        frases = self._frases(log)
+        self.assertEqual(
+            [(f.estado_do_cerebro, f.pesquisa_web) for f in frases], [("cancelado", True), ("respondido", False)]
+        )
+
+    def test_resumo_sem_turno_aberto_ou_de_outro_processo_nao_fecha_nada(self) -> None:
+        log = sn.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        log.frase_do_cerebro(com_resumo=False)
+        log.arranque()
+        log.linha("cerebro | falhou (erro) | intencao=cerebro")
+        log.frase_do_cerebro(com_resumo=False)
+        log.linha("cerebro | falhou (o Claude Code devolveu um erro (error_during_execution)) | intencao=cerebro")
+        antiga, nova = self._frases(log)
+        self.assertEqual((antiga.estado_do_cerebro, antiga.pesquisa_web), (None, None))
+        self.assertEqual(antiga.caminho, "brain (no summary line)")
+        self.assertEqual((nova.estado_do_cerebro, nova.pesquisa_web, nova.tokens), ("falhou", False, {}))
+
+    def test_texto_dito_com_pesquisa_web_nao_engana_o_leitor(self) -> None:
+        log = sn.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        log.frase_do_cerebro(com_resumo=False)
+        log.linha(
+            "cerebro | respondido em 1.0 s (ok) | intencao=cerebro | pesquisa web: nao | tokens: input=5 output=9 "
+            "| contexto: 5 tokens | primeiro texto: 300 ms: Claude says: 'no | pesquisa web: sim | tokens: input=99999'"
+        )
+        frase = self._frases(log)[0]
+        self.assertEqual((frase.pesquisa_web, frase.tokens), (False, {"input": 5, "output": 9}))
+
 
 class TestMetas(unittest.TestCase):
     def test_sessao_perfeita_cumpre(self) -> None:
@@ -179,19 +290,75 @@ class TestMetas(unittest.TestCase):
 
     def test_limites_de_cada_meta(self) -> None:
         casos = {
-            "local p50 no limite": (dict(local_ms=1000.0), 0),
-            "local acima": (dict(local_ms=1001.0), 1),
-            "geral no limite": (dict(geral_ms=3500.0), 0),
-            "geral acima": (dict(geral_ms=3600.0), 1),
-            "primeiro som no limite": (dict(som_ms=1200.0), 0),
-            "primeiro som acima": (dict(som_ms=1300.0), 1),
-            "interrupcao abaixo de 300": (dict(interrupcao_ms=299.0), 0),
-            "interrupcao de 300 falha": (dict(interrupcao_ms=300.0), 1),
+            "cerebro p50 no limite": (dict(cerebro_ms=1500.0), []),
+            "cerebro acima": (dict(cerebro_ms=1501.0), [sn.NOME_CEREBRO]),
+            "pesquisa no limite": (dict(pesquisa_ms=3500.0), []),
+            "pesquisa acima": (dict(pesquisa_ms=3600.0), [sn.NOME_PESQUISA]),
+            "aviso curto lento nao conta na pesquisa": (dict(som_ms=2500.0), []),
+            "local p50 no limite": (dict(local_ms=1000.0), []),
+            "local acima": (dict(local_ms=1001.0), [sn.NOME_LOCAL]),
+            "interrupcao abaixo de 300": (dict(interrupcao_ms=299.0), []),
+            "interrupcao de 300 falha": (dict(interrupcao_ms=300.0), ["interruption, speech onset -> voice stopped"]),
         }
         for nome, (tempos, falhas) in casos.items():
             with self.subTest(nome=nome):
                 avaliacao = _avaliar(*sn.sessao_falsa(TROCAS, INICIO, **tempos))
-                self.assertEqual(len(avaliacao.falhas), falhas, avaliacao.falhas)
+                self.assertEqual([m.nome for m in avaliacao.medidas if m.cumpre is False], falhas)
+
+    def test_as_metas_do_cerebro_sao_separadas_da_pesquisa(self) -> None:
+        avaliacao = _avaliar(*sn.sessao_falsa(TROCAS, INICIO))
+        medidas = {m.nome: m for m in avaliacao.medidas}
+        self.assertEqual(medidas[sn.NOME_CEREBRO].meta, "p50 <= 1500 ms")
+        self.assertEqual(medidas[sn.NOME_PESQUISA].meta, "p50 <= 3500 ms, p95 <= 6000 ms")
+        com_cerebro = sum(1 for t in TROCAS if t.tipo not in ("local", "pesquisa")) + 1  # o sem-projeto tem duas
+        self.assertEqual(len(avaliacao.cerebro_ms), com_cerebro)
+        self.assertEqual(len(avaliacao.pesquisa_ms), sum(1 for t in TROCAS if t.tipo == "pesquisa"))
+        self.assertNotIn("general answer, last voice -> first answer sentence", medidas)
+
+    def test_p95_da_pesquisa(self) -> None:
+        pesquisas = [t.id for t in TROCAS if t.tipo == "pesquisa"]
+        sessao, linhas = _sessao_com(TROCAS, {pesquisas[-1]: dict(pesquisa_ms=6500.0)})
+        avaliacao = _avaliar(sessao, linhas)
+        self.assertEqual(sn._p(avaliacao.pesquisa_ms, 50), 3000.0)
+        self.assertEqual([m.nome for m in avaliacao.medidas if m.cumpre is False], [sn.NOME_PESQUISA])
+
+    def test_sem_pesquisas_a_meta_fica_not_measured_mas_sem_cerebro_falha(self) -> None:
+        sessao, linhas = sn.sessao_falsa(TROCAS, INICIO)
+        sem_web = [linha.replace("pesquisa web: sim (1 uso(s), 1 pesquisa(s))", "pesquisa web: nao") for linha in linhas]
+        avaliacao = _avaliar(sessao, sem_web)
+        self.assertEqual(avaliacao.pesquisa_ms, [])
+        self.assertIn(sn.NOME_PESQUISA, avaliacao.nao_medidas)
+        self.assertEqual(avaliacao.estado, sn.ESTADO_CUMPRIDA)
+        self.assertTrue(any("web search target is not measured" in nota for nota in avaliacao.notas))
+        # Uma sessao so com o interprete local nao cumpre a meta do cerebro.
+        sem_cerebro = [linha for linha in linhas if "intencao=cerebro" not in linha]
+        avaliacao = _avaliar(sessao, sem_cerebro)
+        medidas = {m.nome: m for m in avaliacao.medidas}
+        self.assertEqual((medidas[sn.NOME_CEREBRO].obtido, medidas[sn.NOME_CEREBRO].cumpre), ("no samples", False))
+        self.assertTrue(any("no sentence went to the brain" in nota for nota in avaliacao.notas))
+
+    def test_perguntas_gerais_do_interprete_mantem_as_metas_delas(self) -> None:
+        log = sn.EscritorDeLogFalso(INICIO)
+        log.arranque()
+        sessao = sn.Sessao(fase=sn.FASE_BASE, projetos=dict(sn.PROJETOS_FICTICIOS))
+        for troca in TROCAS:
+            log.avancar(10)
+            registo = sn.RegistoDaTroca(troca.id, sn.FEITA, inicio=agora_iso(log.agora), marca=sn.NATURAL)
+            log.avancar(3)
+            if troca.tipo == "conversa":
+                numero = log.frase("pergunta_geral", fala_ms=1300.0)
+                log.avancar(3)
+                log.resposta_geral(numero, 3200.0)
+            else:
+                sn.escrever_troca_falsa(log, troca)
+            log.avancar(2)
+            registo.fim = agora_iso(log.agora)
+            sessao.trocas.append(registo)
+        avaliacao = _avaliar(sessao, log.linhas)
+        falhas = {m.nome for m in avaliacao.medidas if m.cumpre is False}
+        self.assertEqual(falhas, {"general answer, last voice -> first sound of any kind"})
+        self.assertEqual(set(avaliacao.geral_ms), {3200.0})
+        self.assertNotIn(1300.0, avaliacao.local_ms)
 
     def test_interrupcao_falsa_falha(self) -> None:
         avaliacao = _avaliar(*sn.sessao_falsa(TROCAS, INICIO, interrupcao_ms=None))
@@ -234,7 +401,7 @@ class TestMetas(unittest.TestCase):
 
     def test_sem_a_linha_da_ultima_voz_nao_mede_latencias(self) -> None:
         avaliacao = _avaliar(*sn.sessao_falsa(TROCAS, INICIO, com_ultima_voz=False))
-        self.assertEqual((avaliacao.local_ms, avaliacao.geral_ms, avaliacao.primeiro_som_ms), ([], [], []))
+        self.assertEqual((avaliacao.local_ms, avaliacao.cerebro_ms, avaliacao.pesquisa_ms), ([], [], []))
         self.assertTrue(any("ultima voz" in nota for nota in avaliacao.notas))
         self.assertEqual(avaliacao.estado, sn.ESTADO_NAO_CUMPRIDA)
 
@@ -307,22 +474,19 @@ class _RelogioDeParede:
 
 
 class TestContratoComOLogDoJarvis(unittest.TestCase):
-    """O jarvis residente (pecas falsas) escreve o log; o script le-o e mede desde a ultima voz."""
+    """O jarvis sem cerebro (interprete local, pecas falsas) escreve o log; o script le-o e mede desde a ultima voz."""
 
     def setUp(self) -> None:
         pasta = tempfile.TemporaryDirectory()
         self.addCleanup(pasta.cleanup)
         self.pasta = Path(pasta.name)
         self.parede = _RelogioDeParede(INICIO)
-        self.arranque = ArranqueFalso(saida_json("It is sunny in Lisbon today."))
-        perguntas = perguntas_de_teste(self.arranque, self.pasta / "perguntas", lingua="en")
         self.m = Montagem(
             [
                 resposta_llm("pergunta_geral", "", "What is the weather in Lisbon today?"),
                 resposta_llm("ditar_prompt", "", "Add a short section about tests to the readme."),
             ],
             lingua="en",
-            perguntas=perguntas,
         )
         self.addCleanup(self.m.jarvis.fechar)
         self.log = LogDaSessao(pasta=self.pasta, consola=StringIO(), quando=INICIO, relogio_de_parede=self.parede)
@@ -366,42 +530,169 @@ class TestContratoComOLogDoJarvis(unittest.TestCase):
         self._passar(5)
 
     def test_hora_pergunta_geral_e_which_project(self) -> None:
-        self._troca("n-01", ["what time is it"])
-        self._troca("n-07", ["what's the weather like in Lisbon today"])
-        self._troca("n-11", ["tell it to add a short section about tests to the readme"])
-        self._troca("n-04", ["tell it to add a short section about tests to the readme"], marca=sn.POUCO_NATURAL)
+        self._troca("n-02", ["what time is it"])
+        self._troca("n-06", ["what's the weather like in Lisbon today"])
+        self._troca("n-13", ["tell it to add a short section about tests to the readme"])
+        self._troca("n-08", ["tell it to add a short section about tests to the readme"], marca=sn.POUCO_NATURAL)
         self.log.fechar()
         texto = self.log.caminho.read_text(encoding="utf-8")
         # O jarvis escreve a ultima voz e as duas medidas desde ela.
         self.assertIn("frase #1 | ultima voz: 2026-09-27 10:00:01.400 | 600 ms antes do fim da escuta", texto)
         self.assertIn("frase #1 | inicio da resposta falada: 100 ms desde o fim da fala", texto)
         self.assertIn("frase #1 | resposta falada desde a ultima voz: 700 ms", texto)
-        self.assertIn("pergunta | resposta falada: 700 ms desde a ultima voz da frase #2", texto)
+        # Sem o cerebro, a pergunta geral nao sai do PC: a resposta e a frase local.
+        self.assertIn("pergunta geral | sem o cerebro: nada saiu do PC", texto)
+        self.assertIn("frase #2 | resposta falada desde a ultima voz: 700 ms", texto)
 
         leitura = sn.ler_logs([self.log.caminho])
         atribuidas = sn.atribuir(self.sessao.trocas, leitura)
-        horas = atribuidas["n-01"][0]
+        horas = atribuidas["n-02"][0]
         self.assertEqual([(f.intencao, f.fala_ms, f.geral) for f in horas], [("horas", 700.0, False)])
-        pergunta = atribuidas["n-07"][0]
+        pergunta = atribuidas["n-06"][0]
         self.assertEqual(
-            # A resposta chega depressa: sem aviso curto, a primeira coisa que soa e a resposta.
-            [(f.intencao, f.fala_ms, f.resposta_geral_ms) for f in pergunta], [("pergunta_geral", None, 700.0)]
+            [(f.intencao, f.fala_ms, f.resposta_geral_ms) for f in pergunta], [("pergunta_geral", 700.0, None)]
         )
         # O ditado sem projeto: o jarvis pergunta o projeto, e ali a pergunta e esperada.
-        sem_projeto = sn.ResultadoDaTroca(POR_ID["n-11"], self.sessao.registo("n-11"), atribuidas["n-11"][0])
+        sem_projeto = sn.ResultadoDaTroca(POR_ID["n-13"], self.sessao.registo("n-13"), atribuidas["n-13"][0])
         self.assertEqual([f.perguntas for f in sem_projeto.frases], [1])
         self.assertEqual(sem_projeto.perguntas_a_mais, 0)
         # A frase seguinte cai no recap ainda pendente e o jarvis volta a perguntar: a mais.
-        a_mais = sn.ResultadoDaTroca(POR_ID["n-04"], self.sessao.registo("n-04"), atribuidas["n-04"][0])
+        a_mais = sn.ResultadoDaTroca(POR_ID["n-08"], self.sessao.registo("n-08"), atribuidas["n-08"][0])
         self.assertEqual([(f.resposta_ao_recap, f.motivo) for f in a_mais.frases], [(True, "resposta nao percebida")])
         self.assertEqual(a_mais.perguntas_a_mais, 1)
 
         avaliacao = sn.avaliar_sessao(self.sessao, TROCAS, leitura)
         self.assertEqual(avaliacao.estado, sn.ESTADO_INCOMPLETA)
-        self.assertEqual(avaliacao.geral_ms, [700.0])
+        self.assertEqual(avaliacao.geral_ms, [], "nenhuma resposta do Claude pelo interprete local")
         self.assertEqual(avaliacao.primeiro_som_ms, [700.0])
         self.assertEqual(avaliacao.perguntas_a_mais, 1)
         self.assertNotIn("atlas", sn.texto_do_relatorio(avaliacao))
+
+
+class TestContratoComOCerebro(unittest.TestCase):
+    """O jarvis com o cerebro verdadeiro (CLI falso) escreve o log; o script classifica e mede."""
+
+    def setUp(self) -> None:
+        # Guarda: o subprocess.Popen verdadeiro nunca pode ser chamado.
+        self.popen_real: list = []
+
+        def guarda(*args, **kwargs):
+            self.popen_real.append(args)
+            raise AssertionError("subprocess.Popen real chamado num teste")
+
+        remendo = mock.patch.object(subprocess, "Popen", new=guarda)
+        remendo.start()
+        self.addCleanup(remendo.stop)
+        pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(pasta.cleanup)
+        self.pasta = Path(pasta.name)
+        self.parede = _RelogioDeParede(INICIO)
+        self.cli = CliFalso(
+            self._demora(0.5, delta("I'm doing well, thanks."), resultado("I'm doing well, thanks.")),
+            self._demora(
+                2.4,
+                uso_da_web("w1"),
+                delta("It is sunny in Lisbon today."),
+                resultado("It is sunny in Lisbon today."),
+            ),
+            self._demora(0.3, delta("Tomorrow looks sunny too."), resultado("Tomorrow looks sunny too.")),
+        )
+        self.cerebro = Cerebro(
+            ConfigCerebro(limite_s=5.0),
+            "en",
+            localizacao="Lisbon, Portugal",
+            nomes_de_projeto=["atlas", "orbita"],
+            cli=CLI_FALSO,
+            arrancar=self.cli,
+            pasta=self.pasta / "neutra",
+            hoje=lambda: HOJE,
+        )
+        self.m = Montagem(lingua="en", cerebro=self.cerebro)
+        self.addCleanup(self.m.jarvis.fechar)
+        self.log = LogDaSessao(pasta=self.pasta, consola=StringIO(), quando=INICIO, relogio_de_parede=self.parede)
+        self.addCleanup(self.log.fechar)
+        self.m.jarvis.log = self.log
+        self.log.linha("jarvis a arrancar | log em logs/jarvis-teste.log")
+        self.log.bruto("   JARVIS PRONTO em 4.2 s (meta <= 30 s)")
+        self.log.bruto("   ouvido: Microfone Ficticio de Teste (MME)")
+        self.sessao = sn.Sessao(fase=sn.FASE_FINAL, projetos={"<projeto-1>": "atlas", "<projeto-2>": "orbita"})
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.popen_real, [], "o subprocess.Popen real foi chamado")
+
+    def _demora(self, segundos: float, *eventos):
+        """Um guiao do CLI falso cuja resposta leva `segundos` no relogio do jarvis."""
+
+        def guiao(processo, _texto: str) -> None:
+            self.m.avancar(segundos)
+            processo.emitir(init(), inicio(), *eventos)
+
+        return guiao
+
+    def _troca(self, id_: str, texto: str, gatilho: str = GATILHO_TECLA) -> None:
+        registo = sn.RegistoDaTroca(id_, sn.FEITA, inicio=agora_iso(self.parede()), marca=sn.NATURAL)
+        self.parede.agora += datetime.timedelta(seconds=2)
+        self.m.avancar(2)
+        self.m.ouvir(texto, gatilho=gatilho, ultima_voz=self.m.relogio() - 0.6)
+        self.assertTrue(self.m.jarvis.esperar_pergunta(5.0), "a thread do cerebro nao acabou")
+        self.parede.agora += datetime.timedelta(seconds=2)
+        registo.fim = agora_iso(self.parede())
+        self.sessao.trocas.append(registo)
+        self.parede.agora += datetime.timedelta(seconds=5)
+        self.m.avancar(1)
+
+    def test_caminho_rapido_cerebro_e_pesquisa_medidos_desde_a_ultima_voz(self) -> None:
+        self._troca("n-01", "hey jarvis, how are you doing?")
+        self._troca("n-02", "what time is it")
+        self._troca("n-06", "what's the weather like in Lisbon today?")
+        self._troca("n-07", "and tomorrow?", gatilho=GATILHO_JANELA)
+        self.log.fechar()
+        texto = self.log.caminho.read_text(encoding="utf-8")
+        self.assertIn("cerebro | resposta falada: 1200 ms desde a ultima voz da frase #1", texto)
+        self.assertIn("pesquisa web: sim (1 uso(s), 1 pesquisa(s))", texto)
+        self.assertEqual(len(self.cli.processos), 1, "uma so sessao do cerebro")
+
+        leitura = sn.ler_logs([self.log.caminho])
+        atribuidas = sn.atribuir(self.sessao.trocas, leitura)
+        resumo = {
+            id_: [(f.caminho, f.fala_ms, f.resposta_cerebro_ms) for f in frases]
+            for id_, (frases, _interrupcoes) in atribuidas.items()
+        }
+        self.assertEqual(
+            resumo,
+            {
+                "n-01": [("brain", 1200.0, 1200.0)],
+                "n-02": [("local", 700.0, None)],
+                "n-06": [("brain + web search", 3100.0, 3100.0)],
+                "n-07": [("brain", 1000.0, 1000.0)],
+            },
+        )
+        entradas = [f.entrada_do_cerebro for frases, _ in atribuidas.values() for f in frases if f.do_cerebro]
+        self.assertEqual(entradas, [5112] * 3, "input + cache lida + cache escrita da linha final")
+
+        avaliacao = sn.avaliar_sessao(self.sessao, TROCAS, leitura)
+        self.assertEqual(avaliacao.estado, sn.ESTADO_INCOMPLETA)
+        self.assertEqual(avaliacao.cerebro_ms, [1200.0, 1000.0])
+        self.assertEqual(avaliacao.pesquisa_ms, [3100.0])
+        self.assertEqual(avaliacao.local_ms, [700.0])
+        medidas = {m.nome: m for m in avaliacao.medidas}
+        self.assertTrue(medidas[sn.NOME_CEREBRO].cumpre)
+        self.assertTrue(medidas[sn.NOME_PESQUISA].cumpre)
+        self.assertTrue(medidas[sn.NOME_LOCAL].cumpre)
+        self.assertNotIn("general answer, last voice -> first answer sentence", medidas)
+        relatorio = sn.texto_do_relatorio(avaliacao)
+        self.assertIn("| n-06 | pesquisa | natural | 1 | 0 | brain + web search | - | 3100 ms | - |", relatorio)
+        self.assertNotIn("atlas", relatorio)
+        self.assertNotIn("Lisbon", relatorio)
+
+    def test_uma_resposta_lenta_do_cerebro_falha_a_meta(self) -> None:
+        self.cli.guioes = [self._demora(1.5, delta("Fine, thanks."), resultado("Fine, thanks."))]
+        self._troca("n-01", "hey jarvis, how are you doing?")
+        self.log.fechar()
+        avaliacao = sn.avaliar_sessao(self.sessao, TROCAS, sn.ler_logs([self.log.caminho]))
+        self.assertEqual(avaliacao.cerebro_ms, [2200.0])
+        medida = next(m for m in avaliacao.medidas if m.nome == sn.NOME_CEREBRO)
+        self.assertFalse(medida.cumpre)
 
 
 class TestSessaoGuiada(unittest.TestCase):

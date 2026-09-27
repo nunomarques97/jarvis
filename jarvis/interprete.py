@@ -3318,19 +3318,22 @@ class Interprete:
 
     # -- correcao antes da confirmacao --
 
-    def corrigir(self, anterior: Interpretacao, instrucao: str | None, tipo: str) -> Interpretacao:
+    def corrigir(
+        self, anterior: Interpretacao, instrucao: str | None, tipo: str, *, com_llm: bool = True
+    ) -> Interpretacao:
         """Aplica "nao, muda X para Y" ou "acrescenta ..." a um pedido por confirmar.
 
         Devolve o pedido novo, mantendo tudo o que a edicao nao muda. Quando a
         edicao nao se consegue aplicar (LLM em falta e nada mecanico a fazer,
         ou uma resposta que nao muda nada), a intencao e `desconhecido` e
         quem pergunta mantem o pedido anterior. Uma edicao financeira da
-        `recusado`. Nunca levanta; nunca executa nada.
+        `recusado`. Nunca levanta; nunca executa nada. Com `com_llm` falso
+        nao ha nenhum pedido ao Ollama: so a edicao mecanica.
         """
         if tipo not in TIPOS_DE_CORRECAO:
             raise ValueError(f"tipo de correcao desconhecido: {tipo!r}")
         inicio = self._relogio()
-        resultado = self._corrigir(anterior, instrucao, tipo)
+        resultado = self._corrigir(anterior, instrucao, tipo, com_llm)
         return _com_latencia(resultado, self._relogio() - inicio)
 
     def _falha_da_correcao(self, texto: str, motivo: str, modelo: str | None = None) -> Interpretacao:
@@ -3338,7 +3341,7 @@ class Interprete:
             texto, "desconhecido", None, "", "recurso", motivo, so_confirmacao=True, modelo=modelo
         )
 
-    def _corrigir(self, anterior: Interpretacao, instrucao: str | None, tipo: str) -> Interpretacao:
+    def _corrigir(self, anterior: Interpretacao, instrucao: str | None, tipo: str, com_llm: bool) -> Interpretacao:
         texto = sem_palavra_de_ativacao(limpar_texto(instrucao or "")[:MAXIMO_DO_TEXTO])
         if not texto:
             return self._falha_da_correcao(texto, "correcao vazia")
@@ -3366,9 +3369,12 @@ class Interprete:
         ]
         motivos: list[str] = []
         novo: tuple[str, str | None, str] | None = None
-        escolha = self._modelo_da_frase()
-        modelo = escolha.modelo
+        modelo: str | None = None
         try:
+            if not com_llm:
+                raise MotorIndisponivel("so a correcao a letra")
+            escolha = self._modelo_da_frase()
+            modelo = escolha.modelo
             conteudo = self._conversar(escolha, mensagens, motivos)
             intencao, projeto, prompt, financeiro = validar_resposta_do_llm(conteudo, self._nomes)
         except MotorIndisponivel as erro:
